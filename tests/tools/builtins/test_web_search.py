@@ -184,6 +184,113 @@ def test_perplexity_missing_key_returns_error(tool_ctx: ToolContext) -> None:
     assert "api_key" in result
 
 
+# ── search_provider: nimble ──────────────────────────
+
+
+def test_nimble_backend_via_spec_config(tool_ctx: ToolContext) -> None:
+    """
+    With search_provider=nimble and api_key in spec config,
+    the tool delegates to Nimble AI web search.
+    """
+    fake_response = MagicMock()
+    fake_response.json.return_value = {
+        "results": [
+            {
+                "title": "Nimble Docs",
+                "url": "https://docs.nimbleway.com",
+                "description": "Web data platform.",
+            },
+        ],
+        "answer": None,
+        "total_results": 1,
+    }
+
+    tool = WebSearchTool(
+        config={
+            "search_provider": "nimble",
+            "api_key": "spec-nimble-key",
+        },
+        llm_provider="anthropic",
+    )
+    with patch("omnigent.tools.builtins.web_search_nimble.httpx.post") as mock_post:
+        mock_post.return_value = fake_response
+        result = tool.invoke(json.dumps({"query": "nimble"}), tool_ctx)
+
+    # Nimble result list made it through the unified tool pipeline.
+    assert "1. Nimble Docs" in result
+    assert "https://docs.nimbleway.com" in result
+    assert "Web data platform." in result
+
+
+def test_nimble_answer_shown_first_when_present(tool_ctx: ToolContext) -> None:
+    """
+    A non-null ``answer`` (enterprise answer mode) is shown before
+    the result list.
+    """
+    fake_response = MagicMock()
+    fake_response.json.return_value = {
+        "answer": "Nimble is a web data platform.",
+        "results": [
+            {"title": "Home", "url": "https://nimbleway.com", "description": "..."},
+        ],
+    }
+
+    tool = WebSearchTool(
+        config={"search_provider": "nimble", "api_key": "k"},
+        llm_provider="anthropic",
+    )
+    with patch("omnigent.tools.builtins.web_search_nimble.httpx.post") as mock_post:
+        mock_post.return_value = fake_response
+        result = tool.invoke(json.dumps({"query": "nimble"}), tool_ctx)
+
+    assert result.startswith("Nimble is a web data platform.")
+    assert "1. Home" in result
+
+
+def test_nimble_missing_key_returns_error(tool_ctx: ToolContext) -> None:
+    """
+    With search_provider=nimble but no api_key, returns error.
+    """
+    tool = WebSearchTool(
+        config={"search_provider": "nimble"},
+        llm_provider="anthropic",
+    )
+    result = tool.invoke(json.dumps({"query": "test"}), tool_ctx)
+    assert "api_key" in result
+
+
+def test_nimble_spec_config_used_in_http_call(tool_ctx: ToolContext) -> None:
+    """
+    api_key from spec config is sent as a Bearer header, and the
+    request body carries query / max_results / search_depth.
+    """
+    fake_response = MagicMock()
+    fake_response.json.return_value = {"results": []}
+
+    tool = WebSearchTool(
+        config={
+            "search_provider": "nimble",
+            "api_key": "spec-nimble",
+            "max_results": "7",
+        },
+        llm_provider="anthropic",
+    )
+    with patch("omnigent.tools.builtins.web_search_nimble.httpx.post") as mock_post:
+        mock_post.return_value = fake_response
+        tool.invoke(json.dumps({"query": "test"}), tool_ctx)
+
+    headers = mock_post.call_args.kwargs["headers"]
+    assert headers["Authorization"] == "Bearer spec-nimble", (
+        f"Expected spec config api_key in header, got {headers['Authorization']!r}"
+    )
+    body = mock_post.call_args.kwargs["json"]
+    assert body["query"] == "test"
+    # max_results comes from config as a str ("7") and must be coerced to int.
+    assert body["max_results"] == 7, f"Expected int 7, got {body['max_results']!r}"
+    # Default tier is the non-enterprise 'lite' (never 'fast').
+    assert body["search_depth"] == "lite"
+
+
 # ── No search_provider set ───────────────────────────
 
 
@@ -198,6 +305,7 @@ def test_no_search_provider_returns_help_message(tool_ctx: ToolContext) -> None:
     assert "search_provider" in result, f"Should tell user to set search_provider. Got: {result}"
     assert "google" in result.lower()
     assert "perplexity" in result.lower()
+    assert "nimble" in result.lower()
 
 
 # ── Spec config passed through ───────────────────────
