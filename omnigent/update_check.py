@@ -7,15 +7,20 @@ Two install shapes are supported:
   ``git fetch`` and ``rev-list`` to count how many commits ``HEAD`` is
   behind ``origin/main`` (or ``origin/master``). The result is cached
   to ``~/.omnigent/.update_check.json`` so the (potentially slow)
-  ``git fetch`` only runs once per staleness window.
+  ``git fetch`` only runs once per staleness window. The notice points
+  the user at ``git pull``.
 
-* **Installed wheel** (``uv tool install git+<repo>``,
-  ``pip install <pkg>``, ``pipx install``, etc.): no clone is reachable
-  on disk, so we read the install metadata that the installer wrote into
-  the package's ``.dist-info/`` directory and nag when the install is
-  more than ``_INSTALL_STALENESS_SECONDS`` old. The exact upgrade
-  command we suggest is tailored to the installer (uv/pip/pipx) and to
-  whether the install came from a VCS URL or a registry.
+* **Installed wheel** (``uv tool install omnigent``,
+  ``pip install omnigent``, ``pipx install``, Homebrew, etc.): no clone
+  is reachable on disk, so we compare the installed version against the
+  latest release on PyPI and nag *only when a strictly newer release
+  exists* — never merely because the install is old. To avoid adding
+  latency to the hot path, the foreground only ever reads the cached
+  "latest version" and prints from it; the (network) PyPI lookup runs in
+  a detached background process (:func:`refresh_update_cache`) that
+  refreshes the cache for the next invocation. The notice fires once per
+  new release (tracked via ``last_notified_version``) and points the
+  user at ``omni upgrade``.
 
 The dispatcher in ``maybe_show_update_notice`` picks the shape based on
 whether a ``.git/`` directory is reachable from this module's path.
@@ -45,12 +50,16 @@ _CACHE_DIR = Path.home() / ".omnigent"
 _CACHE_FILE = _CACHE_DIR / ".update_check.json"
 _STALENESS_SECONDS = 4 * 60 * 60  # 4 hours
 _GIT_TIMEOUT_SECONDS = 5
-# Wheel-install staleness threshold — nag when the installed build is
-# older than this. Chosen to match the user's "1 day stale" ask; nags
-# print on every CLI invocation once the threshold is crossed, until
-# the user reinstalls.
-_INSTALL_STALENESS_SECONDS = 24 * 60 * 60  # 1 day
 _DIST_NAME = "omnigent"
+# PyPI JSON API — ``info.version`` is the latest *stable* release (PyPI
+# excludes pre-releases from that field unless every release is a
+# pre-release). This is the source of truth for "is a newer release
+# out?" because the project publishes to PyPI but does not cut GitHub
+# Releases (see .github/workflows/release-omnigent.yml).
+_PYPI_JSON_URL = f"https://pypi.org/pypi/{_DIST_NAME}/json"
+# Keep the background PyPI lookup snappy. It runs detached so it never
+# blocks the CLI, but a tight timeout still bounds the orphan's lifetime.
+_PYPI_TIMEOUT_SECONDS = 3.0
 # The placeholder that PEP 610 tooling (pip, newer uv) writes into
 # ``direct_url.json`` in place of a URL's userinfo. See
 # ``_unredact_ssh_userinfo`` for why we have to repair it.
@@ -70,18 +79,25 @@ class _CacheEntry:
         has pulled (HEAD moves) so the stale count can be rechecked
         cheaply without a fresh ``git fetch``.
     :param kind: Which detection path wrote this entry —
-        ``"clone"`` for the dev-clone (``git fetch``) path, or some
-        other tag for future install shapes. Defaults to ``"clone"``
-        so legacy caches written before this field existed are
-        treated as clone caches. The wheel-install path does not
-        cache (its dist-info reads are cheap), so no ``"wheel"`` tag
-        is currently written.
+        ``"clone"`` for the dev-clone (``git fetch``) path or
+        ``"wheel"`` for the installed-wheel (PyPI) path. Defaults to
+        ``"clone"`` so legacy caches written before this field existed
+        are treated as clone caches.
+    :param latest_version: The latest release version seen on PyPI for
+        the wheel path, e.g. ``"0.2.0"``. Empty string when unknown
+        (clone path, or no successful PyPI lookup yet).
+    :param last_notified_version: The version the wheel-path notice was
+        last shown for, e.g. ``"0.2.0"``. Used to fire the "update
+        available" notice exactly once per new release rather than on
+        every invocation. Empty string when no notice has been shown.
     """
 
     last_check_epoch: float
     commits_behind: int
     head_sha: str = ""
     kind: str = "clone"
+    latest_version: str = ""
+    last_notified_version: str = ""
 
 
 @dataclass
@@ -203,16 +219,19 @@ def _run_dev_clone_check(repo_root: Path) -> None:
 
 
 def _run_installed_wheel_check() -> None:
-    """Run the installed-wheel update check (metadata-driven).
+    """Run the installed-wheel update check (PyPI-version-driven).
 
-    Reads ``INSTALLER``, ``direct_url.json``, and ``uv_cache.json``
-    from the package's ``.dist-info/`` directory to determine when
-    the package was installed and which installer wrote it. Prints
-    a nag when the install is older than ``_INSTALL_STALENESS_SECONDS``.
+    Compares the installed version against the latest release recorded
+    in the cache and prints an "update available" notice when a strictly
+    newer release exists — and only once per new release, tracked via
+    ``last_notified_version``. The notice points the user at
+    ``omni upgrade``.
 
-    No cache — the underlying dist-info reads are cheap (a few small
-    files), and once the threshold is crossed the user should see the
-    nag on every invocation until they upgrade.
+    The foreground never touches the network: it reads the cached latest
+    version (written by :func:`refresh_update_cache`) and, when that
+    cache is missing or stale, kicks off a detached background refresh so
+    the *next* invocation has fresh data. This keeps the hot path at zero
+    added latency — the failure mode of the old install-age nag.
     """
     try:
         info = _read_installed_wheel_info()
@@ -225,12 +244,145 @@ def _run_installed_wheel_check() -> None:
         # Editable install with no .git/ reachable — most likely a
         # ``pip install -e .`` outside the source tree. The clone path
         # would have caught this if .git/ were reachable; there's no
-        # meaningful "install age" for an editable install, so bail.
+        # PyPI release to compare an editable install against, so bail.
         return
 
-    age_seconds = int(time.time() - info.install_time_epoch)
-    if age_seconds >= _INSTALL_STALENESS_SECONDS:
-        _print_install_notice(info, age_seconds)
+    cache = _read_cache()
+    if (
+        cache is not None
+        and cache.kind == "wheel"
+        and cache.latest_version
+        and _is_newer(cache.latest_version, info.package_version)
+        and cache.latest_version != cache.last_notified_version
+    ):
+        _print_pypi_notice(info.package_version, cache.latest_version)
+        # Stamp the version we just nagged about so the notice fires
+        # exactly once per new release (until an even newer one ships).
+        _write_cache(
+            _CacheEntry(
+                last_check_epoch=cache.last_check_epoch,
+                commits_behind=0,
+                kind="wheel",
+                latest_version=cache.latest_version,
+                last_notified_version=cache.latest_version,
+            )
+        )
+
+    # Refresh the cached "latest version" out of band when it is missing,
+    # stale, or was written by the (other-shape) clone path.
+    if cache is None or cache.kind != "wheel" or _is_stale(cache):
+        _spawn_background_refresh()
+
+
+def _is_newer(latest: str, current: str) -> bool:
+    """Return whether *latest* is a strictly newer release than *current*.
+
+    Uses PEP 440 comparison (``packaging.version``) so pre-releases,
+    post-releases, and dev builds order correctly. Falls back to a string
+    inequality when either value is not a valid PEP 440 version, so a
+    malformed PyPI response can never crash the check.
+
+    :param latest: Candidate latest version, e.g. ``"0.2.0"``.
+    :param current: The installed version, e.g. ``"0.1.0"``.
+    :returns: ``True`` when ``latest`` is strictly greater than
+        ``current``.
+    """
+    from packaging.version import InvalidVersion, parse
+
+    try:
+        return parse(latest) > parse(current)
+    except InvalidVersion:
+        return latest != current and bool(latest)
+
+
+def fetch_latest_pypi_version() -> str | None:
+    """Fetch the latest released ``omnigent`` version from the PyPI JSON API.
+
+    Network call with a tight timeout, swallowing every error so the
+    update check can never break (or slow) the CLI. Intended to run from
+    the detached background refresh, not the hot path.
+
+    :returns: The latest stable version string from ``info.version``
+        (e.g. ``"0.2.0"``), or ``None`` on any network / parse error or
+        non-200 response.
+    """
+    import httpx
+
+    try:
+        resp = httpx.get(_PYPI_JSON_URL, timeout=_PYPI_TIMEOUT_SECONDS)
+    except httpx.HTTPError:
+        return None
+    if resp.status_code != 200:
+        return None
+    try:
+        version = resp.json()["info"]["version"]
+    except (ValueError, KeyError, TypeError):
+        return None
+    return version if isinstance(version, str) and version else None
+
+
+def refresh_update_cache() -> None:
+    """Refresh the cached "latest PyPI version" for the wheel path.
+
+    Runs in a detached background process spawned by
+    :func:`_spawn_background_refresh` (via ``python -c``), so it must be
+    completely silent and must never raise. Performs the network PyPI
+    lookup the foreground deliberately avoids and writes the result to
+    the shared cache, preserving ``last_notified_version`` so a pending
+    "fire once per release" notice is not re-armed.
+    """
+    # Background best-effort: a crash here must never surface, so swallow
+    # everything (the early returns below still exit cleanly).
+    with contextlib.suppress(Exception):
+        if os.environ.get(_ENV_SKIP):
+            return
+        # Only the wheel shape consults PyPI; a clone refreshes via git.
+        if _find_repo_root() is not None:
+            return
+        info = _read_installed_wheel_info()
+        if info is None or info.is_editable:
+            return
+        latest = fetch_latest_pypi_version()
+        if latest is None:
+            return
+        prev = _read_cache()
+        last_notified = (
+            prev.last_notified_version if prev is not None and prev.kind == "wheel" else ""
+        )
+        _write_cache(
+            _CacheEntry(
+                last_check_epoch=time.time(),
+                commits_behind=0,
+                kind="wheel",
+                latest_version=latest,
+                last_notified_version=last_notified,
+            )
+        )
+
+
+def _spawn_background_refresh() -> None:
+    """Spawn a detached process to refresh the PyPI cache, fire-and-forget.
+
+    Uses ``python -c`` rather than re-invoking the ``omni`` CLI so the
+    refresh cannot recurse back into :func:`maybe_show_update_notice`,
+    and runs in its own session with all standard streams sent to
+    ``/dev/null`` so it neither blocks nor pollutes the foreground.
+    Any spawn failure is swallowed — the worst case is simply that the
+    cache is refreshed on a later invocation instead.
+    """
+    with contextlib.suppress(OSError, ValueError):
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "from omnigent.update_check import refresh_update_cache as r; r()",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
 
 
 # ------------------------------------------------------------------
@@ -286,6 +438,8 @@ def _read_cache() -> _CacheEntry | None:
             # Legacy caches (written before this field existed) get
             # the default ``"clone"`` — they were all clone caches.
             kind=str(data.get("kind", "clone")),
+            latest_version=str(data.get("latest_version", "")),
+            last_notified_version=str(data.get("last_notified_version", "")),
         )
     except (OSError, json.JSONDecodeError, KeyError, ValueError, TypeError):
         return None
@@ -315,6 +469,8 @@ def _write_cache(entry: _CacheEntry) -> None:
             "commits_behind": entry.commits_behind,
             "head_sha": entry.head_sha,
             "kind": entry.kind,
+            "latest_version": entry.latest_version,
+            "last_notified_version": entry.last_notified_version,
         }
     )
     # ``dir=`` on the same filesystem guarantees atomic replace.
@@ -459,6 +615,32 @@ def _print_notice(commits_behind: int) -> None:
         (f"{commits_behind}", "bold"),
         " commit(s) ahead.\nRun ",
         ("git pull", "bold"),
+        " to update.",
+    )
+    console.print(Panel(body, border_style="yellow", expand=False))
+
+
+def _print_pypi_notice(current: str, latest: str) -> None:
+    """Print the installed-wheel "update available" notice to stderr.
+
+    Informational only — it names the new release and points the user at
+    ``omni upgrade``; the actual upgrade (and the graceful server/daemon
+    cycle) lives in that command, not here.
+
+    :param current: The installed version, e.g. ``"0.1.0"``.
+    :param latest: The newer release available on PyPI, e.g. ``"0.2.0"``.
+    """
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.text import Text
+
+    console = Console(stderr=True)
+    body = Text.assemble(
+        ("Update available", "bold yellow"),
+        " — omnigent ",
+        (latest, "bold"),
+        f" is out (you have {current}).\nRun ",
+        ("omni upgrade", "bold"),
         " to update.",
     )
     console.print(Panel(body, border_style="yellow", expand=False))
@@ -845,40 +1027,6 @@ def _build_upgrade_suggestion(info: _InstalledWheelInfo) -> _UpgradeSuggestion:
     )
 
 
-def _stdin_is_tty() -> bool:
-    """Return ``True`` when ``sys.stdin`` is connected to a terminal.
-
-    Wrapped as a module-level helper so tests can monkeypatch the
-    answer directly without having to replace ``sys.stdin`` itself
-    (replacing the stream would also break Rich's input-reading path
-    used by the confirmation prompt).
-
-    :returns: ``True`` for an interactive terminal, ``False`` for
-        piped/redirected stdin (CI, ``< /dev/null``, etc.).
-    """
-    return sys.stdin.isatty()
-
-
-def _prompt_yes_no(console: Console, question: str) -> bool:
-    """Prompt the user with a yes/no Rich confirmation, defaulting to no.
-
-    Wrapped as a module-level helper so tests can monkeypatch the
-    answer without having to feed bytes through stdin. The Rich
-    ``Confirm`` import is deferred so this module stays cheap to
-    import.
-
-    :param console: The Rich ``Console`` (stderr) used by the
-        surrounding panel — passing it keeps the prompt visually
-        attached to the nag rather than landing on a separate
-        stream.
-    :param question: Prompt text, e.g. ``"Run this now?"``.
-    :returns: ``True`` for yes, ``False`` for no or an empty answer.
-    """
-    from rich.prompt import Confirm
-
-    return Confirm.ask(question, default=False, console=console)
-
-
 def _run_upgrade_command(command: str, console: Console) -> int:
     """Run the upgrade command in a foreground subprocess.
 
@@ -910,88 +1058,19 @@ def _run_upgrade_command(command: str, console: Console) -> int:
     return result.returncode
 
 
-def _print_install_notice(info: _InstalledWheelInfo, age_seconds: int) -> None:
-    """Print the wheel-install update notice and optionally run the upgrade.
+def upgrade_command_for_installed() -> _UpgradeSuggestion | None:
+    """Return the upgrade command for the current install, or ``None``.
 
-    Always renders the Rich panel summarizing install age + the
-    recommended upgrade command. When that command is *runnable*
-    (i.e. the installer is one we have a recipe for) AND stdin is
-    an interactive terminal, additionally prompts the user to run
-    the upgrade now. On user confirmation: shells out via
-    ``subprocess.run``, then exits the process regardless of
-    outcome — ``sys.exit(0)`` on success, ``sys.exit(1)`` on
-    failure. The exit on failure matters because the running
-    interpreter still has the OLD modules loaded in memory; if we
-    fell through into the user's original command after a failed
-    upgrade, they would silently keep running the pre-upgrade
-    code while believing they had just attempted to upgrade.
-    Exiting forces them to re-invoke (which either picks up the
-    new code on success, or surfaces the failure clearly so they
-    can investigate).
+    Convenience wrapper used by ``omni upgrade``: reads the installed
+    distribution's metadata and maps it to the installer-appropriate
+    upgrade command (``uv tool upgrade omnigent``, ``pip install -U
+    omnigent``, etc.).
 
-    When the recommended command is NOT runnable (unknown
-    installer fallback), the panel itself is the explanation and
-    we deliberately stay silent afterwards — no prompt, no skip
-    notice. When stdin is not a TTY (CI, piped, redirected) we
-    print a single-line skip notice so the absence of a prompt is
-    visible in logs.
-
-    :param info: Metadata about the install, used to format the
-        upgrade command.
-    :param age_seconds: Seconds since install — gets rounded down to
-        days for display. The minimum displayed value is ``1`` so we
-        never print ``"0 day(s) old"`` even if the threshold logic
-        ever calls us right at the boundary.
+    :returns: A :class:`_UpgradeSuggestion`, or ``None`` when the
+        package is not installed as a wheel (e.g. running from a source
+        checkout with no registered distribution).
     """
-    from rich.console import Console
-    from rich.panel import Panel
-    from rich.text import Text
-
-    days = max(1, age_seconds // 86400)
-    suggestion = _build_upgrade_suggestion(info)
-    console = Console(stderr=True)
-    body = Text.assemble(
-        ("Update check", "bold yellow"),
-        " — installed build is ",
-        (f"{days}", "bold"),
-        " day(s) old.\nRun ",
-        (suggestion.command, "bold"),
-        " to update.",
-    )
-    console.print(Panel(body, border_style="yellow", expand=False))
-
-    # Unknown installer → the "command" is prose, not an invocation.
-    # Don't offer to run it and don't print a skip notice — the
-    # panel's "reinstall X from your original source" line already
-    # tells the user we can't help further.
-    if not suggestion.runnable:
-        return
-
-    # Non-interactive stdin: prompting would block forever (CI,
-    # background jobs) or EOF immediately (``< /dev/null``).
-    # Surface the skip explicitly so a log reader can tell why no
-    # prompt was offered when the panel above promised an action.
-    if not _stdin_is_tty():
-        console.print("[dim]Skipped interactive upgrade prompt — stdin is not a TTY.[/dim]")
-        return
-
-    if not _prompt_yes_no(console, "Run this now?"):
-        return
-
-    exit_code = _run_upgrade_command(suggestion.command, console)
-    # Always exit — the running interpreter still has the
-    # pre-upgrade modules loaded. Continuing into the user's
-    # original command would either (a) silently run old code
-    # after a "successful" upgrade or (b) silently run old code
-    # while pretending the failed upgrade was a no-op. Both are
-    # confusing; forcing a re-invoke is the only honest path.
-    if exit_code == 0:
-        console.print(
-            "[green]Upgrade complete.[/green] Re-run your command to use the new version."
-        )
-        sys.exit(0)
-    console.print(
-        f"[red]Upgrade exited with status {exit_code}.[/red] "
-        "Re-run your command to retry (or unset the upgrade prompt)."
-    )
-    sys.exit(1)
+    info = _read_installed_wheel_info()
+    if info is None:
+        return None
+    return _build_upgrade_suggestion(info)
