@@ -136,9 +136,7 @@ def resolve_max_lifetime_s() -> int:
     try:
         return int(float(raw))
     except ValueError as exc:
-        raise click.ClickException(
-            f"{MAX_LIFETIME_ENV_VAR} must be a number of seconds"
-        ) from exc
+        raise click.ClickException(f"{MAX_LIFETIME_ENV_VAR} must be a number of seconds") from exc
 
 
 def managed_token_ttl_s() -> int:
@@ -652,8 +650,7 @@ class E2BSandboxLauncher(SandboxLauncher):
         _echo_lines(stderr, err=True)
         if check and returncode != 0:
             raise click.ClickException(
-                f"Remote command failed on sandbox '{sandbox_id}' "
-                f"(exit {returncode}): {command}"
+                f"Remote command failed on sandbox '{sandbox_id}' (exit {returncode}): {command}"
             )
         return RemoteCommandResult(returncode=returncode, stdout=stdout, stderr=stderr)
 

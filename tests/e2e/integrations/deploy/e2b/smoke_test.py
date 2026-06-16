@@ -141,7 +141,7 @@ def main() -> int:
         print("\n[8/8] public egress (outbound HTTPS from inside)")
         egress = launcher.run(
             sandbox_id,
-            "python3 -c \"import urllib.request as u; "
+            'python3 -c "import urllib.request as u; '
             "print(u.urlopen('https://api.github.com', timeout=15).status)\"",
             check=False,
         )
