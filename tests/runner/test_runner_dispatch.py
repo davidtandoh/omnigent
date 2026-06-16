@@ -1359,6 +1359,144 @@ def test_build_spawn_env_applies_model_override(
     assert overridden["HARNESS_CLAUDE_SDK_MODEL"] == "claude-sonnet-4-6"
 
 
+def test_build_spawn_env_claude_native_carries_ucode_provider_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Native Claude child spawns carry gateway env plus model override."""
+    from omnigent.claude_native import ClaudeNativeUcodeConfig
+
+    spec = AgentSpec(
+        spec_version=1,
+        name="native-claude",
+        executor=ExecutorSpec(
+            type="omnigent",
+            config={"harness": "claude-native", "model": "spec-model"},
+            model="spec-model",
+        ),
+    )
+    monkeypatch.setattr(
+        "omnigent.claude_native.resolve_native_claude_config",
+        lambda *, spec: ClaudeNativeUcodeConfig(
+            env={"ANTHROPIC_BASE_URL": "https://gw.example/anthropic"},
+            api_key_helper="databricks auth token --profile DEFAULT",
+            model="databricks-claude-opus-4-8",
+        ),
+    )
+
+    env = _build_spawn_env_from_spec(
+        spec,
+        "claude-native",
+        model_override="override-claude-model",
+    )
+
+    assert env == {
+        "HARNESS_CLAUDE_NATIVE_GATEWAY": "true",
+        "HARNESS_CLAUDE_NATIVE_API_KEY_HELPER": "databricks auth token --profile DEFAULT",
+        "HARNESS_CLAUDE_NATIVE_ENV_ANTHROPIC_BASE_URL": "https://gw.example/anthropic",
+        "HARNESS_CLAUDE_NATIVE_MODEL": "override-claude-model",
+    }
+
+
+def test_build_spawn_env_codex_native_carries_ucode_provider_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Native Codex child spawns carry Databricks profile plus model override."""
+    from omnigent.codex_native_app_server import NativeCodexLaunch
+
+    spec = AgentSpec(
+        spec_version=1,
+        name="native-codex",
+        executor=ExecutorSpec(
+            type="omnigent",
+            config={"harness": "codex-native", "model": "spec-model"},
+            model="spec-model",
+        ),
+    )
+    seen: dict[str, str | None] = {}
+
+    def _fake_resolve_native_codex_launch(*, model: str | None) -> NativeCodexLaunch:
+        seen["model"] = model
+        return NativeCodexLaunch(
+            config_overrides=[],
+            model=model or "databricks-gpt-5",
+            profile="DEFAULT",
+        )
+
+    monkeypatch.setattr(
+        "omnigent.codex_native_app_server.resolve_native_codex_launch",
+        _fake_resolve_native_codex_launch,
+    )
+
+    env = _build_spawn_env_from_spec(
+        spec,
+        "codex-native",
+        model_override="override-codex-model",
+    )
+
+    assert seen["model"] == "override-codex-model"
+    assert env == {
+        "HARNESS_CODEX_NATIVE_GATEWAY": "true",
+        "HARNESS_CODEX_NATIVE_DATABRICKS_PROFILE": "DEFAULT",
+        "HARNESS_CODEX_NATIVE_MODEL": "override-codex-model",
+    }
+
+
+@pytest.mark.parametrize("harness", ["claude-native", "codex-native"])
+def test_build_spawn_env_native_no_provider_path_unchanged(
+    harness: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Native harnesses still emit no routing env when no provider resolves."""
+    spec = AgentSpec(
+        spec_version=1,
+        name="native",
+        executor=ExecutorSpec(type="omnigent", config={"harness": harness}),
+    )
+    monkeypatch.setattr(
+        "omnigent.claude_native.resolve_native_claude_config",
+        lambda *, spec: None,
+    )
+    monkeypatch.setattr(
+        "omnigent.codex_native_app_server.resolve_native_codex_launch",
+        lambda *, model: SimpleNamespace(config_overrides=[], model=model, profile=None),
+    )
+
+    assert _build_spawn_env_from_spec(spec, harness) is None
+
+
+@pytest.mark.parametrize("harness", ["claude-native", "codex-native"])
+def test_build_spawn_env_native_non_databricks_provider_path_unchanged(
+    harness: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-ucode native provider paths still do not force gateway routing."""
+    from omnigent.claude_native import ClaudeNativeUcodeConfig
+
+    spec = AgentSpec(
+        spec_version=1,
+        name="native",
+        executor=ExecutorSpec(type="omnigent", config={"harness": harness}),
+    )
+    monkeypatch.setattr(
+        "omnigent.claude_native.resolve_native_claude_config",
+        lambda *, spec: ClaudeNativeUcodeConfig(
+            env={"ANTHROPIC_BASE_URL": "https://api.anthropic.com"},
+            api_key_helper="printf %s sk-ant-test",
+            model=None,
+        ),
+    )
+    monkeypatch.setattr(
+        "omnigent.codex_native_app_server.resolve_native_codex_launch",
+        lambda *, model: SimpleNamespace(
+            config_overrides=['model_provider="openai"'],
+            model=model,
+            profile=None,
+        ),
+    )
+
+    assert _build_spawn_env_from_spec(spec, harness) is None
+
+
 @pytest.mark.asyncio
 async def test_resolve_harness_config_applies_harness_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -6618,3 +6756,75 @@ async def test_create_session_reinit_preserves_existing_inbox() -> None:
             )
     finally:
         runner_app._session_inboxes_ref.pop(session_id, None)
+
+
+def test_build_spawn_env_claude_native_databricks_default_uses_ucode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Configured Databricks default emits native Claude gateway spawn env."""
+    from omnigent.claude_native import ClaudeNativeUcodeConfig
+
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "providers:\n"
+        "  databricks:\n"
+        "    kind: databricks\n"
+        "    default: true\n"
+        "    profile: DEFAULT\n"
+    )
+    monkeypatch.setattr(
+        "omnigent.claude_native._ucode_config_for_profile",
+        lambda profile: ClaudeNativeUcodeConfig(
+            env={"ANTHROPIC_BASE_URL": "https://workspace.example/ai-gateway/anthropic"},
+            api_key_helper=f"databricks auth token --profile {profile}",
+            model="databricks-claude-opus-4-8",
+        ),
+    )
+    spec = AgentSpec(
+        spec_version=1,
+        name="native-claude",
+        executor=ExecutorSpec(type="omnigent", config={"harness": "claude-native"}),
+    )
+
+    env = _build_spawn_env_from_spec(spec, "claude-native")
+
+    assert env is not None
+    assert env["HARNESS_CLAUDE_NATIVE_GATEWAY"] == "true"
+    assert env["HARNESS_CLAUDE_NATIVE_ENV_ANTHROPIC_BASE_URL"] == (
+        "https://workspace.example/ai-gateway/anthropic"
+    )
+    assert env["HARNESS_CLAUDE_NATIVE_API_KEY_HELPER"] == "databricks auth token --profile DEFAULT"
+    assert env["HARNESS_CLAUDE_NATIVE_MODEL"] == "databricks-claude-opus-4-8"
+
+
+def test_build_spawn_env_codex_native_databricks_default_uses_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Configured Databricks default emits native Codex profile spawn env."""
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "providers:\n"
+        "  databricks:\n"
+        "    kind: databricks\n"
+        "    default: true\n"
+        "    profile: DEFAULT\n"
+    )
+    spec = AgentSpec(
+        spec_version=1,
+        name="native-codex",
+        executor=ExecutorSpec(
+            type="omnigent",
+            config={"harness": "codex-native", "model": "databricks-gpt-5"},
+            model="databricks-gpt-5",
+        ),
+    )
+
+    env = _build_spawn_env_from_spec(spec, "codex-native")
+
+    assert env == {
+        "HARNESS_CODEX_NATIVE_GATEWAY": "true",
+        "HARNESS_CODEX_NATIVE_DATABRICKS_PROFILE": "DEFAULT",
+        "HARNESS_CODEX_NATIVE_MODEL": "databricks-gpt-5",
+    }

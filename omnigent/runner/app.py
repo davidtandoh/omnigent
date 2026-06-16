@@ -27,7 +27,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     # Type-only import: the runner keeps codex deps out of its runtime import
     # graph (they are imported lazily inside the codex-native helpers).
-    from omnigent.codex_native_app_server import CodexAppServerClient
+    from omnigent.claude_native import ClaudeNativeUcodeConfig
+    from omnigent.codex_native_app_server import CodexAppServerClient, NativeCodexLaunch
     from omnigent.runner.cost_advisor import AdvisorTurnResult
     from omnigent.terminals.registry import TerminalListEntry
 
@@ -628,7 +629,9 @@ async def _auto_create_codex_terminal(
     # synthesis can stamp session_meta.model_provider with the provider
     # this launch actually routes through.
     default_model = launch_config.model_override or _codex_native_model_from_spec(agent_spec)
-    _codex_launch = resolve_native_codex_launch(model=default_model)
+    _codex_launch = _codex_native_launch_from_env() or resolve_native_codex_launch(
+        model=default_model
+    )
     _session_meta_provider = codex_session_meta_model_provider(_codex_launch)
     from omnigent.inner.codex_executor import _find_codex_cli
 
@@ -1677,7 +1680,6 @@ async def _auto_create_claude_terminal(
     _runner_auth = _RunnerDatabricksAuth(_auth_factory)
 
     from omnigent.claude_native import (
-        ClaudeNativeUcodeConfig,
         augment_claude_args,
         build_native_claude_terminal_env,
         resolve_native_claude_config,
@@ -1922,7 +1924,7 @@ async def _auto_create_claude_terminal(
     # CLI path.
     claude_config: ClaudeNativeUcodeConfig | None = None
     try:
-        claude_config = resolve_native_claude_config(spec=None)
+        claude_config = _claude_native_config_from_env() or resolve_native_claude_config(spec=None)
     except Exception:  # noqa: BLE001 — best-effort; fall back to native auth
         _logger.warning(
             "native-claude: could not derive a provider/ucode launch config "
@@ -4559,7 +4561,7 @@ def create_runner_app(
                 harness_name,
                 workdir=_resolved_spec_workdir(spec_entry),
             )
-            if harness_name == "claude-native" and spawn_env is None:
+            if harness_name == "claude-native":
                 from omnigent.claude_native_bridge import (
                     build_claude_native_spawn_env,
                 )
@@ -4568,8 +4570,11 @@ def create_runner_app(
                     server_client=server_client,
                     session_id=session_id,
                 )
-                spawn_env = build_claude_native_spawn_env(session_id, bridge_id=bridge_id)
-            if harness_name == "codex-native" and spawn_env is None:
+                spawn_env = _merge_spawn_env(
+                    spawn_env,
+                    build_claude_native_spawn_env(session_id, bridge_id=bridge_id),
+                )
+            if harness_name == "codex-native":
                 from omnigent.codex_native_bridge import (
                     CODEX_NATIVE_BRIDGE_ID_LABEL_KEY,
                     build_codex_native_spawn_env,
@@ -4580,7 +4585,10 @@ def create_runner_app(
                     session_id=session_id,
                 )
                 bridge_id = labels.get(CODEX_NATIVE_BRIDGE_ID_LABEL_KEY)
-                spawn_env = build_codex_native_spawn_env(session_id, bridge_id=bridge_id)
+                spawn_env = _merge_spawn_env(
+                    spawn_env,
+                    build_codex_native_spawn_env(session_id, bridge_id=bridge_id),
+                )
             _session_spec_cache[session_id] = spec_entry
             from omnigent.llms.context_window import get_model_context_window
             from omnigent.runtime.workflow import _resolve_spec_model
@@ -8041,15 +8049,18 @@ def create_runner_app(
                         "detail": _client_safe_error_detail(exc, context="spec resolve"),
                     },
                 )
-        if harness_name == "claude-native" and spawn_env is None:
+        if harness_name == "claude-native":
             from omnigent.claude_native_bridge import build_claude_native_spawn_env
 
             bridge_id = await _claude_native_bridge_id_for_session(
                 server_client=server_client,
                 session_id=conv_id,
             )
-            spawn_env = build_claude_native_spawn_env(conv_id, bridge_id=bridge_id)
-        if harness_name == "codex-native" and spawn_env is None:
+            spawn_env = _merge_spawn_env(
+                spawn_env,
+                build_claude_native_spawn_env(conv_id, bridge_id=bridge_id),
+            )
+        if harness_name == "codex-native":
             from omnigent.codex_native_bridge import (
                 CODEX_NATIVE_BRIDGE_ID_LABEL_KEY,
                 build_codex_native_spawn_env,
@@ -8060,7 +8071,10 @@ def create_runner_app(
                 session_id=conv_id,
             )
             bridge_id = labels.get(CODEX_NATIVE_BRIDGE_ID_LABEL_KEY)
-            spawn_env = build_codex_native_spawn_env(conv_id, bridge_id=bridge_id)
+            spawn_env = _merge_spawn_env(
+                spawn_env,
+                build_codex_native_spawn_env(conv_id, bridge_id=bridge_id),
+            )
 
         agent_version = dispatch.agent_version if dispatch else body.get("agent_version")
         if agent_version is not None and conv_id in _version_cache:
@@ -11658,7 +11672,129 @@ _HARNESS_MODEL_ENV_KEY: dict[str, str] = {
     "codex": "HARNESS_CODEX_MODEL",
     "pi": "HARNESS_PI_MODEL",
     "openai-agents": "HARNESS_OPENAI_AGENTS_MODEL",
+    "claude-native": "HARNESS_CLAUDE_NATIVE_MODEL",
+    "codex-native": "HARNESS_CODEX_NATIVE_MODEL",
 }
+
+
+def _build_claude_native_spawn_provider_env(
+    spec: Any,
+    *,
+    model_override: str | None,
+) -> dict[str, str] | None:
+    """
+    Build provider/ucode spawn-env for a child ``claude-native`` harness.
+
+    The child harness process ultimately starts Claude Code from
+    :func:`_auto_create_claude_terminal`. It cannot rely on the parent
+    native CLI's already-resolved env, so resolve the same native launch
+    config here and carry it through the subprocess env with harness-scoped
+    keys. ``None`` preserves the no-provider path: Claude Code uses its own
+    native ``~/.claude`` config exactly as before.
+    """
+    from omnigent.claude_native import resolve_native_claude_config
+    from omnigent.runtime.workflow import _resolve_spec_model
+
+    model = model_override or _resolve_spec_model(spec)
+    claude_config = resolve_native_claude_config(spec=spec)
+    if claude_config is None:
+        return None
+    if "ANTHROPIC_BASE_URL" not in claude_config.env or not claude_config.model:
+        return None
+    env = {
+        "HARNESS_CLAUDE_NATIVE_GATEWAY": "true",
+        "HARNESS_CLAUDE_NATIVE_API_KEY_HELPER": claude_config.api_key_helper,
+    }
+    for key, value in claude_config.env.items():
+        env[f"HARNESS_CLAUDE_NATIVE_ENV_{key}"] = value
+    if model or claude_config.model:
+        env["HARNESS_CLAUDE_NATIVE_MODEL"] = model or claude_config.model or ""
+    return env
+
+
+def _build_codex_native_spawn_provider_env(
+    spec: Any,
+    *,
+    model_override: str | None,
+) -> dict[str, str] | None:
+    """
+    Build provider/ucode spawn-env for a child ``codex-native`` harness.
+
+    The native Codex auto-launch path consumes a ``NativeCodexLaunch`` shape
+    (model, Databricks profile, and Codex ``-c`` overrides). Resolve that same
+    shape here and pass only explicit routing choices through env; an empty
+    result keeps Codex-native on its own native login/config path.
+    """
+    from omnigent.codex_native_app_server import resolve_native_codex_launch
+    from omnigent.runtime.workflow import _resolve_spec_model
+
+    model = model_override or _resolve_spec_model(spec)
+    launch = resolve_native_codex_launch(model=model)
+    env: dict[str, str] = {}
+    if launch.profile is None:
+        return None
+    env["HARNESS_CODEX_NATIVE_GATEWAY"] = "true"
+    env["HARNESS_CODEX_NATIVE_DATABRICKS_PROFILE"] = launch.profile
+    if launch.model is not None:
+        env["HARNESS_CODEX_NATIVE_MODEL"] = launch.model
+    if launch.config_overrides:
+        env["HARNESS_CODEX_NATIVE_CONFIG_OVERRIDES"] = json.dumps(launch.config_overrides)
+    return env or None
+
+
+def _merge_spawn_env(*envs: dict[str, str] | None) -> dict[str, str] | None:
+    """Merge optional spawn-env dictionaries, returning ``None`` if empty."""
+    merged: dict[str, str] = {}
+    for env in envs:
+        if env:
+            merged.update(env)
+    return merged or None
+
+
+def _claude_native_config_from_env() -> ClaudeNativeUcodeConfig | None:
+    """Read child-spawned claude-native provider config from process env."""
+    api_key_helper = os.environ.get("HARNESS_CLAUDE_NATIVE_API_KEY_HELPER")
+    if not api_key_helper:
+        return None
+    from omnigent.claude_native import ClaudeNativeUcodeConfig
+
+    prefix = "HARNESS_CLAUDE_NATIVE_ENV_"
+    terminal_env = {
+        key.removeprefix(prefix): value
+        for key, value in os.environ.items()
+        if key.startswith(prefix)
+    }
+    return ClaudeNativeUcodeConfig(
+        env=terminal_env,
+        api_key_helper=api_key_helper,
+        model=os.environ.get("HARNESS_CLAUDE_NATIVE_MODEL"),
+    )
+
+
+def _codex_native_launch_from_env() -> NativeCodexLaunch | None:
+    """Read child-spawned codex-native provider config from process env."""
+    model = os.environ.get("HARNESS_CODEX_NATIVE_MODEL")
+    profile = os.environ.get("HARNESS_CODEX_NATIVE_DATABRICKS_PROFILE")
+    raw_overrides = os.environ.get("HARNESS_CODEX_NATIVE_CONFIG_OVERRIDES")
+    overrides: list[str] = []
+    if raw_overrides:
+        try:
+            parsed = json.loads(raw_overrides)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list) and all(isinstance(item, str) for item in parsed):
+            overrides = parsed
+        else:
+            _logger.warning("Ignoring malformed HARNESS_CODEX_NATIVE_CONFIG_OVERRIDES")
+    if model is None and profile is None and not overrides:
+        return None
+    from omnigent.codex_native_app_server import NativeCodexLaunch
+
+    return NativeCodexLaunch(
+        config_overrides=overrides,
+        model=model,
+        profile=profile,
+    )
 
 
 def _build_spawn_env_from_spec(
@@ -11681,7 +11817,7 @@ def _build_spawn_env_from_spec(
         via ``--model`` in :func:`_build_claude_native_base_args`; the
         SDK harnesses have no such arg, so the override must land in the
         env var here.)
-    :returns: The spawn-env dict, or ``None`` for native / unknown harnesses.
+    :returns: The spawn-env dict, or ``None`` when no explicit routing env is needed.
     """
     try:
         from omnigent.runtime.workflow import (
@@ -11699,8 +11835,18 @@ def _build_spawn_env_from_spec(
             env = _build_pi_spawn_env(spec, workdir=workdir)
         elif harness == "openai-agents":
             env = _build_openai_agents_sdk_spawn_env(spec)
+        elif harness == "claude-native":
+            env = _build_claude_native_spawn_provider_env(
+                spec,
+                model_override=model_override,
+            )
+        elif harness == "codex-native":
+            env = _build_codex_native_spawn_provider_env(
+                spec,
+                model_override=model_override,
+            )
         else:
-            # claude-native / codex-native / unknown — no spawn-env.
+            # Unknown harness — no spawn-env.
             return None
     except ImportError:
         return None
@@ -11708,7 +11854,7 @@ def _build_spawn_env_from_spec(
     # Per-session ``/model`` override wins over everything the builder baked
     # into HARNESS_<H>_MODEL. Without this, `/model` is recorded in the
     # readout but the turn still uses the provider/catalog default.
-    if model_override:
+    if env is not None and model_override:
         model_key = _HARNESS_MODEL_ENV_KEY.get(harness)
         if model_key is not None:
             env[model_key] = model_override
