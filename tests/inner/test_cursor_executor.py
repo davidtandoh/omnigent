@@ -174,6 +174,26 @@ def test_resolve_model_drops_databricks_and_defaults_to_auto() -> None:
     assert _resolve_model(None) == "auto"
 
 
+def test_resolve_model_warns_when_dropping_a_pinned_model(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Dropping an explicit (non-cursor) model must warn, not whisper at debug —
+    otherwise a user who pinned a databricks-* model has no idea it was ignored."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="omnigent.inner.cursor_executor"):
+        assert _resolve_model("databricks-claude-opus-4-8") == "auto"
+    assert any(
+        r.levelno == logging.WARNING and "not a Cursor model" in r.getMessage()
+        for r in caplog.records
+    )
+    # No warning when there was no explicit model to honor.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="omnigent.inner.cursor_executor"):
+        assert _resolve_model(None) == "auto"
+    assert not caplog.records
+
+
 def test_sdk_message_to_events_maps_text_thinking_and_tools() -> None:
     assert isinstance(_sdk_message_to_events(_assistant("hi"))[0], TextChunk)
     think = _sdk_message_to_events(_thinking("hmm"))

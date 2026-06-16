@@ -81,8 +81,15 @@ def _resolve_model(model: str | None) -> str:
     """
     if not model or model.startswith(("databricks-", "databricks/")):
         if model:
-            logger.debug(
-                "CursorExecutor: %r is not a cursor model; using %r", model, _DEFAULT_CURSOR_MODEL
+            # Warn, not debug: the requested model is silently NOT honored
+            # (cursor has no Databricks gateway), and a debug line is invisible
+            # in the harness subprocess — so a user who pinned a databricks-*
+            # model would otherwise have no idea it was dropped.
+            logger.warning(
+                "CursorExecutor: requested model %r is not a Cursor model "
+                "(cursor has no Databricks gateway); falling back to %r auto-select.",
+                model,
+                _DEFAULT_CURSOR_MODEL,
             )
         return _DEFAULT_CURSOR_MODEL
     return model
