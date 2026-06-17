@@ -271,7 +271,7 @@ jobs:
           - **Stats:** +{meta['additions']} / -{meta['deletions']} across {meta['changedFiles']} file(s)
 
           ## PR Description
-          {(meta.get('body') or '')[:4096]}
+          {(meta.get('body') or '')[:4096]}{"  *(truncated)*" if len(meta.get('body') or '') > 4096 else ""}
 
           ## Diff
           ```diff
@@ -331,6 +331,7 @@ jobs:
           # Build the comment body safely — REVIEW_TEXT is passed via env
           # (not expression interpolation) to avoid expression injection.
           {
+            echo "<!-- polly-review-bot -->"
             echo "## <img src=\"https://raw.githubusercontent.com/omnigent-ai/omnigent/main/docs/images/omnigent-logo.svg\" alt=\"\" height=\"20\" valign=\"middle\" /> Polly AI Review"
             echo ""
             echo "$REVIEW_TEXT"
@@ -340,9 +341,9 @@ jobs:
           } > /tmp/comment.md
 
           # Upsert: edit the existing Polly comment if one exists, otherwise create.
-          # Look for the marker image in existing comments.
+          # Uses a hidden HTML marker for robust matching across heading changes.
           existing_id=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-            --paginate --jq '.[] | select(.body | contains("Polly AI Review")) | .id' \
+            --paginate --jq '.[] | select(.body | contains("<!-- polly-review-bot -->")) | .id' \
             | tail -1)
 
           if [ -n "$existing_id" ]; then
