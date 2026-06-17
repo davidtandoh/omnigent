@@ -113,14 +113,10 @@ class TerminalExitEvent:
         specs may contain credentials or other launch-only secrets.
     :param cwd: Working directory used to launch the terminal, if known.
     :param last_output: Last visible pane text captured before exit, if any.
-    :param session_was_idle: Whether the session's last PTY-derived status
-        edge was ``idle`` when the terminal exited. A native agent terminal
-        (Claude Code / pi) is long-lived and goes ``idle`` once its turn
-        completes, so an exit observed while idle is a clean shutdown after
-        the work was delivered — not a turn failure. ``False`` (the default)
-        when the session was last seen ``running`` or no PTY status was ever
-        observed, so a genuine mid-turn crash and a boot failure both still
-        fail the session.
+    :param session_was_idle: Whether the session's last PTY-derived status was
+        ``idle`` at exit. ``True`` marks a clean shutdown after the turn
+        finished; ``False`` (the default — last seen ``running``, or never
+        observed) keeps a mid-turn crash or boot failure a failure.
     """
 
     session_id: str
@@ -275,13 +271,10 @@ class SessionResourceRegistry:
         # → running / ``Stop`` → idle bracketing. Set by the runner via
         # :meth:`set_session_status_publisher`.
         self._session_status_publisher: Callable[[str, str], None] | None = None
-        # Latest PTY-derived session-status edge per session id, recorded by
-        # the native agent terminal's activity watcher (running / idle). Read
-        # by :meth:`_handle_terminal_exit` to tell a clean shutdown (the agent
-        # finished its turn → idle, then the pane closed) from a mid-turn crash
-        # (still running when the pane vanished). Writes happen on the watcher
-        # daemon thread; a single-key ``str`` assignment is atomic under the
-        # GIL, so no lock is taken on the hot activity path.
+        # Latest PTY-derived status (running/idle) per session, set by the
+        # native agent watcher. Lets :meth:`_handle_terminal_exit` tell a clean
+        # shutdown (idle) from a mid-turn crash. Written from the watcher thread;
+        # a single-key str assignment is atomic under the GIL, so no lock.
         self._last_session_status: dict[str, str] = {}
         # Optional callback invoked on the event loop when a watched terminal
         # disappears unexpectedly. The callback receives the terminal's
@@ -960,8 +953,7 @@ class SessionResourceRegistry:
             # re-emit ``running`` every poll.
             if emit_status and status_publisher is not None and last_status["value"] != "running":
                 last_status["value"] = "running"
-                # Remember the live status so a terminal exit observed while a
-                # turn is in flight is correctly read as a mid-turn crash.
+                # Track for exit classification: a pane exit now reads as a crash.
                 self._last_session_status[session_id] = "running"
                 loop.call_soon_threadsafe(status_publisher, session_id, "running")
 
@@ -1016,8 +1008,7 @@ class SessionResourceRegistry:
             # output mutates the pane (which flips back to ``running``).
             if status_publisher is not None and last_status["value"] != "idle":
                 last_status["value"] = "idle"
-                # Remember that the agent's turn completed: a later pane exit
-                # observed while idle is a clean shutdown, not a turn failure.
+                # Track for exit classification: a pane exit now reads as clean.
                 self._last_session_status[session_id] = "idle"
                 loop.call_soon_threadsafe(status_publisher, session_id, "idle")
             # Clear the activity throttle so the next working episode emits
@@ -1065,12 +1056,8 @@ class SessionResourceRegistry:
             lifecycle = observed
 
         command, args_count, cwd, last_output = _terminal_exit_diagnostics(instance)
-        # A native agent terminal is long-lived and goes ``idle`` once its
-        # turn finishes; an exit observed while idle means the pane closed
-        # after the work was delivered (clean shutdown), so the owning session
-        # must not be flipped to ``failed``. Anything else (last seen
-        # ``running``, or never observed) stays a failure so a real mid-turn
-        # crash and a boot failure both surface.
+        # Idle = clean shutdown after the turn finished. Anything else (running,
+        # or never observed → boot failure) stays a failure.
         session_was_idle = self._last_session_status.pop(session_id, None) == "idle"
 
         if self._terminal_registry is not None:
@@ -1182,9 +1169,8 @@ class SessionResourceRegistry:
                 lifecycle = self._terminal_lifecycles.pop((source_session_id, terminal_id), None)
                 if lifecycle is not None:
                     self._terminal_lifecycles[(target_session_id, terminal_id)] = lifecycle
-            # The PTY-status memo follows the pane to its new owner so a
-            # post-transfer exit is still classified against the right
-            # session's last status.
+            # Move the PTY-status memo with the pane so a post-transfer exit is
+            # classified against the right session.
             moved_status = self._last_session_status.pop(source_session_id, None)
             if moved_status is not None:
                 self._last_session_status[target_session_id] = moved_status
