@@ -10,7 +10,11 @@ import { createElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { HostFilesystemEntry } from "./useHostFilesystem";
-import { buildHostFilesystemUrl, createHostDirectory, useHostFilesystem } from "./useHostFilesystem";
+import {
+  buildHostFilesystemUrl,
+  createHostDirectory,
+  useHostFilesystem,
+} from "./useHostFilesystem";
 
 describe("buildHostFilesystemUrl", () => {
   it("returns the no-path endpoint when absolutePath is empty", () => {
