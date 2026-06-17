@@ -76,7 +76,9 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     :param items: Collected test items.
     """
     if not config.getoption("--integration") and not _is_mock_mode(config):
-        marker = pytest.mark.skip(reason="Integration tests require --integration flag or mock mode (omit --llm-api-key)")
+        marker = pytest.mark.skip(
+            reason="Integration tests require --integration flag or mock mode (omit --llm-api-key)"
+        )
         for item in items:
             item.add_marker(marker)
         return

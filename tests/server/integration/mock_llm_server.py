@@ -109,20 +109,24 @@ def sse_text_response(text: str, model: str = "mock-model") -> str:
     created_response = {**response_obj, "status": "in_progress", "output": []}
 
     seq = 0
-    events = []
+    events: list[str] = []
 
-    def _evt(data: dict) -> str:
-        return f"event: {data['type']}\ndata: {json.dumps(data)}\n\n"
+    def _add(evt_type: str, **extra: object) -> None:
+        nonlocal seq
+        data = {"type": evt_type, "sequence_number": seq, **extra}
+        events.append(
+            f"event: {evt_type}\ndata: {json.dumps(data)}\n\n"
+        )
+        seq += 1
 
-    events.append(_evt({"type": "response.created", "sequence_number": seq, "response": created_response}))
-    seq += 1
-    events.append(_evt({"type": "response.output_item.added", "sequence_number": seq, "output_index": 0, "item": message_item}))
-    seq += 1
-    events.append(_evt({"type": "response.output_text.done", "sequence_number": seq, "output_index": 0, "item_id": msg_id, "content_index": 0, "text": text}))
-    seq += 1
-    events.append(_evt({"type": "response.output_item.done", "sequence_number": seq, "output_index": 0, "item": message_item}))
-    seq += 1
-    events.append(_evt({"type": "response.completed", "sequence_number": seq, "response": response_obj}))
+    _add("response.created", response=created_response)
+    _add("response.output_item.added", output_index=0, item=message_item)
+    _add(
+        "response.output_text.done",
+        output_index=0, item_id=msg_id, content_index=0, text=text,
+    )
+    _add("response.output_item.done", output_index=0, item=message_item)
+    _add("response.completed", response=response_obj)
     return "".join(events)
 
 
@@ -174,19 +178,21 @@ def sse_tool_call_response(
     created_response = {**response_obj, "status": "in_progress", "output": []}
 
     seq = 0
-    events = []
+    events: list[str] = []
 
-    def _evt(data: dict) -> str:
-        return f"event: {data['type']}\ndata: {json.dumps(data)}\n\n"
+    def _add(evt_type: str, **extra: object) -> None:
+        nonlocal seq
+        data = {"type": evt_type, "sequence_number": seq, **extra}
+        events.append(
+            f"event: {evt_type}\ndata: {json.dumps(data)}\n\n"
+        )
+        seq += 1
 
-    events.append(_evt({"type": "response.created", "sequence_number": seq, "response": created_response}))
-    seq += 1
+    _add("response.created", response=created_response)
     for idx, item in enumerate(output):
-        events.append(_evt({"type": "response.output_item.added", "sequence_number": seq, "output_index": idx, "item": item}))
-        seq += 1
-        events.append(_evt({"type": "response.output_item.done", "sequence_number": seq, "output_index": idx, "item": item}))
-        seq += 1
-    events.append(_evt({"type": "response.completed", "sequence_number": seq, "response": response_obj}))
+        _add("response.output_item.added", output_index=idx, item=item)
+        _add("response.output_item.done", output_index=idx, item=item)
+    _add("response.completed", response=response_obj)
     return "".join(events)
 
 
@@ -357,7 +363,11 @@ async def get_requests() -> dict[str, list]:
 @app.get("/gate/pending")
 async def gate_pending() -> dict[str, bool]:
     """Check if any request is waiting on a gate."""
-    return {"pending": any(qr._pending.is_set() and not qr._gate.is_set() for qr in _state.pending_gates)}
+    pending = any(
+        qr._pending.is_set() and not qr._gate.is_set()
+        for qr in _state.pending_gates
+    )
+    return {"pending": pending}
 
 
 @app.post("/gate/release")

@@ -175,7 +175,11 @@ def test_client_tool_result_recalled_across_turns(
     configure_mock_llm(mock_llm_server_url, [
         {
             "tool_calls": [
-                {"call_id": call_id, "name": "lookup_widget", "arguments": json.dumps({"widget_id": 42})},
+                {
+                    "call_id": call_id,
+                    "name": "lookup_widget",
+                    "arguments": json.dumps({"widget_id": 42}),
+                },
             ],
         },
         {"text": f"The widget color is {marker}."},
