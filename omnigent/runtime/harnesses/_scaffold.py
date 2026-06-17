@@ -1513,7 +1513,8 @@ class HarnessApp:
             try:
                 await asyncio.shield(run_task)
             except asyncio.CancelledError:
-                pass
+                if not run_task.done():
+                    raise
             except Exception as exc:
                 exception = exc
         if exception is None and run_task.done() and not run_task.cancelled():

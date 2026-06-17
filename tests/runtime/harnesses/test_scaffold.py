@@ -25,6 +25,7 @@ mid-stream.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -190,6 +191,46 @@ async def test_build_terminal_event_handles_pending_task_cancellation() -> None:
     assert terminal.type == "response.cancelled"
     assert terminal.sequence_number == 3
     assert terminal.response.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_build_terminal_event_preserves_stream_task_cancellation() -> None:
+    """
+    Cancelling terminal synthesis itself must not become response.completed.
+
+    ``asyncio.shield(run_task)`` keeps the harness run task alive when the
+    stream task is cancelled, but the outer cancellation still needs to
+    propagate so teardown can cancel the run task through the normal path.
+    """
+
+    task_started = asyncio.Event()
+
+    async def _wait_forever() -> None:
+        task_started.set()
+        await asyncio.sleep(60)
+
+    ctx = TurnContext("resp_stream_cancel", asyncio.Queue(), asyncio.Event())
+    run_task = asyncio.create_task(_wait_forever())
+    await task_started.wait()
+    terminal_task = asyncio.create_task(
+        HarnessApp()._build_terminal_event(
+            ctx,
+            model="test-agent",
+            run_task=run_task,
+            sequence=5,
+        )
+    )
+
+    try:
+        await asyncio.sleep(0)
+        terminal_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await terminal_task
+        assert not run_task.done()
+    finally:
+        run_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await run_task
 
 
 @pytest.fixture
