@@ -2,8 +2,8 @@ name: Abuse Triage
 
 # Triages external-contributor PRs for spam/abuse:
 #   - Tier 1: auto-close PRs whose author is on .github/abuse-denylist
-#     (maintainer-curated; the "ban"), with a templated comment + likely-spam.
-#   - Tier 2: add the likely-spam label on soft heuristic signals (label only,
+#     (maintainer-curated; the "ban"), with a templated comment + spam-check.
+#   - Tier 2: add the spam-check label on soft heuristic signals (label only,
 #     never closes -- a human decides).
 # Maintainers and repo collaborators/members are never flagged or closed.
 # See abuse-triage.js.

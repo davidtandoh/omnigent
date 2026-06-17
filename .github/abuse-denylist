@@ -2,7 +2,7 @@
 #
 # A PR whose author appears here is automatically closed by
 # .github/workflows/abuse-triage.yml (with a templated comment + the
-# `likely-spam` label). This is the CI-level complement to GitHub's native
+# `spam-check` label). This is the CI-level complement to GitHub's native
 # "Block user" setting -- use that too for a hard ban that stops the account
 # from interacting at all.
 #

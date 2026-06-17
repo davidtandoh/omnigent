@@ -1,11 +1,11 @@
 // Abuse triage for external-contributor PRs. Two tiers:
 //
 //   Tier 1 (deterministic): if the author is on .github/abuse-denylist, close
-//   the PR with a templated comment + `likely-spam` label. The denylist is a
+//   the PR with a templated comment + `spam-check` label. The denylist is a
 //   maintainer-curated, human-edited file -- this is the "ban" action.
 //
 //   Tier 2 (advisory): otherwise, compute soft spam signals and, if any fire,
-//   add the `likely-spam` label so maintainers can triage faster. NEVER closes
+//   add the `spam-check` label so maintainers can triage faster. NEVER closes
 //   on heuristics -- a human decides. Avoids auto-closing genuine first-timers.
 //
 // Trusted authors (maintainers in .github/MAINTAINER, and OWNER/MEMBER/
@@ -44,11 +44,11 @@ function realBodyLength(body) {
 async function ensureLabel(github, owner, repo, core) {
   try {
     await github.rest.issues.createLabel({
-      owner, repo, name: "likely-spam", color: "b60205",
+      owner, repo, name: "spam-check", color: "b60205",
       description: "Auto-flagged as possible spam/abuse; needs maintainer triage",
     });
   } catch (e) {
-    if (e.status !== 422) core.warning(`Could not ensure likely-spam label: ${e.message}`);
+    if (e.status !== 422) core.warning(`Could not ensure spam-check label: ${e.message}`);
   }
 }
 
@@ -87,7 +87,7 @@ module.exports = async ({ github, context, core, opts = {} }) => {
   if (denylist.has(author)) {
     core.info(`@${author} is on the abuse denylist; closing PR #${pr.number}.`);
     await ensureLabel(github, owner, repo, core);
-    await github.rest.issues.addLabels({ owner, repo, issue_number: pr.number, labels: ["likely-spam"] });
+    await github.rest.issues.addLabels({ owner, repo, issue_number: pr.number, labels: ["spam-check"] });
     await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body: DENY_COMMENT });
     await github.rest.pulls.update({ owner, repo, pull_number: pr.number, state: "closed" });
     return;
@@ -116,8 +116,8 @@ module.exports = async ({ github, context, core, opts = {} }) => {
 
   if (reasons.length) {
     await ensureLabel(github, owner, repo, core);
-    await github.rest.issues.addLabels({ owner, repo, issue_number: pr.number, labels: ["likely-spam"] });
-    core.info(`Flagged #${pr.number} likely-spam: ${reasons.join("; ")}`);
+    await github.rest.issues.addLabels({ owner, repo, issue_number: pr.number, labels: ["spam-check"] });
+    core.info(`Flagged #${pr.number} spam-check: ${reasons.join("; ")}`);
   } else {
     core.info(`#${pr.number} shows no spam signals; not flagged.`);
   }

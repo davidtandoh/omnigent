@@ -55,7 +55,7 @@ function assert(name, cond, detail) {
   // Tier 1: denylisted author -> close + label + comment.
   let r = await run({ author: "spammer123", denylist: ["spammer123"] });
   assert("denylisted author is closed + labeled + commented",
-    r.closed && r.labels.includes("likely-spam") && r.comments.length === 1, JSON.stringify(r));
+    r.closed && r.labels.includes("spam-check") && r.comments.length === 1, JSON.stringify(r));
 
   // Trusted authors are never touched.
   r = await run({ author: "dhruv0811" }); // real maintainer in .github/MAINTAINER
@@ -65,13 +65,13 @@ function assert(name, cond, detail) {
 
   // Tier 2: heuristics flag (label only, never close).
   r = await run({ body: "" });
-  assert("empty body -> flagged, not closed", !r.closed && r.labels.includes("likely-spam"), JSON.stringify(r));
+  assert("empty body -> flagged, not closed", !r.closed && r.labels.includes("spam-check"), JSON.stringify(r));
 
   r = await run({ accountAgeDays: 2 });
-  assert("brand-new account -> flagged", !r.closed && r.labels.includes("likely-spam"), JSON.stringify(r));
+  assert("brand-new account -> flagged", !r.closed && r.labels.includes("spam-check"), JSON.stringify(r));
 
   r = await run({ openCount: 5 });
-  assert("flood (>=5 open PRs) -> flagged", !r.closed && r.labels.includes("likely-spam"), JSON.stringify(r));
+  assert("flood (>=5 open PRs) -> flagged", !r.closed && r.labels.includes("spam-check"), JSON.stringify(r));
 
   // Clean external PR: good body, old account, few PRs -> no action.
   r = await run({});
