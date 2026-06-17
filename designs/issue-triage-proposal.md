@@ -106,10 +106,8 @@ The bot assigns escalated issues to a maintainer automatically, based on two rul
 
 #### Maintainer actions at this stage
 - Override bot labels or assignment if wrong
-- Assign to a milestone
-- Add `mentor-available` to pair with a contributor
+- Implement the fix/feature
 - Apply `wontfix` and close with explanation
-- Invoke `/triage-issue` slash command to re-run bot classification
 
 ---
 
@@ -198,6 +196,7 @@ Use `actions/first-interaction` to post a short welcome message on a contributor
 ## Security Considerations
 
 - **Triage bot has `issues: write` only** — no code access, no secrets beyond the Anthropic API key
+- **AI bot is gated by security scan** — the bot only runs after the security scan passes on the issue content, preventing prompt injection or malicious payloads from reaching the LLM triage step
 - **No bot-driven code changes** — all code changes go through the existing PR + maintainer approval + security scan pipeline
 - **Duplicate closure has a veto** — reporter reacts 👎 to block
 - **Stale closure is reversible** — anyone can reopen
