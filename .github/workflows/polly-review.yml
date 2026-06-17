@@ -37,33 +37,41 @@ env:
   PIP_INDEX_URL: https://pypi.org/simple
 
 jobs:
-  # Security precondition gate (security-gate.yml): untrusted PRs wait for the
-  # scan; trusted authors / non-PR events pass through.
+  # Security precondition gate (security-gate.yml): untrusted PRs wait for
+  # the scan; trusted authors pass through. Only runs on pull_request events
+  # — issue_comment and workflow_dispatch are already gated by write-access
+  # (author_association check + GitHub's own dispatch auth) and never check
+  # out PR code, so the scan is not applicable.
   gate:
+    if: github.event_name == 'pull_request'
     uses: ./.github/workflows/security-gate.yml
 
   review:
     name: Polly AI Review
     needs: gate
-    # Fire on non-draft PRs, `/review` comments by write-access users,
-    # or workflow_dispatch with a PR number.
+    # Fire on non-draft PRs (after gate passes), `/review` comments by
+    # write-access users, or workflow_dispatch. The `!cancelled()` ensures
+    # the job runs when gate is skipped (non-PR events) but not when it fails.
     if: >-
-      (
-        github.event_name == 'pull_request' &&
-        !github.event.pull_request.draft
-      ) ||
-      (
-        github.event_name == 'issue_comment' &&
-        github.event.issue.pull_request != null &&
-        contains(github.event.comment.body, '/review') &&
-        !endsWith(github.actor, '[bot]') &&
+      !cancelled() && (
         (
-          github.event.comment.author_association == 'OWNER' ||
-          github.event.comment.author_association == 'MEMBER' ||
-          github.event.comment.author_association == 'COLLABORATOR'
-        )
-      ) ||
-      github.event_name == 'workflow_dispatch'
+          github.event_name == 'pull_request' &&
+          !github.event.pull_request.draft &&
+          needs.gate.result == 'success'
+        ) ||
+        (
+          github.event_name == 'issue_comment' &&
+          github.event.issue.pull_request != null &&
+          contains(github.event.comment.body, '/review') &&
+          !endsWith(github.actor, '[bot]') &&
+          (
+            github.event.comment.author_association == 'OWNER' ||
+            github.event.comment.author_association == 'MEMBER' ||
+            github.event.comment.author_association == 'COLLABORATOR'
+          )
+        ) ||
+        github.event_name == 'workflow_dispatch'
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
