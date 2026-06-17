@@ -286,7 +286,6 @@ jobs:
         id: polly
         env:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-          OMNIGENT_TOKEN_USAGE_JSON: /tmp/polly-tokens.json
         run: |
           set -euo pipefail
 
@@ -295,8 +294,6 @@ jobs:
           # Run Polly headlessly with -p; it starts a local server, sends
           # one turn, prints the assistant response, and exits.
           # --no-session: ephemeral run, no persistent session state.
-          # OMNIGENT_TOKEN_USAGE_JSON: each process writes a PID-suffixed
-          # JSON file with token counts; we aggregate them below.
           uv run omnigent run examples/polly/ \
             -p "$prompt" \
             --no-session \
@@ -312,59 +309,6 @@ jobs:
           head -c 61440 /tmp/polly_output.txt >> "$GITHUB_OUTPUT"
           echo "${delim}" >> "$GITHUB_OUTPUT"
 
-      - name: Aggregate token usage
-        id: usage
-        if: always() && steps.trigger.outputs.skip != 'true'
-        run: |
-          # Each omnigent process writes its own /tmp/polly-tokens-*.json
-          # file. Aggregate all of them into totals.
-          echo "Token files found:"
-          ls -la /tmp/polly-tokens*.json 2>/dev/null || echo "  (none)"
-          python3 <<'PYEOF'
-          import glob, json, os
-
-          totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "calls": 0}
-          by_model = {}
-
-          for path in glob.glob("/tmp/polly-tokens*.json"):
-              try:
-                  data = json.loads(open(path).read())
-              except (json.JSONDecodeError, OSError):
-                  continue
-              for bucket in data.values():
-                  for k in ("input_tokens", "output_tokens", "total_tokens", "calls"):
-                      totals[k] += bucket.get(k, 0)
-                  for model, mu in bucket.get("by_model", {}).items():
-                      agg = by_model.setdefault(model, {"input_tokens": 0, "output_tokens": 0, "calls": 0})
-                      agg["input_tokens"] += mu.get("input_tokens", 0)
-                      agg["output_tokens"] += mu.get("output_tokens", 0)
-                      agg["calls"] += mu.get("calls", 0)
-
-          # Format a compact summary line.
-          inp = totals["input_tokens"]
-          out = totals["output_tokens"]
-          calls = totals["calls"]
-
-          def fmt(n):
-              if n >= 1_000_000:
-                  return f"{n / 1_000_000:.1f}M"
-              if n >= 1_000:
-                  return f"{n / 1_000:.1f}k"
-              return str(n)
-
-          parts = [f"{fmt(inp)} input", f"{fmt(out)} output", f"{calls} calls"]
-          if by_model:
-              model_parts = []
-              for m, u in sorted(by_model.items(), key=lambda x: -x[1]["input_tokens"]):
-                  model_parts.append(f"{m}: {fmt(u['input_tokens'])}→{fmt(u['output_tokens'])}")
-              parts.append("models: " + ", ".join(model_parts))
-
-          summary = " · ".join(parts)
-          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-              f.write(f"usage_summary={summary}\n")
-          print(f"Token usage: {summary}")
-          PYEOF
-
       - name: Post review comment
         if: steps.polly.outputs.review_text != ''
         env:
@@ -372,7 +316,6 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
           REVIEW_TEXT: ${{ steps.polly.outputs.review_text }}
-          USAGE_SUMMARY: ${{ steps.usage.outputs.usage_summary }}
           RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
         run: |
           set -euo pipefail
@@ -385,12 +328,7 @@ jobs:
             echo "$REVIEW_TEXT"
             echo ""
             echo "---"
-            footer="<sub>Automated review by Polly"
-            if [ -n "$USAGE_SUMMARY" ]; then
-              footer="${footer} · tokens: ${USAGE_SUMMARY}"
-            fi
-            footer="${footer} · [workflow run](${RUN_URL})</sub>"
-            echo "$footer"
+            echo "<sub>Automated review by Polly · [workflow run](${RUN_URL})</sub>"
           } > /tmp/comment.md
 
           # Upsert: edit the existing Polly comment if one exists, otherwise create.
