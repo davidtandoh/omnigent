@@ -97,8 +97,21 @@ jobs:
             -f content=eyes --silent || true
           echo "skip=false" >> "$GITHUB_OUTPUT"
 
+      - name: Check LLM credentials available
+        if: steps.trigger.outputs.skip != 'true' && steps.creds.outputs.available == 'true'
+        id: creds
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+        run: |
+          if [ -z "$LLM_API_KEY" ]; then
+            echo "::notice::Skipping Polly review — LLM credentials not available (fork PR or missing secrets)."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Resolve PR number
-        if: steps.trigger.outputs.skip != 'true'
+        if: steps.trigger.outputs.skip != 'true' && steps.creds.outputs.available == 'true' && steps.creds.outputs.available == 'true'
         id: pr
         run: |
           set -euo pipefail
@@ -113,26 +126,26 @@ jobs:
       # avoids the TOCTOU issue CodeQL flags when issue_comment checks
       # out untrusted PR code in a privileged workflow.
       - name: Check out repo
-        if: steps.trigger.outputs.skip != 'true'
+        if: steps.trigger.outputs.skip != 'true' && steps.creds.outputs.available == 'true'
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
 
       - name: Set up Python
-        if: steps.trigger.outputs.skip != 'true'
+        if: steps.trigger.outputs.skip != 'true' && steps.creds.outputs.available == 'true'
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version-file: ".python-version"
 
       - name: Set up uv
-        if: steps.trigger.outputs.skip != 'true'
+        if: steps.trigger.outputs.skip != 'true' && steps.creds.outputs.available == 'true'
         uses: astral-sh/setup-uv@8d55fbecc275b1c35dbe060458839f8d30439ccf  # v3
         with:
           enable-cache: true
 
       - name: Install bubblewrap
-        if: steps.trigger.outputs.skip != 'true'
+        if: steps.trigger.outputs.skip != 'true' && steps.creds.outputs.available == 'true'
         # bubblewrap: the linux_bwrap sandbox backend needs bwrap on PATH.
         # apparmor sysctl: Ubuntu 24.04 blocks unprivileged user namespaces
         # that bwrap's unshare(CLONE_NEWUSER) needs; scope is the ephemeral runner.
@@ -142,18 +155,18 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Cache virtualenv
-        if: steps.trigger.outputs.skip != 'true'
+        if: steps.trigger.outputs.skip != 'true' && steps.creds.outputs.available == 'true'
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4
         with:
           path: .venv
           key: venv-${{ runner.os }}-${{ hashFiles('.python-version') }}-${{ hashFiles('uv.lock') }}
 
       - name: Install dependencies
-        if: steps.trigger.outputs.skip != 'true'
+        if: steps.trigger.outputs.skip != 'true' && steps.creds.outputs.available == 'true'
         run: uv sync --extra all --extra dev
 
       - name: Install Claude Code CLI
-        if: steps.trigger.outputs.skip != 'true'
+        if: steps.trigger.outputs.skip != 'true' && steps.creds.outputs.available == 'true'
         env:
           NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
         run: |
@@ -163,7 +176,7 @@ jobs:
           echo "${GITHUB_WORKSPACE}/.cc-cli/node_modules/.bin" >> "$GITHUB_PATH"
 
       - name: Install Codex CLI
-        if: steps.trigger.outputs.skip != 'true'
+        if: steps.trigger.outputs.skip != 'true' && steps.creds.outputs.available == 'true'
         env:
           NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
         run: |
@@ -172,13 +185,13 @@ jobs:
           echo "${GITHUB_WORKSPACE}/.codex-cli/node_modules/.bin" >> "$GITHUB_PATH"
 
       - name: Set LLM credentials
-        if: steps.trigger.outputs.skip != 'true'
+        if: steps.trigger.outputs.skip != 'true' && steps.creds.outputs.available == 'true'
         env:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
         run: echo "LLM_API_KEY=${LLM_API_KEY}" >> "$GITHUB_ENV"
 
       - name: Write gateway profile (~/.databrickscfg)
-        if: steps.trigger.outputs.skip != 'true'
+        if: steps.trigger.outputs.skip != 'true' && steps.creds.outputs.available == 'true'
         env:
           GATEWAY_BASE_URL: ${{ secrets.GATEWAY_BASE_URL }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
@@ -196,7 +209,7 @@ jobs:
           echo "DATABRICKS_BEARER=${LLM_API_KEY}" >> "$GITHUB_ENV"
 
       - name: Write Omnigent provider config
-        if: steps.trigger.outputs.skip != 'true'
+        if: steps.trigger.outputs.skip != 'true' && steps.creds.outputs.available == 'true'
         env:
           GATEWAY_BASE_URL: ${{ secrets.GATEWAY_BASE_URL }}
         run: |
@@ -234,7 +247,7 @@ jobs:
           "
 
       - name: Collect PR context
-        if: steps.trigger.outputs.skip != 'true'
+        if: steps.trigger.outputs.skip != 'true' && steps.creds.outputs.available == 'true'
         id: ctx
         env:
           GH_TOKEN: ${{ github.token }}
@@ -290,7 +303,7 @@ jobs:
           PYEOF
 
       - name: Run Polly review
-        if: steps.trigger.outputs.skip != 'true'
+        if: steps.trigger.outputs.skip != 'true' && steps.creds.outputs.available == 'true'
         id: polly
         env:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
