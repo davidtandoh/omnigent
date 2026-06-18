@@ -43,9 +43,10 @@ dependencies = [
     "psutil>=5.9,<8",
     # CEL (Common Expression Language) for inline policy evaluation.
     # Non-Turing-complete, side-effect-free, guaranteed to terminate.
-    # No ARM64 Linux wheel; excluded on aarch64 so installation succeeds.
-    # The CEL policy module degrades gracefully when the library is absent.
-    'cel-expr-python>=0.1; platform_machine != "aarch64"',
+    # No wheels for Linux aarch64 or macOS x86_64 (Intel); excluded so
+    # installation succeeds. The CEL policy module degrades gracefully
+    # when the library is absent.
+    'cel-expr-python>=0.1; platform_machine != "aarch64" and (sys_platform != "darwin" or platform_machine != "x86_64")',
     # OS keychain for storing model-provider API keys (OSS model
     # selection). Used by omnigent/onboarding/secrets.py; falls back to
     # a 0600 file when no keyring backend is available (e.g. headless).
@@ -79,10 +80,6 @@ dependencies = [
     # to remember `--extra all`. Issue #406.
     "claude-agent-sdk>=0.1.62",
     "openai-agents>=0.0.17",
-    # The Cursor harness drives the cursor-sdk (custom_tools tool bridge over a
-    # local bridge); like the other first-party harnesses it is part of the
-    # baseline install so `--harness cursor` works without `--extra`.
-    "cursor-sdk>=0.1.7",
     "PyJWT[crypto]>=2.8,<3",
     "argon2-cffi>=23.1,<24",
     # PEP 440 version comparison for the update check / `omni upgrade`
@@ -121,6 +118,10 @@ cwsandbox = ["cwsandbox>=0.24,<1"]
 # server-managed `sandbox.provider: e2b`).
 # Same lazy-import posture as above.
 e2b = ["e2b>=2.26,<3"]
+# NVIDIA OpenShell launcher (`omnigent sandbox --provider openshell`).
+# Self-hosted gRPC gateway; the SDK pulls grpcio + protobuf. Same
+# lazy-import posture as above. Pre-1.0 SDK: pin minor.
+openshell = ["openshell>=0.0.7,<1"]
 # MLflow tracing is opt-in: tracing is disabled by default and the
 # server degrades gracefully when mlflow is absent, so the (heavy) mlflow
 # dependency only installs for users who want it (`omnigent[tracing]`).
@@ -140,6 +141,11 @@ antigravity = ["google-antigravity>=0.1,<1"]
 # extra. The wheel bundles the Copilot CLI binary it drives (~90MB), which is
 # why it is not part of the baseline install. Pin major.
 copilot = ["github-copilot-sdk>=1,<2"]
+# Cursor SDK harness (`harness: cursor`). Optional like antigravity: the
+# harness imports the cursor-sdk lazily on first turn, so only `--harness
+# cursor` users need this extra (`omnigent[cursor]`). Was a baseline dependency;
+# now opt-in to keep the default install lean.
+cursor = ["cursor-sdk>=0.1.7"]
 databricks = [
     # Floor matches what core code was tested against when the SDK was a
     # default dependency (it moved here from `dependencies` above).
@@ -491,6 +497,17 @@ ignore_missing_imports = true
 # modal above.
 [[tool.mypy.overrides]]
 module = "e2b.*"
+ignore_missing_imports = true
+
+# openshell is an optional dep (the `openshell` extra); same lazy-import
+# posture as modal above. grpc rides in via the openshell SDK and is not
+# a base dependency, so its imports are unresolved in the default env too.
+[[tool.mypy.overrides]]
+module = "openshell.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "grpc.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

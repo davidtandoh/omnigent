@@ -75,14 +75,6 @@ _HARNESS_MODULES: dict[str, str] = {
     # Omnigent spawns no separately-installed CLI. Authenticates against GitHub's
     # Copilot backend with a GitHub token (no Databricks gateway).
     "copilot": "omnigent.inner.copilot_harness",
-    # Supervisor harness wrap. See
-    # omnigent/inner/databricks_supervisor_harness.py. Drives the Databricks
-    # Agent Bricks Supervisor API at
-    # ``{workspace}/ai-gateway/mlflow/v1/responses``. Differs from
-    # the SDK-wrapping harnesses above in that the inner executor
-    # has no third-party SDK dependency — it talks HTTP / SSE
-    # directly to the Databricks gateway.
-    "databricks_supervisor": "omnigent.inner.databricks_supervisor_harness",
 }
 
 __all__ = ["_HARNESS_MODULES"]
