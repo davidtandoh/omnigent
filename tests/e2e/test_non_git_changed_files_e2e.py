@@ -37,12 +37,14 @@ Usage::
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import secrets
 import signal
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import uuid
@@ -52,9 +54,9 @@ from typing import Any
 
 import httpx
 import pytest
+import yaml
 
 from tests.e2e.conftest import (
-    build_agent_bundle,
     configure_mock_llm,
     find_free_port,
     poll_session_until_terminal,
@@ -279,11 +281,42 @@ def non_git_client(non_git_server: str) -> Iterator[httpx.Client]:
 # ── Shared helpers ────────────────────────────────────────────────────────────
 
 
+def _build_mock_workspace_writer_bundle(mock_llm_base_url: str) -> bytes:
+    """Read the on-disk workspace-file-writer YAML, inject mock auth, and tarball it.
+
+    The bundled agent spec has no ``executor.auth`` block, so the harness
+    resolves auth from the agent config (not the server env).  When
+    running against the mock LLM server we need to point the executor at
+    the mock endpoint with a dummy API key.
+
+    :param mock_llm_base_url: Root URL of the mock LLM server,
+        e.g. ``"http://localhost:9999"``.
+    :returns: Gzipped tar archive bytes suitable for the session upload
+        endpoint.
+    """
+    yaml_path = _WORKSPACE_WRITER_DIR / "workspace-file-writer.yaml"
+    spec = yaml.safe_load(yaml_path.read_text())
+    spec.setdefault("executor", {})["auth"] = {
+        "type": "api_key",
+        "api_key": "mock-key",
+        "base_url": f"{mock_llm_base_url}/v1",
+    }
+
+    patched_yaml = yaml.dump(spec, sort_keys=False).encode()
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        info = tarfile.TarInfo(name="./workspace-file-writer.yaml")
+        info.size = len(patched_yaml)
+        tar.addfile(info, io.BytesIO(patched_yaml))
+    return buf.getvalue()
+
+
 def _create_session(
     client: httpx.Client,
     *,
     runner_id: str,
-    databricks_workspace_host: str | None,
+    mock_llm_server_url: str | None,
 ) -> str:
     """Upload the workspace-writer agent and create a bound session.
 
@@ -293,14 +326,16 @@ def _create_session(
 
     :param client: HTTP client pointed at the non-git server.
     :param runner_id: Runner id to bind the session to.
-    :param databricks_workspace_host: Workspace host URL used for model
-        rewriting; ``None`` when not running against Databricks.
+    :param mock_llm_server_url: Mock LLM server URL for injecting
+        ``executor.auth`` into the bundle.
     :returns: The new session id, e.g. ``"conv_abc123"``.
     """
-    bundle = build_agent_bundle(
-        _WORKSPACE_WRITER_DIR,
-        rewrite_model_for_databricks=databricks_workspace_host is not None,
-    )
+    if mock_llm_server_url is not None:
+        bundle = _build_mock_workspace_writer_bundle(mock_llm_server_url)
+    else:
+        from tests.e2e.conftest import build_agent_bundle
+
+        bundle = build_agent_bundle(_WORKSPACE_WRITER_DIR)
     create_resp = client.post(
         "/v1/sessions",
         data={"metadata": json.dumps({})},
@@ -404,7 +439,7 @@ def test_non_git_create_file(
     session_id = _create_session(
         non_git_client,
         runner_id=non_git_runner_id,
-        databricks_workspace_host=None,
+        mock_llm_server_url=mock_llm_server_url,
     )
     response_id = send_user_message_to_session(
         non_git_client,
@@ -499,7 +534,7 @@ def test_non_git_edit_file(
     session_id = _create_session(
         non_git_client,
         runner_id=non_git_runner_id,
-        databricks_workspace_host=None,
+        mock_llm_server_url=mock_llm_server_url,
     )
 
     # Seed the file into the workspace root so the agent's write is an
