@@ -1003,6 +1003,9 @@ class _PiRpcSession:
                         os.killpg(pid, signal.SIGTERM)
                         group_signal_sent = True
                     except (ProcessLookupError, PermissionError, OSError):
+                        # Best-effort: the group may already be gone or unsignalable.
+                        # group_signal_sent stays False, so the fallback below
+                        # terminates the direct child instead — non-fatal.
                         pass
                 if not group_signal_sent:
                     with contextlib.suppress(ProcessLookupError, Exception):
@@ -1019,6 +1022,9 @@ class _PiRpcSession:
                             os.killpg(pid, signal.SIGKILL)
                             group_kill_sent = True
                         except (ProcessLookupError, PermissionError, OSError):
+                            # Best-effort: the group may already be gone or
+                            # unsignalable. group_kill_sent stays False, so the
+                            # fallback below kills the direct child — non-fatal.
                             pass
                     if not group_kill_sent:
                         with contextlib.suppress(ProcessLookupError):
