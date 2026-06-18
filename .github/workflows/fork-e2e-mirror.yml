@@ -22,7 +22,10 @@ name: Fork e2e mirror
 #                         workflow_dispatch (dispatched by
 #                         maintainer-approval-rerun-run.yml on approval).
 #   workflow_dispatch     re-evaluation of a single PR (used by the approval
-#                         relay and for manual re-runs).
+#                         relay and for manual re-runs). Safe because
+#                         should-mirror.sh always re-checks approval before
+#                         any secret-bearing run; a spurious dispatch with an
+#                         arbitrary PR number cannot trigger e2e.
 #
 # leak-scan-allow: pull_request_target
 on:
@@ -96,6 +99,8 @@ jobs:
     name: mirror
     needs: gate
     # Fork PRs only -- same-repo PRs run e2e directly via `pull_request`.
+    # workflow_dispatch is validated at the step level (verify fork before
+    # mirroring) but runs the gate unconditionally to keep the flow simple.
     if: >-
       (
         github.event_name == 'workflow_dispatch'
@@ -114,17 +119,26 @@ jobs:
       REPO: ${{ github.repository }}
       PR: ${{ github.event.pull_request.number || inputs.pr }}
     steps:
-      - name: Resolve PR head SHA
+      - name: Resolve PR context
         id: ctx
         run: |
           if [[ -n "${{ github.event.pull_request.head.sha || '' }}" ]]; then
             echo "sha=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+            echo "is_fork=true" >> "$GITHUB_OUTPUT"
           else
-            SHA=$(gh pr view "$PR" --repo "$REPO" --json headRefOid --jq '.headRefOid')
+            # workflow_dispatch: resolve from the PR object.
+            INFO=$(gh pr view "$PR" --repo "$REPO" --json headRefOid,isCrossRepository)
+            SHA=$(echo "$INFO" | jq -r '.headRefOid')
+            IS_FORK=$(echo "$INFO" | jq -r '.isCrossRepository')
             echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+            echo "is_fork=$IS_FORK" >> "$GITHUB_OUTPUT"
+            if [[ "$IS_FORK" != "true" ]]; then
+              echo "::notice::PR #$PR is same-repo; skipping mirror (same-repo PRs run e2e directly)."
+            fi
           fi
 
       - name: Check out gate scripts from main
+        if: steps.ctx.outputs.is_fork == 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: main             # trusted; never the PR head
@@ -132,6 +146,7 @@ jobs:
           persist-credentials: false
 
       - name: Mint mirror App token
+        if: steps.ctx.outputs.is_fork == 'true'
         id: app-token
         # App token, not GITHUB_TOKEN: its pushes DO trigger the downstream e2e.
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
@@ -142,17 +157,19 @@ jobs:
       # MAINTAINER@main, never the PR head: the gate verifies the *approver* is a
       # maintainer, so a PR can't self-grant by editing its own MAINTAINER copy.
       - name: Load maintainers
+        if: steps.ctx.outputs.is_fork == 'true'
         id: maintainers
         run: bash .github/scripts/merge-ready/load-maintainers.sh
 
       - name: Evaluate mirror gate
+        if: steps.ctx.outputs.is_fork == 'true'
         id: gate
         env:
           MAINTAINERS: ${{ steps.maintainers.outputs.list }}
         run: bash .github/scripts/fork-e2e/should-mirror.sh
 
       - name: Mirror head SHA onto trusted branch
-        if: ${{ steps.gate.outputs.mirror == 'true' }}
+        if: steps.ctx.outputs.is_fork == 'true' && steps.gate.outputs.mirror == 'true'
         env:
           TOKEN: ${{ steps.app-token.outputs.token }}
           HEAD_SHA: ${{ steps.ctx.outputs.sha }}
@@ -183,3 +200,16 @@ jobs:
           fi
           git -C "$work" push -q -f "$origin" "${HEAD_SHA}:refs/heads/${MIRROR_BRANCH}"
           echo "Mirrored $MIRROR_BRANCH -> $HEAD_SHA"
+
+      # Tear down the mirror branch when approval is revoked (review dismissed
+      # or changes requested). Without this, a stale fork-e2e/pr-N branch
+      # would remain until the next push or PR close.
+      - name: Delete stale mirror branch on revocation
+        if: steps.ctx.outputs.is_fork == 'true' && steps.gate.outputs.mirror == 'false'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          MIRROR_BRANCH: fork-e2e/pr-${{ env.PR }}
+        run: |
+          gh api -X DELETE "repos/$REPO/git/refs/heads/$MIRROR_BRANCH" >/dev/null 2>&1 \
+            && echo "Deleted stale $MIRROR_BRANCH (approval revoked)" \
+            || echo "No $MIRROR_BRANCH to delete"
