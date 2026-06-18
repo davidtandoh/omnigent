@@ -203,16 +203,10 @@ function startInboxPoller(pi, config, handleInterrupt) {
             deliverAttempts.set(key, attempts);
             continue;
           }
-          // Cap reached: the queued follow-up could not be delivered. Surface
-          // it as a NON-terminal informational note and consume the file to
-          // stop the spin. A `failed` external_session_status would be wrong
-          // here: the runner treats that as an authoritative terminal turn /
-          // sub-agent failure (it fans session.status=failed to the parent and
-          // wakes it with a fabricated error), killing a live session over a
-          // transient delivery hiccup. An `error` conversation item is the
-          // non-terminal channel — it renders an operator-visible banner but
-          // never flows into terminal-status handling, so the session keeps
-          // running.
+          // Cap reached: surface the dropped follow-up without faking a turn
+          // failure. The runner treats external_session_status:failed as
+          // terminal for native sub-agents, so use a non-content conversation
+          // error item and consume the file to stop the spin.
           deliverAttempts.delete(key);
           postEvent(config, {
             type: "external_conversation_item",
