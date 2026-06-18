@@ -88,11 +88,17 @@ _HEARTBEAT_INTERVAL_S = 15.0
 _SHUTDOWN_GRACE_S = 4.5
 
 # Timeout for the policy evaluation round-trip (harness → runner →
-# Omnigent server → runner → harness). Fail-open on expiry so a stalled
-# round-trip doesn't hang the executor indefinitely. Must be ≥
-# DEFAULT_POLICY_CLASSIFIER_TIMEOUT (30 s) since PromptPolicy
-# classifiers make their own LLM call on the Omnigent server side.
-_POLICY_EVAL_TIMEOUT_S = 35.0
+# Omnigent server → runner → harness). Held at INT_MAX seconds
+# (~68 years), effectively infinite: a TOOL_CALL/LLM_REQUEST ASK parks
+# server-side until a human answers, and this gate must block until the
+# verdict arrives — never let the agent proceed unapproved, the
+# cost-policy bug. The server caps the real wait via the deciding
+# policy's ``ask_timeout``. On the (now effectively unreachable) expiry
+# we fail CLOSED (DENY) rather than open (ALLOW) so a stalled round-trip
+# can never silently approve a gated call. Comfortably ≥
+# DEFAULT_POLICY_CLASSIFIER_TIMEOUT (30 s) for the PromptPolicy
+# classifier's own server-side LLM call.
+_POLICY_EVAL_TIMEOUT_S = 2_147_483_647.0
 
 # Per-turn IDLE watchdog: max gap WITHOUT progress before a wedged
 # ``run_turn`` becomes ``response.failed`` (vs heartbeating forever).
@@ -639,11 +645,11 @@ class TurnContext:
             return await asyncio.wait_for(future, timeout=_POLICY_EVAL_TIMEOUT_S)
         except asyncio.TimeoutError:
             _logger.warning(
-                "Policy evaluation %s timed out after %ds; defaulting to ALLOW",
+                "Policy evaluation %s timed out after %ds; failing closed (DENY)",
                 evaluation_id,
                 _POLICY_EVAL_TIMEOUT_S,
             )
-            return PolicyVerdictPayload(action="POLICY_ACTION_ALLOW")
+            return PolicyVerdictPayload(action="POLICY_ACTION_DENY")
         finally:
             self._pending_policy_evaluations.pop(evaluation_id, None)
 

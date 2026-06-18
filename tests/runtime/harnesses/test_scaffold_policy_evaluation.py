@@ -182,16 +182,19 @@ async def test_policy_verdict_event_handler(_turn_ctx: TurnContext) -> None:
 
 
 @pytest.mark.asyncio()
-async def test_evaluate_policy_timeout_returns_allow(
+async def test_evaluate_policy_timeout_returns_deny(
     _turn_ctx: TurnContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    ``evaluate_policy`` returns ALLOW after the timeout expires.
+    ``evaluate_policy`` returns DENY after the timeout expires.
 
-    If the verdict never arrives (race condition, network hiccup,
-    evaluation_id mismatch), the executor must not hang forever.
-    Fail-open prevents silent session hangs.
+    A TOOL_CALL/LLM_REQUEST ASK parks server-side until a human answers;
+    this gate must block until the verdict arrives and must never let the
+    agent proceed unapproved (the cost-policy bug). In production the
+    timeout is INT_MAX (effectively infinite), so expiry is unreachable —
+    but if the round-trip ever does expire we fail CLOSED (DENY), never
+    open (ALLOW), so a stall can't silently approve a gated call.
     """
     # Shrink timeout to 0.1s so the test runs fast.
     import omnigent.runtime.harnesses._scaffold as _scaffold_mod
@@ -202,9 +205,10 @@ async def test_evaluate_policy_timeout_returns_allow(
     # Start evaluation but never deliver the verdict.
     result = await ctx.evaluate_policy("poleval_timeout_001", "PHASE_LLM_REQUEST", {})
 
-    assert result.action == "POLICY_ACTION_ALLOW", (
-        "Timed-out policy evaluation should default to ALLOW (fail-open). "
-        "If DENY, the timeout path is returning the wrong default. "
+    assert result.action == "POLICY_ACTION_DENY", (
+        "Timed-out policy evaluation should fail closed (DENY). "
+        "If ALLOW, the timeout path is failing open and a stalled "
+        "round-trip could silently approve a gated call. "
         "If this test hangs, the timeout isn't being applied."
     )
     assert result.reason is None
