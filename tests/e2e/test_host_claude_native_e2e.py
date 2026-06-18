@@ -80,6 +80,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from omnigent import claude_native_bridge
 from tests.e2e.helpers import POLL_INTERVAL_S
 
 # Opt-in only. claude-native needs a real *interactive* Claude login
@@ -627,6 +628,212 @@ def test_claude_native_message_not_duplicated_on_cold_start(
                 "A count of 2 indicates the double-forwarder race re-appeared: "
                 "two transcript forwarder tasks were created and each independently "
                 "posted the same assistant turn via external_conversation_item."
+            )
+        finally:
+            daemon.send_signal(signal.SIGTERM)
+            try:
+                daemon.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                daemon.kill()
+                daemon.wait()
+
+
+# Number of rows the test's custom statusLine emits below the input box.
+# Comfortably exceeds the old five-line prompt-scan window so the live
+# ``❯`` row lands well outside it — the issue #701 condition.
+_TALL_FOOTER_LINES = 8
+# A multi-line statusLine command (no quoting needed — hyphenated tokens).
+# omnigent chains the user's global statusLine into its own capture
+# wrapper, so these rows render in the launched Claude's footer exactly
+# as a real user's multi-line cost/usage bar (e.g. claude-hud) would.
+_TALL_STATUSLINE_COMMAND = "; ".join(
+    f"echo omnigent-hud-row-{i}" for i in range(1, _TALL_FOOTER_LINES + 1)
+)
+
+
+@contextmanager
+def _user_statusline_configured(command: str) -> Iterator[None]:
+    """
+    Set ``~/.claude/settings.json`` ``statusLine.command`` for the test.
+
+    omnigent overrides the launched Claude's statusLine with its own
+    capture wrapper but chains to whatever the user configured globally
+    (``claude_native_bridge.read_user_status_line_command``, wired into
+    the per-session ``--settings``). A multi-line command therefore
+    renders extra footer rows directly below the input box — faithfully
+    modeling the enterprise cost/usage status bar from issue #701 with no
+    paid seat. The original file bytes (or absence) are restored on exit.
+
+    :param command: Shell command string to install as
+        ``statusLine.command``.
+    :returns: Iterator yielding once the statusLine entry is written.
+    """
+    settings_path = Path.home() / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    original = settings_path.read_bytes() if settings_path.exists() else None
+    settings = json.loads(original) if original is not None else {}
+    settings["statusLine"] = {"type": "command", "command": command}
+    settings_path.write_text(json.dumps(settings))
+    try:
+        yield
+    finally:
+        if original is not None:
+            settings_path.write_bytes(original)
+        else:
+            settings_path.unlink(missing_ok=True)
+
+
+def _lines_below_live_prompt(session_id: str, *, timeout_s: float = 10.0) -> int:
+    """
+    Capture the session's Claude pane; count non-empty rows below ``❯``.
+
+    Host-spawned sessions key the bridge dir by conversation id, so the
+    runner's ``tmux.json`` is locatable from *session_id*. Captures the
+    live pane with the same helpers the production gate uses and returns
+    how many non-empty rows sit below the bottom-most prompt glyph — i.e.
+    how far the footer has pushed the live ``❯`` off the bottom. Polls
+    until the footer is tall (or *timeout_s* elapses) to ride out a
+    status-bar redraw landing mid-capture.
+
+    :param session_id: Session/conversation id, e.g. ``"conv_abc123"``.
+    :param timeout_s: Seconds to keep re-capturing for a tall footer.
+    :returns: Non-empty pane rows below the live prompt (best observed).
+    :raises AssertionError: When no capture ever carried a prompt glyph
+        (capture failed, or the input box never mounted).
+    """
+    bridge_dir = claude_native_bridge.bridge_dir_for_conversation_id(session_id)
+    info = claude_native_bridge._wait_for_tmux_info(bridge_dir, timeout_s=30.0)
+    glyph = claude_native_bridge._CLAUDE_PROMPT_GLYPH
+    deadline = time.monotonic() + timeout_s
+    best = -1
+    last_pane = ""
+    while time.monotonic() < deadline:
+        pane = claude_native_bridge._capture_pane(info["socket_path"], info["tmux_target"])
+        non_empty = [line for line in pane.splitlines() if line.strip()]
+        glyph_rows = [i for i, line in enumerate(non_empty) if glyph in line]
+        if glyph_rows:
+            best = len(non_empty) - 1 - glyph_rows[-1]
+            last_pane = pane
+            if best >= 5:
+                return best
+        time.sleep(POLL_INTERVAL_S)
+    assert best >= 0, f"no Claude prompt glyph in captured pane:\n{last_pane}"
+    return best
+
+
+def _post_user_message(client: httpx.Client, *, session_id: str, text: str) -> None:
+    """
+    POST a user text message onto a session's event stream.
+
+    :param client: HTTP client pointed at the test server.
+    :param session_id: Session/conversation id, e.g. ``"conv_abc123"``.
+    :param text: User message text to deliver into the Claude terminal.
+    :returns: None.
+    """
+    resp = client.post(
+        f"/v1/sessions/{session_id}/events",
+        json={
+            "type": "message",
+            "data": {"role": "user", "content": [{"type": "input_text", "text": text}]},
+        },
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+
+
+def test_claude_native_second_message_survives_tall_status_footer(
+    live_server: str,
+    http_client: httpx.Client,
+    tmp_path: Path,
+) -> None:
+    """
+    A 2nd message lands when a status bar grew taller than the scan window.
+
+    Regression for issue #701. The readiness gate scanned only the last
+    five non-empty pane lines for Claude's ``❯`` prompt glyph. An
+    enterprise cost/usage status bar — or any multi-line custom
+    ``statusLine`` — renders enough footer rows below the input box to
+    push ``❯`` out of that window, so ``_wait_for_claude_prompt_ready``
+    timed out and the message raised "did not become ready" before a
+    keystroke was sent (a restart recovered only the next single message,
+    then it broke again).
+
+    Faithful to the reported trigger: the **first** message lands during
+    boot, before the multi-line ``statusLine`` has rendered, so the
+    prompt is still near the bottom and even the old gate passes. That
+    turn drives Claude to paint its full (tall) footer. The **second**
+    message is the regression — ``❯`` now sits well above the bottom, so
+    the old fixed-window scan can't see it and injection times out, while
+    the structural detector (``_claude_prompt_rendered`` keying on the
+    box border rule directly under ``❯``) still finds it and the message
+    is delivered. Verified red→green by toggling the structural detector
+    (red: second marker never arrives; green: it does).
+
+    The tall ``statusLine`` is chained into the omnigent status wrapper
+    exactly as a real user's bar is (see
+    :func:`_user_statusline_configured`). No boot-delay shim: the footer
+    height — not boot timing — is what defeats the old gate.
+    """
+    workspace = tmp_path / "cn_tall_footer_ws"
+    workspace.mkdir()
+    marker_one = f"TALLBAR1_{uuid.uuid4().hex[:6].upper()}"
+    marker_two = f"TALLBAR2_{uuid.uuid4().hex[:6].upper()}"
+
+    with (
+        _workspace_trusted_in_claude_config(workspace),
+        _user_statusline_configured(_TALL_STATUSLINE_COMMAND),
+    ):
+        daemon = _spawn_host_daemon(tmp_path=tmp_path, live_server=live_server)
+        try:
+            host_id = _online_host_id(http_client, timeout=30.0)
+            agent_id = _claude_native_agent_id(http_client)
+
+            create = http_client.post(
+                "/v1/sessions",
+                json={"agent_id": agent_id, "host_id": host_id, "workspace": str(workspace)},
+                timeout=60.0,
+            )
+            create.raise_for_status()
+            session_id = create.json()["id"]
+
+            # Message 1: lands before the multi-line statusLine renders, so
+            # even the old gate passes. Its turn makes Claude paint the
+            # full, tall footer below the input box.
+            _post_user_message(
+                http_client,
+                session_id=session_id,
+                text=f"Reply with exactly one word: {marker_one}",
+            )
+            _poll_for_assistant_marker(
+                http_client, session_id=session_id, marker=marker_one, timeout=180.0
+            )
+
+            # Self-validation against vacuity: prove the footer actually
+            # pushed the live ``❯`` past the old five-line scan window. If a
+            # future Claude rendered a short footer the regression wouldn't
+            # reproduce, and without this guard the test would pass green
+            # while testing nothing. Fail loudly instead.
+            lines_below = _lines_below_live_prompt(session_id)
+            assert lines_below >= 5, (
+                f"tall-footer precondition not met: only {lines_below} non-empty "
+                "row(s) below the live prompt, so the old tail-5 scan would still "
+                "have found ❯ — this run would not exercise issue #701."
+            )
+
+            # Message 2: the tall footer is now rendered, so ``❯`` sits far
+            # above the bottom. The old tail-window scan never finds it and
+            # this injection times out; the structural detector delivers it.
+            _post_user_message(
+                http_client,
+                session_id=session_id,
+                text=f"Reply with exactly one word: {marker_two}",
+            )
+            text = _poll_for_assistant_marker(
+                http_client, session_id=session_id, marker=marker_two, timeout=180.0
+            )
+            assert marker_two in text, (
+                f"second message dropped: marker {marker_two!r} missing from {text!r} — "
+                "the tall-footer readiness regression (issue #701) re-appeared."
             )
         finally:
             daemon.send_signal(signal.SIGTERM)
