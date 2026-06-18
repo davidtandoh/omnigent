@@ -1,4 +1,4 @@
-"""E2E tests for ``POST /v1/sessions/{id}/fork`` against a real LLM.
+"""E2E tests for ``POST /v1/sessions/{id}/fork`` (mock LLM).
 
 Exercises the fork flows the route/store unit tests can only mock:
 
@@ -11,7 +11,8 @@ Exercises the fork flows the route/store unit tests can only mock:
    and cannot produce codeword 2).
 3. **Fork + agent switch** (``agent_id``) — fork into a different
    built-in agent and verify the clone binds the target agent while
-   still carrying the source history.
+   still carrying the source history. (Skipped under mock LLM — needs
+   a built-in claude-sdk agent target.)
 
 All flows route through runner-bound sessions (the alpha runner-state
 contract), mirroring how the Web UI drives the fork: create → fork →
@@ -19,8 +20,7 @@ contract), mirroring how the Web UI drives the fork: create → fork →
 
 Usage::
 
-    pytest tests/e2e/test_sessions_fork_e2e.py \
-        --llm-api-key $LLM_API_KEY -v
+    pytest tests/e2e/test_sessions_fork_e2e.py -v
 """
 
 from __future__ import annotations
@@ -202,9 +202,7 @@ def _fork_session(
 
 def test_full_fork_replays_whole_history(
     http_client: httpx.Client,
-    coder_agent: str,
     live_runner_id: str,
-    using_mock_llm: bool,
     mock_llm_server_url: str,
 ) -> None:
     """
@@ -219,23 +217,18 @@ def test_full_fork_replays_whole_history(
       first turn (e.g. history-prompt building skips pre-fork items) →
       the agent can't produce the codewords (second assertion).
     """
-    if using_mock_llm:
-        reset_mock_llm(mock_llm_server_url)
-        agent_name, model = _register_mock_fork_agent(
-            http_client, mock_llm_server_url, prefix="full"
-        )
-        # Two seed turns ("OK" each), then a post-fork recall turn.
-        configure_mock_llm(
-            mock_llm_server_url,
-            [
-                {"text": "OK"},
-                {"text": "OK"},
-                {"text": f"Your projects are {_CODEWORD_1} and {_CODEWORD_2}."},
-            ],
-            key=model,
-        )
-    else:
-        agent_name = coder_agent
+    reset_mock_llm(mock_llm_server_url)
+    agent_name, model = _register_mock_fork_agent(http_client, mock_llm_server_url, prefix="full")
+    # Two seed turns ("OK" each), then a post-fork recall turn.
+    configure_mock_llm(
+        mock_llm_server_url,
+        [
+            {"text": "OK"},
+            {"text": "OK"},
+            {"text": f"Your projects are {_CODEWORD_1} and {_CODEWORD_2}."},
+        ],
+        key=model,
+    )
 
     source_id = _seed_two_codeword_turns(
         http_client, agent_name=agent_name, runner_id=live_runner_id
@@ -272,9 +265,7 @@ def test_full_fork_replays_whole_history(
 
 def test_fork_from_middle_truncates_context(
     http_client: httpx.Client,
-    coder_agent: str,
     live_runner_id: str,
-    using_mock_llm: bool,
     mock_llm_server_url: str,
 ) -> None:
     """
@@ -295,24 +286,19 @@ def test_fork_from_middle_truncates_context(
       produce codeword 2 (it is NOT in the truncated context, so a
       correct fork cannot emit that exact token pair).
     """
-    if using_mock_llm:
-        reset_mock_llm(mock_llm_server_url)
-        agent_name, model = _register_mock_fork_agent(
-            http_client, mock_llm_server_url, prefix="mid"
-        )
-        # Two seed turns ("OK" each), then a post-fork recall turn
-        # that only mentions codeword 1 (codeword 2 was truncated).
-        configure_mock_llm(
-            mock_llm_server_url,
-            [
-                {"text": "OK"},
-                {"text": "OK"},
-                {"text": f"Your project is {_CODEWORD_1}."},
-            ],
-            key=model,
-        )
-    else:
-        agent_name = coder_agent
+    reset_mock_llm(mock_llm_server_url)
+    agent_name, model = _register_mock_fork_agent(http_client, mock_llm_server_url, prefix="mid")
+    # Two seed turns ("OK" each), then a post-fork recall turn
+    # that only mentions codeword 1 (codeword 2 was truncated).
+    configure_mock_llm(
+        mock_llm_server_url,
+        [
+            {"text": "OK"},
+            {"text": "OK"},
+            {"text": f"Your project is {_CODEWORD_1}."},
+        ],
+        key=model,
+    )
 
     source_id = _seed_two_codeword_turns(
         http_client, agent_name=agent_name, runner_id=live_runner_id
