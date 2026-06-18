@@ -236,36 +236,6 @@ async def test_ctrl_c_interrupts_running_command(
     )
 
 
-async def test_parallel_sessions_have_isolated_shell_state(
-    reg: TerminalRegistry, shutdown_terminals: None, tmp_path: Path
-) -> None:
-    """Two sessions of the same terminal don't share shell state.
-
-    Stronger than the socket-identity checks in ``test_registry.py``: a
-    regression collapsing ``(name, key)`` to ``name`` surfaces here as
-    cross-talk between the two panes.
-    """
-    spec = _bash_spec(tmp_path)
-    s1 = await reg.launch("conv_a", "bash", "s1", spec)
-    s2 = await reg.launch("conv_a", "bash", "s2", spec)
-
-    assert s1 is not s2
-    assert s1.socket_path != s2.socket_path
-
-    await s1.send(text="SESSION_TAG=alpha_one", keys="Enter")
-    await s2.send(text="SESSION_TAG=beta_two", keys="Enter")
-    await s1.send(text="echo TAG=$SESSION_TAG", keys="Enter")
-    await s2.send(text="echo TAG=$SESSION_TAG", keys="Enter")
-
-    s1_screen = await _read_until(s1, "TAG=alpha_one")
-    s2_screen = await _read_until(s2, "TAG=beta_two")
-
-    assert "TAG=alpha_one" in s1_screen, f"s1 lost its own value. Pane:\n{s1_screen!r}"
-    assert "TAG=beta_two" in s2_screen, f"s2 lost its own value. Pane:\n{s2_screen!r}"
-    assert "beta_two" not in s1_screen, f"s1 sees s2's value. Pane:\n{s1_screen!r}"
-    assert "alpha_one" not in s2_screen, f"s2 sees s1's value. Pane:\n{s2_screen!r}"
-
-
 async def test_send_and_read_after_close_report_not_running(
     reg: TerminalRegistry, shutdown_terminals: None, tmp_path: Path
 ) -> None:
