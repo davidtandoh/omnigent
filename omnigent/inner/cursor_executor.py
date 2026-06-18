@@ -46,8 +46,9 @@ import contextlib
 import json
 import logging
 import os
+import sys
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypeAlias
 
@@ -355,6 +356,43 @@ def _encode_tool_result(result: Any) -> Any:  # type: ignore[explicit-any]
 # ---------------------------------------------------------------------------
 
 
+def _write_cursor_hooks(cwd: str, hook_script_path: str, server_url: str, session_id: str) -> Path:
+    """Write ``.cursor/hooks.json`` to the workspace for preToolUse policy enforcement.
+
+    The hook command bakes the server URL and session ID as inline env vars so
+    the standalone hook script can reach the Omnigent server without any shared
+    state or bridge-directory protocol.
+
+    :param cwd: Workspace root directory.
+    :param hook_script_path: Absolute path to ``cursor_policy_hook.py``.
+    :param server_url: Omnigent server URL, e.g. ``"http://127.0.0.1:6767"``.
+    :param session_id: Conversation / session ID for policy evaluation.
+    :returns: The path to the written ``hooks.json`` file.
+    """
+    hooks_dir = Path(cwd) / ".cursor"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    hooks_file = hooks_dir / "hooks.json"
+    # Bake env vars into the command so the hook script can read them without
+    # relying on the bridge subprocess's inherited environment.
+    command = (
+        f"env _OMNIGENT_SERVER_URL={server_url} "
+        f"_OMNIGENT_SESSION_ID={session_id} "
+        f"{sys.executable} {hook_script_path}"
+    )
+    config = {
+        "hooks": {
+            "preToolUse": [
+                {
+                    "command": command,
+                    "timeout": 30,
+                }
+            ]
+        }
+    }
+    hooks_file.write_text(json.dumps(config, indent=2))
+    return hooks_file
+
+
 @dataclass
 class _CursorSessionState:
     """Per-Omnigent-conversation SDK session state."""
@@ -365,6 +403,7 @@ class _CursorSessionState:
     model: str | None = None
     tools_fingerprint: str | None = None
     has_sent_prompt: bool = False
+    hooks_file: Path | None = field(default=None, repr=False)
 
 
 class CursorExecutor(Executor):
@@ -526,13 +565,26 @@ class CursorExecutor(Executor):
     # -- session lifecycle --------------------------------------------------
 
     async def _ensure_session(
-        self, state: _CursorSessionState, model: str, tools: list[ToolSpec]
+        self,
+        state: _CursorSessionState,
+        model: str,
+        tools: list[ToolSpec],
+        session_key: str,
     ) -> None:
         """Launch the local bridge and create the SDK agent if not already live.
 
         On any bring-up failure the partially-created client is closed before
         propagating, so a bad ``CURSOR_API_KEY`` / launch error can't orphan a
         bridge subprocess.
+
+        Before agent creation, writes ``.cursor/hooks.json`` to the workspace
+        with a ``preToolUse`` hook pointing at :mod:`cursor_policy_hook` so
+        PHASE_TOOL_CALL policies are enforced on ALL Cursor native tools --
+        including those that execute silently without emitting ``tool_call``
+        SDK messages.
+
+        :param session_key: The conversation/session ID, baked into the hooks
+            command so the hook script can call the server's policy endpoint.
         """
         if state.agent is not None:
             return
@@ -546,12 +598,25 @@ class CursorExecutor(Executor):
 
         loop = asyncio.get_running_loop()
         cwd = self._cwd or os.getcwd()
+
+        # Write .cursor/hooks.json for preToolUse policy enforcement.
+        # RUNNER_SERVER_URL is inherited by the harness subprocess via
+        # _build_harness_spawn_env (process_manager.py).
+        server_url = os.environ.get("RUNNER_SERVER_URL", "")
+        if server_url and session_key != "__default__":
+            hook_script = str(Path(__file__).with_name("cursor_policy_hook.py"))
+            state.hooks_file = _write_cursor_hooks(cwd, hook_script, server_url, session_key)
+
         client = await AsyncClient.launch_bridge(workspace=cwd)
         try:
-            local = LocalAgentOptions(
-                cwd=cwd,
-                custom_tools=self._make_custom_tools(tools, loop) or None,
-            )
+            local_kwargs: dict[str, Any] = {
+                "cwd": cwd,
+                "custom_tools": self._make_custom_tools(tools, loop) or None,
+            }
+            # Tell the SDK to read project-level settings (including hooks.json).
+            if state.hooks_file is not None:
+                local_kwargs["setting_sources"] = ["project"]
+            local = LocalAgentOptions(**local_kwargs)
             agent = await AsyncAgent.create(
                 client=client,
                 model=model,
@@ -594,7 +659,7 @@ class CursorExecutor(Executor):
         state.tools_fingerprint = tools_fp
 
         try:
-            await self._ensure_session(state, model, tools)
+            await self._ensure_session(state, model, tools, session_key)
         except Exception as exc:  # noqa: BLE001 — surfaced as ExecutorError (CancelledError propagates)
             await self.close_session(session_key)
             yield ExecutorError(message=f"Failed to start cursor-sdk agent: {exc}")
@@ -742,6 +807,13 @@ class CursorExecutor(Executor):
         if state.client is not None:
             await _safe_close(state.client)
             state.client = None
+        # Best-effort cleanup of the hooks.json we wrote at session startup.
+        if state.hooks_file is not None:
+            try:
+                state.hooks_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            state.hooks_file = None
 
     async def close_session(self, session_key: str) -> None:
         state = self._session_states.pop(session_key, None)
