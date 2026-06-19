@@ -9,14 +9,17 @@ needed::
 
     .venv/bin/python -m pytest tests/e2e/test_host_e2e.py -v
 
-The last test (claude-native host-restart regression) is skipped because
-it requires real ``claude`` + ``tmux`` CLIs with interactive OAuth login.
+The last test (claude-native host-restart regression) runs against the
+mock LLM server but requires ``claude`` and ``tmux`` on PATH. It is
+skipped automatically when either binary is absent.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -579,19 +582,175 @@ def test_host_death_kills_runners(
         raise
 
 
-# ── Host-restart native round-trip (regression guard) ──────────
+# ── Host-restart native round-trip ─────────────────────────────
 #
-# Skipped: this test requires a real interactive Claude login (OAuth) anchored
-# to the real HOME, plus `claude` + `tmux` CLIs on PATH. That authentication
-# cannot be relocated into CI or mocked. The server-side handshake ordering
-# is covered by tests/server/integration/test_session_host_launch.py.
+# Skipped when ``claude`` or ``tmux`` are absent from PATH — the test
+# launches a real Claude Code TUI in a tmux session via the host daemon.
+# All LLM calls hit the shared mock server: the daemon's environment
+# carries ``ANTHROPIC_BASE_URL`` pointing at the mock and
+# ``ANTHROPIC_API_KEY=mock-key``; both flow to the runner via the host's
+# ``HARNESS_CREDENTIAL_ENV_VARS`` allowlist.
+
+
+def _write_claude_native_agent_yaml(tmp_path: Path) -> Path:
+    """Create a minimal ``claude-native`` agent dir for the host e2e.
+
+    No ``executor.auth`` — auth flows via ``ANTHROPIC_API_KEY`` /
+    ``ANTHROPIC_BASE_URL`` injected into the daemon's environment (and
+    therefore inherited by the runner's tmux session).
+
+    :param tmp_path: Pytest temp directory.
+    :returns: Path to the agent directory.
+    """
+    agent_dir = tmp_path / "host-e2e-claude-native"
+    agent_dir.mkdir()
+    (agent_dir / "host-e2e-claude-native.yaml").write_text(
+        "\n".join(
+            [
+                "name: host-e2e-claude-native",
+                "description: claude-native agent for host-restart e2e.",
+                "prompt: |",
+                "  You are a terse test assistant. Reply exactly as asked.",
+                "executor:",
+                "  harness: claude-native",
+                "",
+            ]
+        )
+    )
+    return agent_dir
+
+
+def _seed_onboarded_claude_home(home_dir: Path, workspace: str) -> None:
+    """Pre-seed ``~/.claude.json`` so the daemon-spawned Claude TUI starts.
+
+    The host daemon runs with ``HOME=home_dir`` and its runner launches
+    Claude there. With no prior onboarding the first-run theme picker +
+    workspace-trust dialog block the TUI before the MCP bridge initializes,
+    so the terminal/forwarder never come up. Seeding "already onboarded" +
+    "already trusts the workspace" clears both gates.
+
+    :param home_dir: The daemon's ``HOME`` (also the runner's), e.g.
+        ``tmp_path``.
+    :param workspace: The session workspace = Claude's cwd, whose trust
+        gate must be pre-accepted, e.g. ``str(tmp_path / "ws")``.
+    :returns: None.
+    """
+    (home_dir / ".claude.json").write_text(
+        json.dumps(
+            {
+                "hasCompletedOnboarding": True,
+                "theme": "dark",
+                "lastOnboardingVersion": "2.0.0",
+                "projects": {
+                    workspace: {
+                        "hasTrustDialogAccepted": True,
+                        "hasCompletedProjectOnboarding": True,
+                    },
+                },
+            }
+        )
+    )
+
+
+def _spawn_host_daemon_for_mock_claude(
+    *,
+    tmp_path: Path,
+    live_server: str,
+    mock_llm_server_url: str,
+) -> _SpawnedHostDaemon:
+    """Spawn an isolated host daemon wired to the mock Anthropic LLM.
+
+    Like :func:`_spawn_host_daemon` but sets ``ANTHROPIC_BASE_URL`` and
+    ``ANTHROPIC_API_KEY`` so the runner's Claude TUI hits the mock server
+    instead of prompting for OAuth. Both vars are in
+    ``HARNESS_CREDENTIAL_ENV_VARS`` and flow daemon→runner automatically.
+
+    The Anthropic SDK appends ``/v1/messages`` to ``ANTHROPIC_BASE_URL``,
+    so the URL must NOT include ``/v1``.
+
+    :param tmp_path: Per-test temp dir used as the daemon's ``HOME``.
+    :param live_server: Server URL the daemon registers with.
+    :param mock_llm_server_url: Mock LLM server base URL, e.g.
+        ``"http://127.0.0.1:12345"``.
+    :returns: The spawned daemon handle and its host_id.
+    """
+    omni_dir = tmp_path / ".omnigent"
+    omni_dir.mkdir(parents=True, exist_ok=True)
+    host_id = f"host_{uuid.uuid4().hex}"
+    host_name = f"e2e-host-{uuid.uuid4().hex[:12]}"
+    (omni_dir / "config.yaml").write_text(
+        yaml.safe_dump(
+            {"host": {"host_id": host_id, "name": host_name}},
+            default_flow_style=False,
+            sort_keys=True,
+        )
+    )
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path),
+        # ANTHROPIC_BASE_URL is in HARNESS_CREDENTIAL_ENV_VARS so it flows
+        # daemon→runner. The Anthropic SDK appends /v1/messages; omit /v1.
+        "ANTHROPIC_BASE_URL": mock_llm_server_url,
+        # ANTHROPIC_API_KEY bypasses the Claude CLI's OAuth login — no
+        # ~/.claude.json account is needed when an explicit API key is set.
+        "ANTHROPIC_API_KEY": "mock-key",
+        # Suppress beta headers so the mock server doesn't reject them.
+        "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+    }
+    daemon_log = tmp_path / "host-daemon.log"
+    with open(daemon_log, "w") as log_fh:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "omnigent.host._daemon_entry", "--server", live_server],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=log_fh,
+        )
+    return _SpawnedHostDaemon(proc=proc, host_id=host_id, daemon_log=daemon_log)
+
+
+def _native_user_message_round_tripped(
+    client: httpx.Client,
+    *,
+    session_id: str,
+    marker: str,
+) -> bool:
+    """Whether the forwarder mirrored the marker user message back to AP.
+
+    Native web messages aren't persisted at POST time — they're injected
+    into the TUI and the transcript forwarder mirrors them back as
+    persisted items. So a user-role item whose text carries *marker*
+    appearing in ``GET /v1/sessions/{id}/items`` proves the round-trip
+    happened (terminal + forwarder were watching before injection — the
+    fix). Without the fix the message is injected before the forwarder
+    attaches and never persists.
+
+    :param client: HTTP client pointed at the server.
+    :param session_id: Session/conversation id, e.g. ``"conv_abc"``.
+    :param marker: Unique substring embedded in the sent user message.
+    :returns: ``True`` once a matching user item is present.
+    """
+    resp = client.get(f"/v1/sessions/{session_id}/items")
+    if resp.status_code != 200:
+        return False
+    for item in resp.json().get("data", []):
+        if item.get("type") != "message" or item.get("role") != "user":
+            continue
+        content = item.get("content")
+        if isinstance(content, list) and any(
+            isinstance(block, dict)
+            and isinstance(block.get("text"), str)
+            and marker in block["text"]
+            for block in content
+        ):
+            return True
+    return False
 
 
 @pytest.mark.skipif(
-    not os.environ.get("OMNIGENT_E2E_CLAUDE_NATIVE"),
+    shutil.which("claude") is None or shutil.which("tmux") is None,
     reason=(
-        "claude-native host-restart e2e requires real `claude` + `tmux` CLIs "
-        "with interactive OAuth login; set OMNIGENT_E2E_CLAUDE_NATIVE=1 to enable"
+        "claude-native host-restart e2e requires `claude` and `tmux` on PATH; "
+        "at least one is absent in this environment"
     ),
 )
 def test_host_native_session_round_trips_after_runner_death(
@@ -603,6 +762,130 @@ def test_host_native_session_round_trips_after_runner_death(
     """A web message to a host-bound claude-native session whose runner
     died relaunches the runner and round-trips through the forwarder.
 
-    Regression guard for the host-restart native-session fix. Skipped:
-    requires real ``claude`` + ``tmux`` CLIs with interactive OAuth login.
+    Regression guard for the host-restart native-session fix. Steps:
+
+    1. Spawn a host daemon with ``ANTHROPIC_BASE_URL`` / ``ANTHROPIC_API_KEY``
+       pointing at the mock LLM server.
+    2. Create a claude-native session bound to the host.
+    3. Wait for the runner to launch and its initial pid to appear in the
+       daemon log.
+    4. Hard-kill the runner (``SIGKILL``).
+    5. Send a web message — the server must relaunch the runner via the
+       host, run ``create_session`` (terminal + transcript forwarder) BEFORE
+       forwarding the message, and the forwarder must mirror the user text
+       back as a persisted item.
+
+    The assertion is on the user-message round-trip, not Claude's reply,
+    so the test does not depend on mock LLM response ordering. The
+    round-trip itself proves the ordering fix: without it the message is
+    injected before the forwarder attaches and never surfaces in
+    ``GET /v1/sessions/{id}/items``.
     """
+    marker = f"NATIVE_RESTART_{uuid.uuid4().hex[:8].upper()}"
+    # Queue Anthropic SSE responses for both the initial runner startup
+    # turn and the post-relaunch turn.  Extra calls fall back to the
+    # default queue, so the queue never exhausts prematurely.
+    configure_mock_llm(mock_llm_server_url, [{"text": marker}, {"text": marker}])
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    # Seed the daemon HOME as onboarded + trusting the workspace so the
+    # claude TUI starts without showing the first-run / trust dialogs.
+    _seed_onboarded_claude_home(tmp_path, str(workspace))
+
+    daemon = _spawn_host_daemon_for_mock_claude(
+        tmp_path=tmp_path,
+        live_server=live_server,
+        mock_llm_server_url=mock_llm_server_url,
+    )
+    host_proc = daemon.proc
+    host_id = daemon.host_id
+
+    try:
+        _wait_for_host_online(http_client, host_id, timeout=30.0)
+
+        agent_name = upload_agent(
+            http_client,
+            _write_claude_native_agent_yaml(tmp_path),
+        )
+        agent_id = lookup_agent_id(http_client, agent_name)
+
+        # Inline host-launch: server creates the session, sends a
+        # host.launch_runner frame, and the daemon spawns the runner.
+        create_resp = http_client.post(
+            "/v1/sessions",
+            json={
+                "agent_id": agent_id,
+                "host_id": host_id,
+                "workspace": str(workspace),
+                "labels": {"omnigent.wrapper": "claude-code-native-ui"},
+            },
+            timeout=60.0,
+        )
+        create_resp.raise_for_status()
+        session_id = create_resp.json()["id"]
+
+        # Wait for the host to launch the initial runner (daemon logs its pid).
+        deadline = time.monotonic() + 90.0
+        initial_pid: int | None = None
+        while time.monotonic() < deadline:
+            initial_pid = _runner_pid_from_daemon_log(daemon.daemon_log)
+            if initial_pid is not None and _pid_alive(initial_pid):
+                break
+            time.sleep(POLL_INTERVAL_S)
+        assert initial_pid is not None, (
+            "host never launched the initial runner;\n"
+            f"daemon log:\n{daemon.daemon_log.read_text()}"
+        )
+
+        # Hard-kill the runner to simulate a crash / restart scenario.
+        os.kill(initial_pid, signal.SIGKILL)
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline and _pid_alive(initial_pid):
+            time.sleep(POLL_INTERVAL_S)
+        assert not _pid_alive(initial_pid), f"runner pid {initial_pid} did not die after SIGKILL"
+
+        # Sending a message after runner death must trigger the host to
+        # relaunch the runner.  The relaunch path runs create_session
+        # (terminal + forwarder) BEFORE injecting the message so the
+        # forwarder is watching when the text arrives and mirrors the user
+        # turn back as a persisted item.
+        send_resp = http_client.post(
+            f"/v1/sessions/{session_id}/events",
+            json={
+                "type": "message",
+                "data": {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": f"Reply with exactly {marker}"}],
+                },
+            },
+            timeout=90.0,
+        )
+        send_resp.raise_for_status()
+
+        # Poll session items for the user message mirrored back by the
+        # forwarder. Generous timeout: relaunch + Claude TUI cold-start +
+        # transcript round-trip can take 60-120 s on a warm machine.
+        deadline = time.monotonic() + 180.0
+        round_tripped = False
+        while time.monotonic() < deadline:
+            if _native_user_message_round_tripped(
+                http_client, session_id=session_id, marker=marker
+            ):
+                round_tripped = True
+                break
+            time.sleep(POLL_INTERVAL_S)
+        assert round_tripped, (
+            f"user message containing {marker!r} never appeared in "
+            f"/v1/sessions/{session_id}/items after the runner relaunch. "
+            "The relaunched runner likely forwarded the message before its "
+            "transcript forwarder was watching (the host-restart regression)."
+        )
+
+    finally:
+        host_proc.send_signal(signal.SIGTERM)
+        try:
+            host_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            host_proc.kill()
+            host_proc.wait()
