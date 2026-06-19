@@ -174,3 +174,9 @@ skips:
     issue: 677
     cluster: run-ap-examples-harness
     mode: skip
+
+  - id: tests/e2e/test_repl_approval_e2e.py::test_repl_tool_result_ask_passes_output_through
+    reason: "Rewritten to assert TOOL_RESULT ASK pass-through (#763), but flakes ~3% on a pexpect I/O-readiness timing hiccup (29/30 in flake-stress run 27805892926; mock-LLM content is deterministic). Kept quarantined pending a wait-harden; the other 2 rewritten siblings are 30/30 and un-quarantined."
+    issue: 763
+    cluster: repl-policy-ask-surfacing
+    mode: skip
