@@ -16,6 +16,15 @@ assistant text length).
 
 Design reference: ``designs/OMNIGENT_INTEGRATION.md`` §Phase 0
 per-harness suite.
+
+**Serial execution note:** These tests are designed for serial
+execution — do NOT run them under pytest-xdist or any parallel
+runner that shares the mock LLM server process. Each test uses a
+UUID-keyed model name, so concurrent tests use separate queues and
+queue cross-contamination is impossible even without ``reset_mock_llm``.
+The ``reset_mock_llm`` call is kept as a safety guard to clear any
+leftover state from prior test runs in the same session, but it
+would wipe another test's queue if two tests ran simultaneously.
 """
 
 from __future__ import annotations

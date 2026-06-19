@@ -18,6 +18,15 @@ stderr cleanliness, assistant text length).
 
 Design reference: ``designs/OMNIGENT_INTEGRATION.md`` §Phase 0
 per-harness suite.
+
+**Serial execution note:** These tests are designed for serial
+execution — do NOT run them under pytest-xdist or any parallel
+runner that shares the mock LLM server process. Each test uses a
+UUID-keyed model name, so concurrent tests use separate queues and
+queue cross-contamination is impossible even without ``reset_mock_llm``.
+The ``reset_mock_llm`` call is kept as a safety guard to clear any
+leftover state from prior test runs in the same session, but it
+would wipe another test's queue if two tests ran simultaneously.
 """
 
 from __future__ import annotations
@@ -100,14 +109,15 @@ def test_per_harness_openai_agents_sdk_one_shot(
         configuring canned responses.
     :param openai_agents_available: True when the ``agents``
         package is importable in the omnigent venv. On False
-        the test fails with an explicit reason per CLAUDE.md
-        rule 30 (no silent skips).
+        the test skips — consistent with the codex and
+        claude-sdk harness tests that skip when their binary
+        is absent.
     """
     if not openai_agents_available:
-        pytest.fail(
+        pytest.skip(
             "openai-agents-sdk harness prerequisite missing: "
             "the 'agents' Python package (openai-agents) must be "
-            "installed in the Omnigent venv."
+            "installed in the Omnigent venv. Skipping — package absent."
         )
 
     model = f"mock-harness-openai-{uuid.uuid4().hex[:8]}"

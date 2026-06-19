@@ -18,6 +18,24 @@ cleanliness, assistant text length).
 
 Design reference: ``designs/OMNIGENT_INTEGRATION.md`` §Phase 0
 per-harness suite.
+
+**Serial execution note:** These tests are designed for serial
+execution — do NOT run them under pytest-xdist or any parallel
+runner that shares the mock LLM server process. Each test uses a
+UUID-keyed model name, so concurrent tests use separate queues and
+queue cross-contamination is impossible even without ``reset_mock_llm``.
+The ``reset_mock_llm`` call is kept as a safety guard to clear any
+leftover state from prior test runs in the same session, but it
+would wipe another test's queue if two tests ran simultaneously.
+
+**Mock routing note (pi):** The pi executor is expected to route
+model calls via ``OPENAI_BASE_URL`` (set by ``mock_credentials_env``).
+If a particular pi build reads ``~/.databrickscfg`` instead and
+ignores ``OPENAI_BASE_URL``, the test would connect to a real
+endpoint rather than the mock server and fail or behave
+non-deterministically. The module-level ``pytestmark`` skips the
+test when ``pi`` is absent; on CI the binary should either be
+absent (skip) or be a build that honors ``OPENAI_BASE_URL``.
 """
 
 from __future__ import annotations
