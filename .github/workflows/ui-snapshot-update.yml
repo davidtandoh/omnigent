@@ -1,0 +1,185 @@
+name: UI Snapshot Update
+
+# Label-driven baseline update for the empty "/" landing snapshot
+# (tests/e2e_ui/visual/test_landing_snapshot.py).
+#
+# Add the `update-ui-snapshot` label to a PR and this regenerates the baseline
+# with --update-snapshots on the SAME pinned ubuntu-24.04 runner the compare
+# gate (ui-snapshot.yml) uses, then commits the new PNG back to the PR branch.
+# Replaces the admin-only workflow_dispatch + manual download-and-commit dance.
+#
+# Re-trigger: the push uses the OMNIGENT_BOT_APP token (NOT GITHUB_TOKEN, whose
+# pushes GitHub suppresses to avoid loops), so it re-fires the PR's full check
+# suite on the new commit -- no manual "Re-run". Falls back to GITHUB_TOKEN if
+# the App isn't configured (lands, but a maintainer must push to re-run CI),
+# mirroring oss-regen-on-comment.yml.
+#
+# Same-repo branches only: Actions tokens can't push to a fork branch, so fork
+# PRs are skipped here and update the baseline from the compare gate's rendered
+# artifact instead (see tests/e2e_ui/visual/README.md). This matches the repo's
+# /regen convention, which also rejects forks.
+#
+# Security: PR-controlled code (the npm build + the test) runs with NO push
+# token on disk (persist-credentials: false); the App token is minted only
+# afterwards and used inline at the push step, never written to .git/config.
+
+on:
+  pull_request:
+    types: [labeled]
+
+# Read-only at the top level; the write scopes live on the job below.
+permissions:
+  contents: read
+
+concurrency:
+  group: ui-snapshot-update-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  OMNIGENT_SKIP_WEB_UI: "true"
+
+jobs:
+  update-baseline:
+    name: Regenerate + commit landing baseline
+    permissions:
+      contents: write      # push the regenerated baseline (GITHUB_TOKEN fallback)
+      pull-requests: write # comment the result + drop the trigger label
+    # Same-repo only: a fork's read-only token can't push to the fork branch.
+    if: >-
+      github.event.label.name == 'update-ui-snapshot' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          # No persisted credentials: the npm build + test below run PR-chosen
+          # code, which must not find a push token on disk. The App token is
+          # minted later and used only at the push step.
+          ref: ${{ github.event.pull_request.head.ref }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
+        with:
+          python-version-file: ".python-version"
+
+      - name: Set up Node 20
+        uses: ./.github/actions/setup-node
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a  # v4
+        with:
+          enable-cache: true
+
+      - name: Cache virtualenv
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('.python-version') }}-${{ hashFiles('uv.lock') }}
+
+      - name: Install project + dev extras
+        run: uv sync --extra all --extra dev
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+
+      - name: Install Playwright Chromium
+        run: uv run playwright install --with-deps chromium
+
+      - name: Build ap-web SPA
+        env:
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+        run: |
+          cd ap-web
+          npm ci --legacy-peer-deps --no-audit --no-fund
+          npm run build
+
+      - name: Regenerate the landing baseline
+        # --update-snapshots rewrites the committed PNG; the run "fails" by
+        # design under the plugin, so don't gate the commit on its exit code.
+        run: |
+          uv run pytest tests/e2e_ui/visual -m visual \
+            -v --tb=long --log-level=INFO -r a \
+            -p no:rerunfailures \
+            --ui-skip-build \
+            --update-snapshots || true
+
+      # Mint the App token only AFTER the PR-controlled build + test ran, so
+      # untrusted code never sees the push token. Skipped when the App isn't
+      # configured (push then falls back to GITHUB_TOKEN, which won't re-run CI).
+      - name: Mint App token
+        id: app-token
+        if: vars.OMNIGENT_BOT_APP_ID != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          app-id: ${{ vars.OMNIGENT_BOT_APP_ID }}
+          private-key: ${{ secrets.OMNIGENT_BOT_APP_KEY }}
+
+      # The push token authenticates inline (scoped to this step, never in
+      # .git/config). An App-token push re-fires the PR's checks; a GITHUB_TOKEN
+      # fallback push does not. HEAD_REF (user-influenced) passes via env.
+      - name: Commit + push the regenerated baseline
+        id: push
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PUSH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          git config user.name "omnigent-ci[bot]"
+          git config user.email "294685417+omnigent-ci[bot]@users.noreply.github.com"
+          git add tests/e2e_ui/visual/snapshots
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Baseline already matches this PR's render — nothing to commit."
+            exit 0
+          fi
+          git commit -m "test(e2e-ui): regenerate landing visual baseline"
+          git push "https://x-access-token:${PUSH_TOKEN}@github.com/${REPO}.git" "HEAD:$HEAD_REF"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      # Report on the PR thread and drop the label so it can be re-applied to
+      # regenerate again. Runs whenever the push step reached a conclusion.
+      - name: Comment the result + drop the label
+        if: ${{ always() && steps.push.conclusion == 'success' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          CHANGED: ${{ steps.push.outputs.changed }}
+          # App token used → push re-triggers CI; skipped fallback → it won't.
+          APP_USED: ${{ steps.app-token.conclusion == 'success' }}
+        run: |
+          if [ "$CHANGED" = "true" ]; then
+            base="✅ Regenerated the landing visual baseline on ubuntu-24.04 and pushed it to this PR."
+            if [ "$APP_USED" = "true" ]; then
+              body="$base CI will re-run on the new commit."
+            else
+              body="$base ⚠️ No bot App configured, so this push won't auto-trigger CI — push any commit to re-run checks."
+            fi
+            gh pr comment "$PR" --repo "$REPO" --body "$body"
+          else
+            gh pr comment "$PR" --repo "$REPO" \
+              --body "ℹ️ Baseline already matches this PR's render — nothing to update."
+          fi
+          gh pr edit "$PR" --repo "$REPO" --remove-label update-ui-snapshot || true
+
+      # Failure path: report on the PR (not just the Actions tab) and still drop
+      # the label so the PR doesn't look stuck.
+      - name: Comment on failure + drop the label
+        if: ${{ failure() }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh pr comment "$PR" --repo "$REPO" \
+            --body "❌ \`update-ui-snapshot\` failed — see the [workflow run]($RUN_URL). Baseline unchanged."
+          gh pr edit "$PR" --repo "$REPO" --remove-label update-ui-snapshot || true

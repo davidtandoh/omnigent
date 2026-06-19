@@ -1,0 +1,77 @@
+name: UI Snapshot Fork Help
+
+# When the UI Snapshot compare gate fails on a FORK PR, comment on the PR with
+# how to adopt the CI-rendered baseline (CI can't push to a fork branch, and the
+# contributor can't regenerate locally because rendering is OS-specific).
+#
+# A fork `pull_request` run gets a read-only token and can't comment, so this
+# runs as `workflow_run` in the BASE-repo context (writable token). Crucially it
+# NEVER checks out or runs fork code -- it only reads the completed run's
+# metadata (head SHA, run URL) and posts a comment. Same-repo PRs use the
+# `update-ui-snapshot` label flow, so they're skipped here.
+
+on:
+  workflow_run:
+    workflows: ["UI Snapshot"]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ui-snapshot-fork-help-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: true
+
+jobs:
+  comment:
+    name: Comment fork update instructions
+    # Only failed compare runs from a fork PR. Same-repo PRs (head repo == this
+    # repo) have the label flow; non-PR runs have no PR to comment on.
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.head_repository.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Upsert the fork-update comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          BASELINE: tests/e2e_ui/visual/snapshots/test_landing_snapshot/test_empty_landing_matches_baseline/test_empty_landing_matches_baseline[chromium][linux].png
+        run: |
+          set -euo pipefail
+          # workflow_run.pull_requests is empty for forks, so resolve the PR from
+          # the head SHA. No PR (e.g. branch already merged/closed) -> nothing to do.
+          pr=$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls" --jq '.[0].number // empty' 2>/dev/null || true)
+          if [ -z "$pr" ]; then
+            echo "No open PR for $HEAD_SHA; nothing to comment."
+            exit 0
+          fi
+
+          marker="<!-- ui-snapshot-fork-helper -->"
+          # printf (not a heredoc) so backticks stay literal and there are no
+          # leading-space markdown surprises. \` is a literal backtick.
+          body=$(printf '%s\n' \
+            "$marker" \
+            "❌ **UI Snapshot** doesn't match the committed baseline." \
+            "" \
+            "If this UI change is intentional, adopt the render CI just produced — CI can't push to a fork branch, and you can't regenerate locally (rendering is OS-specific):" \
+            "" \
+            "1. Open the [failed run]($RUN_URL) and download the \`ui-snapshot-<run_id>\` artifact." \
+            "2. From \`snapshot_failures/\`, review \`actual_*.png\` — your change rendered on the canonical runner." \
+            "3. Commit it over \`$BASELINE\` and push. Your push re-runs the checks.")
+
+          jq -n --arg b "$body" '{body: $b}' > "$RUNNER_TEMP/payload.json"
+
+          # Upsert so repeated failures update one comment instead of spamming.
+          existing=$(gh api --paginate "repos/$REPO/issues/$pr/comments" \
+            --jq ".[] | select(.body | contains(\"$marker\")) | .id" | head -n1 || true)
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$existing" --input "$RUNNER_TEMP/payload.json" --silent
+          else
+            gh api -X POST "repos/$REPO/issues/$pr/comments" --input "$RUNNER_TEMP/payload.json" --silent
+          fi
