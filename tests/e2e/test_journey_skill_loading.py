@@ -56,10 +56,7 @@ def test_skill_loading_journey(
         harness="openai-agents",
         model=model,
         profile="",
-        prompt=(
-            "You are a research assistant. "
-            "When asked, call load_skill to load skills."
-        ),
+        prompt=("You are a research assistant. When asked, call load_skill to load skills."),
         mock_llm_base_url=f"{mock_llm_server_url}/v1",
     )
 
@@ -111,9 +108,7 @@ def test_skill_loading_journey(
     )
 
     tool_names = _extract_tool_names(body)
-    assert "load_skill" in tool_names, (
-        f"Expected load_skill tool call. Tool calls: {tool_names}."
-    )
+    assert "load_skill" in tool_names, f"Expected load_skill tool call. Tool calls: {tool_names}."
 
     # Turn 2: follow-up
     configure_mock_llm(

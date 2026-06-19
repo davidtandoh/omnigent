@@ -116,9 +116,7 @@ def test_first_session_to_working_code_journey(
         response_id=response_id,
         timeout=60,
     )
-    assert body["status"] == "completed", (
-        f"Agent coding turn failed. error={body.get('error')!r}."
-    )
+    assert body["status"] == "completed", f"Agent coding turn failed. error={body.get('error')!r}."
 
     text_output = _extract_all_text(body).lower()
     assert "palindrome" in text_output, (
@@ -191,8 +189,7 @@ def test_first_session_to_working_code_journey(
         timeout=60,
     )
     assert address_body["status"] == "completed", (
-        f"Agent address-comment turn failed. "
-        f"error={address_body.get('error')!r}."
+        f"Agent address-comment turn failed. error={address_body.get('error')!r}."
     )
 
     address_calls = _tool_names_in_output(address_body)
