@@ -1,14 +1,17 @@
-name: UI Snapshot Fork Help
+name: UI Snapshot Failure Comment
 
-# When the UI Snapshot compare gate fails on a FORK PR, comment on the PR with
-# how to adopt the CI-rendered baseline (CI can't push to a fork branch, and the
-# contributor can't regenerate locally because rendering is OS-specific).
+# When the UI Snapshot compare gate fails on a PR, upsert a PR comment with how
+# to update the baseline -- tailored for same-repo PRs (the `update-ui-snapshot`
+# label) and fork PRs (adopt the run's rendered PNG, since CI can't push to a
+# fork).
 #
 # A fork `pull_request` run gets a read-only token and can't comment, so this
 # runs as `workflow_run` in the BASE-repo context (writable token). Crucially it
-# NEVER checks out or runs fork code -- it only reads the completed run's
-# metadata (head SHA, run URL) and posts a comment. Same-repo PRs use the
-# `update-ui-snapshot` label flow, so they're skipped here.
+# NEVER checks out or runs PR/fork code -- it only reads the completed run's
+# metadata (head SHA + repo, run URL) and posts a comment.
+#
+# NOTE: `workflow_run` only triggers from the copy of this file on the DEFAULT
+# branch, so it activates once merged to main -- it does not fire on its own PR.
 
 on:
   workflow_run:
@@ -20,50 +23,54 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: ui-snapshot-fork-help-${{ github.event.workflow_run.head_sha }}
+  group: ui-snapshot-fail-comment-${{ github.event.workflow_run.head_sha }}
   cancel-in-progress: true
 
 jobs:
   comment:
-    name: Comment fork update instructions
-    # Only failed compare runs from a fork PR. Same-repo PRs (head repo == this
-    # repo) have the label flow; non-PR runs have no PR to comment on.
+    name: Upsert baseline-update instructions
+    # Only failed compare runs that came from a PR (push/dispatch have no PR).
     if: >-
       github.event.workflow_run.event == 'pull_request' &&
-      github.event.workflow_run.conclusion == 'failure' &&
-      github.event.workflow_run.head_repository.full_name != github.repository
+      github.event.workflow_run.conclusion == 'failure'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Upsert the fork-update comment
+      - name: Upsert the failure comment
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
           RUN_URL: ${{ github.event.workflow_run.html_url }}
           BASELINE: tests/e2e_ui/visual/snapshots/test_landing_snapshot/test_empty_landing_matches_baseline/test_empty_landing_matches_baseline[chromium][linux].png
         run: |
           set -euo pipefail
           # workflow_run.pull_requests is empty for forks, so resolve the PR from
-          # the head SHA. No PR (e.g. branch already merged/closed) -> nothing to do.
+          # the head SHA (works for same-repo and fork). No open PR -> nothing to do.
           pr=$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls" --jq '.[0].number // empty' 2>/dev/null || true)
           if [ -z "$pr" ]; then
             echo "No open PR for $HEAD_SHA; nothing to comment."
             exit 0
           fi
 
-          marker="<!-- ui-snapshot-fork-helper -->"
+          # Tailor the "how to update" line to where the branch lives.
+          if [ "$HEAD_REPO" = "$REPO" ]; then
+            how="add the \`update-ui-snapshot\` label — the bot regenerates the baseline on the pinned runner and pushes it back to this PR."
+          else
+            how="CI can't push to a fork branch, so adopt the render this run produced: download the \`ui-snapshot-<run_id>\` artifact from the [run]($RUN_URL), review \`snapshot_failures/.../actual_*.png\`, commit it over \`$BASELINE\`, and push."
+          fi
+
+          marker="<!-- ui-snapshot-fail-comment -->"
           # printf (not a heredoc) so backticks stay literal and there are no
           # leading-space markdown surprises. \` is a literal backtick.
           body=$(printf '%s\n' \
             "$marker" \
             "❌ **UI Snapshot** doesn't match the committed baseline." \
             "" \
-            "If this UI change is intentional, adopt the render CI just produced — CI can't push to a fork branch, and you can't regenerate locally (rendering is OS-specific):" \
+            "If this UI change is intentional, $how" \
             "" \
-            "1. Open the [failed run]($RUN_URL) and download the \`ui-snapshot-<run_id>\` artifact." \
-            "2. From \`snapshot_failures/\`, review \`actual_*.png\` — your change rendered on the canonical runner." \
-            "3. Commit it over \`$BASELINE\` and push. Your push re-runs the checks.")
+            "The diff PNGs (\`expected_\` = baseline, \`actual_\` = your render, \`diff_\`) are in the [run]($RUN_URL) artifact.")
 
           jq -n --arg b "$body" '{body: $b}' > "$RUNNER_TEMP/payload.json"
 

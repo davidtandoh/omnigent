@@ -71,10 +71,12 @@ runner, so:
 3. Commit it over the baseline at the path above and push. Your push re-runs all
    checks; the compare job now passes.
 
-When the check fails on a fork PR,
-[`ui-snapshot-fork-help.yml`](../../../.github/workflows/ui-snapshot-fork-help.yml)
-posts these same steps as a PR comment (it runs as `workflow_run` so it can
-comment without ever executing fork code).
+Whenever the check fails (same-repo or fork),
+[`ui-snapshot-fail-comment.yml`](../../../.github/workflows/ui-snapshot-fail-comment.yml)
+upserts a PR comment with the relevant update steps — the label for same-repo
+branches, these artifact steps for forks. It runs as `workflow_run` so it can
+comment without ever executing PR/fork code, which means it only activates once
+merged to `main` (it does not fire on its own PR).
 
 ### Workflow dispatch (non-PR branches)
 
