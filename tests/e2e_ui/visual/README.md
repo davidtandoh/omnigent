@@ -62,14 +62,19 @@ This works for **same-repo branches only** — Actions tokens can't push to a fo
 
 CI can't push to a fork branch, and you can't regenerate locally (cross-OS
 rendering). But the compare run already rendered your change on the canonical
-runner, so:
+runner, so pull that image into the baseline with the helper script:
 
-1. On the failing **UI Snapshot** check, open the run and download the
-   `ui-snapshot-<run_id>` artifact (also linked in the job summary).
-2. Take `snapshot_failures/.../actual_*.png` — that's your change rendered on
-   `ubuntu-24.04` — and **review it**.
-3. Commit it over the baseline at the path above and push. Your push re-runs all
-   checks; the compare job now passes.
+```bash
+tests/e2e_ui/visual/update_baseline_from_pr.sh <pr-number>
+```
+
+It finds the PR's UI Snapshot run, downloads the artifact, and copies the
+runner-rendered `actual_` PNG over the committed baseline. **Review the image**,
+then commit and push — your push re-runs all checks and the compare job passes.
+
+Prefer to do it by hand? Download the `ui-snapshot-<run_id>` artifact from the
+failing run, take `snapshot_failures/.../actual_*.png`, and commit it over the
+baseline at the path above.
 
 Whenever the check fails (same-repo or fork),
 [`ui-snapshot-fail-comment.yml`](../../../.github/workflows/ui-snapshot-fail-comment.yml)

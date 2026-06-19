@@ -58,7 +58,7 @@ jobs:
           if [ "$HEAD_REPO" = "$REPO" ]; then
             how="add the \`update-ui-snapshot\` label — the bot regenerates the baseline on the pinned runner and pushes it back to this PR."
           else
-            how="CI can't push to a fork branch, so adopt the render this run produced: download the \`ui-snapshot-<run_id>\` artifact from the [run]($RUN_URL), review \`snapshot_failures/.../actual_*.png\`, commit it over \`$BASELINE\`, and push."
+            how="CI can't push to a fork branch, so adopt the render this run produced: run \`tests/e2e_ui/visual/update_baseline_from_pr.sh $pr\` locally (it pulls this run's image into the baseline), review it, commit, and push. Manual alternative: download the \`ui-snapshot-<run_id>\` artifact from the [run]($RUN_URL), take \`snapshot_failures/.../actual_*.png\`, and commit it over \`$BASELINE\`."
           fi
 
           marker="<!-- ui-snapshot-fail-comment -->"
