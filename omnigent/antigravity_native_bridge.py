@@ -1089,11 +1089,7 @@ def _agy_input_region(pane: str) -> str:
     currently editable input box, mirroring Kiro's input-region guard.
     """
     lines = pane.splitlines()
-    separator_indexes = [
-        index
-        for index, line in enumerate(lines)
-        if _agy_separator_line(line)
-    ]
+    separator_indexes = [index for index, line in enumerate(lines) if _agy_separator_line(line)]
     if len(separator_indexes) >= 2:
         start = separator_indexes[-2] + 1
         end = separator_indexes[-1]
@@ -1336,9 +1332,7 @@ def inject_user_message_via_tui(
         while time.monotonic() < commit_deadline:
             pane = _capture_pane(socket_path, tmux_target)
             last_commit_pane = pane or last_commit_pane
-            if _draft_in_input_region(
-                pane, needle, baseline_region
-            ):
+            if _draft_in_input_region(pane, needle, baseline_region):
                 draft_seen = True
                 break
             time.sleep(_TMUX_POLL_INTERVAL_S)
