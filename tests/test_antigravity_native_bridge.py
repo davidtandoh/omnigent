@@ -1047,6 +1047,151 @@ def test_inject_user_message_via_tui_rejects_empty_content(tmp_path: Path) -> No
 
 
 # ---------------------------------------------------------------------------
+# Composer-region detection robustness (#1598 review follow-ups)
+# ---------------------------------------------------------------------------
+
+
+def test_agy_separator_line_accepts_pure_and_decorated_rules() -> None:
+    """Separator detection accepts a pure ─ rule and corner/join-decorated rules.
+
+    agy 1.0.14 renders a pure ``─`` composer rule, but a future build could frame
+    it with box-drawing corners; detection must tolerate that without matching
+    ordinary text or a short dash run.
+    """
+    assert _mod._agy_separator_line("─" * 60)
+    assert _mod._agy_separator_line("╭" + "─" * 40 + "╮")
+    assert _mod._agy_separator_line("├" + "─" * 20 + "┤")
+    # Not separators: ordinary text, ASCII dashes, and < 8 rule chars.
+    assert not _mod._agy_separator_line("> Generating the answer now")
+    assert not _mod._agy_separator_line("--- short ---")
+    assert not _mod._agy_separator_line("─────")
+
+
+def test_draft_candidate_lines_keep_prompt_text_with_status_words() -> None:
+    """A draft line carrying the ``>`` prompt is kept even if it contains a status word.
+
+    The chrome filters (``Generating``/idle/active markers) must apply only to
+    non-prompt rows; otherwise a legitimate message whose first line contains such
+    a word is filtered out and the turn is misread as "never rendered".
+    """
+    region = "> Generating a fix for the esc to cancel bug\n? for shortcuts"
+    candidates = _mod._agy_draft_candidate_lines(region)
+    assert "Generating a fix for the esc to cancel bug" in candidates
+    # The non-prompt idle footer row is still filtered.
+    assert "? for shortcuts" not in candidates
+
+
+def test_draft_in_input_region_keeps_prompt_text_with_status_words() -> None:
+    """A draft whose first line contains 'Generating' is detected, not hard-failed."""
+    sep = "─" * 60
+    baseline = _mod._agy_input_region(f"{sep}\n>\n{sep}\n? for shortcuts")
+    content = "Generating the migration is slow, please fix it"
+    needle = _mod._submit_needle(content)
+    pane = f"{sep}\n> {content}\n{sep}\n? for shortcuts"
+    assert _mod._draft_in_input_region(pane, needle, baseline)
+
+
+def test_draft_in_input_region_matches_short_message_by_composer_change() -> None:
+    """An empty needle (short message) is detected by a changed composer, not text.
+
+    A draft in a composer that differs from the pre-paste baseline counts as
+    present; the unchanged baseline (or a fresh empty composer after submit) does
+    not — so short messages are render/submit-verified instead of submitted blind.
+    """
+    sep = "─" * 60
+    baseline = _mod._agy_input_region(f"{sep}\n>\n{sep}\n? for shortcuts")
+    pane_with_draft = f"{sep}\n> ok\n{sep}\n? for shortcuts"
+    pane_after_submit = f"{sep}\n> ok\n{sep}\n>\n{sep}\nesc to cancel"
+    assert _mod._draft_in_input_region(pane_with_draft, "", baseline)
+    assert not _mod._draft_in_input_region(pane_after_submit, "", baseline)
+
+
+def test_format_pane_debug_tail_redacts_email_and_secrets() -> None:
+    """The diagnostic pane tail redacts emails and common secret shapes (#1598)."""
+    pane = (
+        "signed in as alice@example.com\n"
+        "key sk-ABCDEF0123456789ABCDEF\n"
+        "export GH=ghp_ABCDEFGHIJ0123456789ABCDEFGHIJ\n"
+        "Authorization: Bearer abcdef123456\n"
+        "> draft text"
+    )
+    out = _mod._format_pane_debug_tail(pane)
+    assert "alice@example.com" not in out
+    assert "sk-ABCDEF0123456789ABCDEF" not in out
+    assert "ghp_ABCDEFGHIJ0123456789ABCDEFGHIJ" not in out
+    assert "[REDACTED_EMAIL]" in out
+    assert "[REDACTED_SECRET]" in out
+    assert "> draft text" in out  # non-secret context is preserved
+    assert _mod._format_pane_debug_tail("") == "<empty pane>"
+
+
+def test_inject_user_message_via_tui_delivers_short_message(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _fast_tmux_timeouts: None,
+) -> None:
+    """A short message with no stable needle ('ok') is render- and submit-verified.
+
+    The empty-needle path must not submit blind: the draft is confirmed to render
+    by composer change, and submission is confirmed by the draft clearing — so a
+    legitimate short turn is delivered with exactly one verified Enter.
+    """
+    bridge_dir = tmp_path / "bridge"
+    write_tmux_target(bridge_dir, socket_path=Path("/tmp/ex/tmux.sock"), tmux_target="main")
+    enters = {"n": 0}
+    tui = {"pane": "> \n? for shortcuts"}
+
+    def _fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        """Idle, draft after paste, composer clears after Enter."""
+        del kwargs
+        if "has-session" in cmd:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if "capture-pane" in cmd:
+            return SimpleNamespace(returncode=0, stdout=tui["pane"], stderr="")
+        if "paste-buffer" in cmd:
+            tui["pane"] = "> ok\n? for shortcuts"
+        if cmd[-1] == "Enter":
+            enters["n"] += 1
+            tui["pane"] = "> \n? for shortcuts"
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    inject_user_message_via_tui(bridge_dir, content="ok", timeout_s=0.5)
+    assert enters["n"] == 1
+
+
+def test_inject_user_message_via_tui_short_message_raises_when_not_submitted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _fast_tmux_timeouts: None,
+) -> None:
+    """A short message whose draft never clears fails loudly, not silently.
+
+    Regression guard for the empty-needle path: previously a no-needle message was
+    submitted with a single unverified Enter, so a folded Enter left it stuck in
+    the composer and the turn was silently lost. It must now raise.
+    """
+    bridge_dir = tmp_path / "bridge"
+    write_tmux_target(bridge_dir, socket_path=Path("/tmp/ex/tmux.sock"), tmux_target="main")
+    tui = {"pane": "> \n? for shortcuts"}
+
+    def _fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        """Draft renders but never clears (Enter folded into the paste burst)."""
+        del kwargs
+        if "has-session" in cmd:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if "capture-pane" in cmd:
+            return SimpleNamespace(returncode=0, stdout=tui["pane"], stderr="")
+        if "paste-buffer" in cmd:
+            tui["pane"] = "> ok\n? for shortcuts"
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    with pytest.raises(RuntimeError, match="draft is still visible"):
+        inject_user_message_via_tui(bridge_dir, content="ok", timeout_s=0.5)
+
+
+# ---------------------------------------------------------------------------
 # Omnigent MCP relay wiring (sys_* tools) — #1194
 # ---------------------------------------------------------------------------
 

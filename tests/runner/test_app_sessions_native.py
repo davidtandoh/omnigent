@@ -3895,6 +3895,17 @@ async def test_auto_create_antigravity_wires_omnigent_mcp_relay(
     assert "HOME" not in captured_spec["env"]
     assert captured_spec["env"]["AGY_ENV"] == "1"
 
+    # 4) The session workspace is pre-trusted AND the feedback survey is disabled
+    #    in the SAME isolated settings.json agy reads under --gemini_dir (#1598 +
+    #    #1494), proving the trust seed and the survey-disable compose in the
+    #    isolated dir without one clobbering the other (the rebase conflict point).
+    settings = iso_gemini / "antigravity-cli" / "settings.json"
+    assert settings.is_file()
+    settings_data = json.loads(settings.read_text(encoding="utf-8"))
+    workspace_key = str((tmp_path / "workspace").resolve())
+    assert workspace_key in settings_data.get("trustedWorkspaces", [])
+    assert settings_data.get("showFeedbackSurvey") is False
+
 
 @pytest.mark.parametrize("parent_host_id", ["host_parent", None])
 @pytest.mark.asyncio

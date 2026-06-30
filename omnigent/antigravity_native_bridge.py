@@ -851,11 +851,33 @@ _MAX_SUBMIT_ATTEMPTS = 3
 _PASTE_BUFFER = "omnigent-agy-paste"
 # agy TUI footer when idle (input box mounted, ready for a turn).
 _AGY_IDLE_MARKER = "? for shortcuts"
-# agy TUI footer while a turn is running — the positive "submit took" signal.
+# agy TUI footer while a turn is running. Used as a readiness hint and to detect
+# a mid-turn steer; submission itself is verified by draft disappearance, NOT by
+# this marker (footer text can change across agy builds or be truncated).
 _AGY_ACTIVE_MARKER = "esc to cancel"
+# Patterns redacted from a pane tail before it is surfaced in a delivery-failure
+# error. The agy header shows the signed-in account email, and the transcript
+# region can echo tokens/keys agy printed; redaction is best-effort and biased
+# toward over-redaction so a secret never leaks into a user-facing error.
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+")
+_SECRET_RES = (
+    re.compile(r"\b(?:sk|rk)-[A-Za-z0-9_-]{16,}"),  # OpenAI-style keys
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"),  # GitHub tokens
+    re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"),  # Slack tokens
+    re.compile(r"\bya29\.[A-Za-z0-9._-]{10,}"),  # Google OAuth access tokens
+    re.compile(r"\bAIza[A-Za-z0-9_-]{30,}"),  # Google API keys
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),  # AWS access key ids
+    re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{6,}"),  # JWTs
+    re.compile(r"(?i)\b(?:bearer|token|api[_-]?key|secret|password)\b\s*[:=]?\s*\S{6,}"),
+)
 # TUI horizontal separator around agy's bottom composer.
 _AGY_SEPARATOR_CHAR = "─"
+# Box-drawing glyphs agy may use to frame/decorate the composer rule. A rule is
+# detected when its non-space chars are all box-drawing AND it carries a run of
+# the horizontal rule char, so a future agy that frames the composer with
+# corner/join glyphs (e.g. ``╭────╮``) is still detected, while ordinary text
+# (which carries non-box chars) never matches.
+_AGY_BOX_GLYPHS = frozenset("─━╌╍┄┅┈┉╭╮╰╯┌┐└┘├┤┬┴┼│║╔╗╚╝═╠╣╦╩╬╴╵╶╷")
 
 
 def write_tmux_target(
@@ -1065,17 +1087,31 @@ def _submit_needle(content: str) -> str:
     return stripped[:24] if len(stripped) >= 4 else ""
 
 
+def _redact_pane_secrets(text: str) -> str:
+    """Redact emails and common secret shapes from a pane tail.
+
+    Best-effort and biased toward over-redaction: the tail is embedded in a
+    user-facing delivery error, and agy may have printed the signed-in account
+    email or tokens/keys in the transcript region.
+    """
+    redacted = _EMAIL_RE.sub("[REDACTED_EMAIL]", text)
+    for pattern in _SECRET_RES:
+        redacted = pattern.sub("[REDACTED_SECRET]", redacted)
+    return redacted
+
+
 def _format_pane_debug_tail(pane: str) -> str:
     """
     Return a short, redacted pane tail for delivery failure diagnostics.
 
-    The agy pane header can include the authenticated user's email address. Keep
-    this diagnostic safe to surface in an executor error by redacting email-like
-    tokens and limiting the output to a small tail.
+    The agy pane header can include the authenticated user's email address and
+    the transcript region can echo secrets agy printed. Keep this diagnostic safe
+    to surface in an executor error by redacting emails + common secret shapes
+    (see :func:`_redact_pane_secrets`) and limiting the output to a small tail.
     """
     lines = [line.rstrip() for line in pane.splitlines() if line.strip()]
     tail = "\n".join(lines[-12:])
-    return _EMAIL_RE.sub("[REDACTED_EMAIL]", tail) or "<empty pane>"
+    return _redact_pane_secrets(tail) or "<empty pane>"
 
 
 def _agy_input_region(pane: str) -> str:
@@ -1098,9 +1134,17 @@ def _agy_input_region(pane: str) -> str:
 
 
 def _agy_separator_line(line: str) -> bool:
-    """Return whether *line* is one of agy's composer separator rules."""
+    """Return whether *line* is one of agy's composer separator rules.
+
+    Accepts a pure ``─`` rule (agy 1.0.14) and a box-decorated rule (corner/join
+    glyphs) so a future agy that frames the composer is still detected, while an
+    ordinary text/draft line (which carries non-box chars) never matches. A short
+    dash run (< 8 rule chars) is not treated as a separator.
+    """
     stripped = line.strip()
-    return len(stripped) >= 8 and set(stripped) == {_AGY_SEPARATOR_CHAR}
+    if stripped.count(_AGY_SEPARATOR_CHAR) < 8:
+        return False
+    return all(char in _AGY_BOX_GLYPHS for char in stripped if not char.isspace())
 
 
 def _draft_in_input_region(pane: str, needle: str, baseline_region: str) -> bool:
@@ -1110,35 +1154,46 @@ def _draft_in_input_region(pane: str, needle: str, baseline_region: str) -> bool
     The baseline region prevents matching the empty prompt or stale text that was
     already present before this paste. Candidate lines are normalized by removing
     agy's leading ``>`` prompt glyph.
+
+    When *needle* is empty (a message too short for a stable needle, e.g.
+    ``"ok"``), any draft-like content in a composer that differs from the
+    pre-paste baseline counts as present — so short messages are still render- and
+    submit-verified by composer state instead of being submitted blind.
     """
-    if not needle:
-        return False
     region = _agy_input_region(pane)
     if region == baseline_region:
         return False
-    normalized_needle = needle.strip()
+    candidates = _agy_draft_candidate_lines(region)
+    normalized_needle = needle.strip() if needle else ""
     if not normalized_needle:
-        return False
+        return bool(candidates)
     return any(
         line == normalized_needle
         or line.startswith(normalized_needle)
         or normalized_needle in line
-        for line in _agy_draft_candidate_lines(region)
+        for line in candidates
     )
 
 
 def _agy_draft_candidate_lines(region: str) -> list[str]:
-    """Return composer lines that can represent editable draft text."""
+    """Return composer lines that can represent editable draft text.
+
+    A line carrying agy's ``>`` prompt glyph is editable draft content and is
+    kept verbatim (after the glyph is stripped) even when the user's own text
+    contains a word like ``Generating`` or a footer phrase — otherwise a
+    legitimate message would be filtered out and misread as "never rendered".
+    Status/footer rows (idle/active/"Generating …") carry no ``>`` prompt, so the
+    chrome filters apply only to those non-draft lines.
+    """
     candidates: list[str] = []
     for raw_line in region.splitlines():
         line = raw_line.strip()
-        if not line:
-            continue
-        if line == ">":
+        if not line or line == ">":
             continue
         if line.startswith(">"):
-            line = line[1:].strip()
-        if not line:
+            draft = line[1:].strip()
+            if draft:
+                candidates.append(draft)
             continue
         if _AGY_IDLE_MARKER in line or _AGY_ACTIVE_MARKER in line:
             continue
@@ -1189,11 +1244,18 @@ def _submit_and_verify(
     only a readiness hint: it can change across agy builds, be truncated in narrow
     panes, or redraw independently from the editable draft. The reliable local
     submit signal is that the draft which was visible before Enter is no longer
-    present in the live bottom composer region. If the same draft remains visible,
-    Enter was likely folded into the paste burst and is re-sent within a bounded
-    retry budget. If no usable needle exists, submit once and return — absence
-    checks would be vacuous. ``inject_user_message_via_tui`` fails earlier when a
-    normal text draft never renders.
+    present in the live bottom composer region (for an empty needle this keys off
+    the composer returning to the pre-paste baseline). If the same draft remains
+    visible, Enter was likely folded into the paste burst and is re-sent within a
+    bounded retry budget. ``inject_user_message_via_tui`` fails earlier when a
+    text draft never renders into an idle composer.
+
+    **Mid-turn steer.** When agy already shows :data:`_AGY_ACTIVE_MARKER`, a turn
+    is running: the draft-disappearance signal is unreliable (agy queues the steer
+    as the next ``USER_INPUT`` and the composer may not clear promptly) and a
+    second Enter could queue a spurious empty turn. So a single best-effort Enter
+    is sent and the function returns without re-sending or hard-failing — the
+    forwarder is the system-of-record for whether the queued steer registered.
 
     :param socket_path: tmux server socket path.
     :param tmux_target: tmux pane target.
@@ -1205,6 +1267,12 @@ def _submit_and_verify(
         raise RuntimeError(
             "the agy terminal exited before the message could be submitted; restart the session"
         )
+    # Mid-turn steer: a turn is already running, so verifying via draft
+    # disappearance is unreliable and a re-sent Enter could queue an empty turn.
+    # Deliver one best-effort Enter and return (see the docstring).
+    if _AGY_ACTIVE_MARKER in _capture_pane(socket_path, tmux_target):
+        _run_tmux(socket_path, "send-keys", "-t", tmux_target, "Enter")
+        return
     if not draft_seen:
         _run_tmux(socket_path, "send-keys", "-t", tmux_target, "Enter")
         return
@@ -1323,24 +1391,33 @@ def inject_user_message_via_tui(
             with contextlib.suppress(OSError):
                 os.unlink(paste_path)
     # Wait until the paste is visibly committed to the input box before Enter, so
-    # the submit is not folded into the paste burst (see _submit_and_verify).
+    # the submit is not folded into the paste burst (see _submit_and_verify). This
+    # runs for EVERY message — including short ones with no stable needle — so a
+    # paste that never lands in the composer is caught rather than submitted blind
+    # (``_draft_in_input_region`` keys off composer change when the needle is "").
     needle = _submit_needle(content)
+    # A mid-turn steer (agy already running a turn) is delivered best-effort: agy
+    # queues it as the next turn and may not surface the draft in the composer the
+    # same way an idle turn does, so a non-render is NOT a swallowed message here.
+    # The render hard-fail below is for the idle/sequential case, where a paste
+    # that never lands in the composer (e.g. eaten by an unhooked modal such as
+    # the first-run trust gate) must fail loudly instead of vanishing.
+    mid_turn = _AGY_ACTIVE_MARKER in _capture_pane(socket_path, tmux_target)
     draft_seen = False
     last_commit_pane = ""
-    if needle:
-        commit_deadline = time.monotonic() + _PASTE_COMMIT_TIMEOUT_S
-        while time.monotonic() < commit_deadline:
-            pane = _capture_pane(socket_path, tmux_target)
-            last_commit_pane = pane or last_commit_pane
-            if _draft_in_input_region(pane, needle, baseline_region):
-                draft_seen = True
-                break
-            time.sleep(_TMUX_POLL_INTERVAL_S)
-        if not draft_seen:
-            raise RuntimeError(
-                "agy did not render the pasted message in its input box before submit; "
-                f"pane_tail:\n{_format_pane_debug_tail(last_commit_pane)}"
-            )
+    commit_deadline = time.monotonic() + _PASTE_COMMIT_TIMEOUT_S
+    while time.monotonic() < commit_deadline:
+        pane = _capture_pane(socket_path, tmux_target)
+        last_commit_pane = pane or last_commit_pane
+        if _draft_in_input_region(pane, needle, baseline_region):
+            draft_seen = True
+            break
+        time.sleep(_TMUX_POLL_INTERVAL_S)
+    if not draft_seen and not mid_turn:
+        raise RuntimeError(
+            "agy did not render the pasted message in its input box before submit; "
+            f"pane_tail:\n{_format_pane_debug_tail(last_commit_pane)}"
+        )
     time.sleep(_PASTE_SETTLE_S)
     _submit_and_verify(
         socket_path,
