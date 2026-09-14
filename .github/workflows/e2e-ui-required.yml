@@ -40,8 +40,10 @@ concurrency:
 jobs:
   require-e2e-ui:
     name: E2E UI Required
+    # The judge uses credentials and policy owned by the canonical repository.
+    # Forks must define their own UI test policy instead of inheriting this gate.
     # Skip drafts; the `ready_for_review` trigger re-fires on un-drafting.
-    if: ${{ !github.event.pull_request.draft }}
+    if: ${{ github.repository == 'omnigent-ai/omnigent' && !github.event.pull_request.draft }}
     permissions:
       contents: read
       pull-requests: read
