@@ -1040,6 +1040,10 @@ class TestToolServer(unittest.TestCase):
                 result = await self._run_generated_bridge_tool(
                     port=port,
                     token="close-token",
+                    # The full CI shard runs thousands of tests with xdist.
+                    # Keep the hang detector bounded while allowing a loaded
+                    # runner enough time to schedule the Node subprocess.
+                    timeout=15.0,
                 )
             finally:
                 server.close()
