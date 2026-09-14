@@ -36,6 +36,9 @@ concurrency:
 jobs:
   approve:
     name: Maintainer Approval
+    # The evaluator and maintainer list are owned by the canonical repository.
+    # Forks must define their own review policy instead of inheriting this gate.
+    if: github.repository == 'omnigent-ai/omnigent'
     permissions:
       contents: read
       pull-requests: read
