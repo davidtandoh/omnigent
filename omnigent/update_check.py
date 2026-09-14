@@ -296,7 +296,7 @@ def _run_installed_wheel_check() -> None:
         cache is not None
         and cache.kind == "wheel"
         and cache.latest_version
-        and _is_newer(cache.latest_version, info.package_version)
+        and _should_notify_release(cache.latest_version, info.package_version)
         and cache.latest_version != cache.last_notified_version
     ):
         _print_pypi_notice(info.package_version, cache.latest_version)
@@ -337,6 +337,31 @@ def _is_newer(latest: str, current: str) -> bool:
         return parse(latest) > parse(current)
     except InvalidVersion:
         return latest != current and bool(latest)
+
+
+def _should_notify_release(latest: str, current: str) -> bool:
+    """Return whether the passive update notice should report *latest*.
+
+    A development build is already on its corresponding release line, so
+    the notice stays quiet for that line's final release. Later releases and
+    post-releases still produce a notice.
+    """
+    from packaging.version import InvalidVersion, parse
+
+    try:
+        latest_version = parse(latest)
+        current_version = parse(current)
+    except InvalidVersion:
+        return _is_newer(latest, current)
+
+    if (
+        current_version.is_devrelease
+        and latest_version.epoch == current_version.epoch
+        and latest_version.release == current_version.release
+        and not latest_version.is_postrelease
+    ):
+        return False
+    return latest_version > current_version
 
 
 def _resolve_index_url() -> str:
@@ -1413,6 +1438,20 @@ _PRERELEASE_FLAG = {
 }
 
 
+def _uv_python_pin() -> str:
+    """Return uv's ``--python`` flag pinned to the running interpreter.
+
+    ``install.sh`` installs with an explicit ``--python``, so an upgrade that
+    omits it lets uv resolve the *default* interpreter instead. When the two
+    differ uv cannot reuse the existing tool environment: it recreates it,
+    removing the old executables before the replacement is built. A build
+    failure then leaves no working install behind. omnigent runs from that
+    same tool environment, so pinning our own interpreter keeps the upgrade
+    in place.
+    """
+    return f" --python {sys.version_info.major}.{sys.version_info.minor}"
+
+
 def _pip_invocation() -> str:
     """Return the pip command prefix bound to the running interpreter.
 
@@ -1464,6 +1503,7 @@ def _build_upgrade_suggestion(
     allow_prerelease: bool = False,
     extra_overrides: tuple[str, ...] = (),
     target_version: str | None = None,
+    target_vcs_url: str | None = None,
 ) -> _UpgradeSuggestion:
     """Build the right upgrade command for the user's install shape.
 
@@ -1480,6 +1520,10 @@ def _build_upgrade_suggestion(
         metadata.
     :param target_version: Pin the upgrade to a specific version instead
         of resolving the latest release.
+    :param target_vcs_url: Install from this VCS URL instead of the one
+        recorded at install time, so a registry install can be moved onto a
+        git source (how ``--nightly`` hops onto a tag). Takes precedence
+        over ``info.vcs_url``.
     :returns: A :class:`_UpgradeSuggestion` whose ``command`` is the
         line printed in the nag panel and whose ``runnable`` flag
         tells the caller whether the line is an actual invocation
@@ -1490,27 +1534,37 @@ def _build_upgrade_suggestion(
     pre = _PRERELEASE_FLAG.get(installer or "", "") if allow_prerelease else ""
     extras = sorted(set(info.extras) | set(extra_overrides))
 
-    if info.vcs_url:
-        # VCS install — we know the exact source URL.
-        vcs_url_with_extras = info.vcs_url
+    source_url = target_vcs_url or info.vcs_url
+    if source_url:
+        # Installing from an exact source URL: either the one this install
+        # recorded, or a caller-supplied retarget (a nightly tag).
+        vcs_url_with_extras = source_url
         if extras:
             # Strip any existing fragment and append an egg spec with extras.
             base = vcs_url_with_extras.split("#", 1)[0]
             vcs_url_with_extras = f"{base}#egg={_package_spec(extras=extras)}"
         if installer == "uv":
             return _UpgradeSuggestion(
-                command=f"uv tool install --reinstall {vcs_url_with_extras}{pre}",
+                command=(
+                    f"uv tool install --reinstall{_uv_python_pin()} {vcs_url_with_extras}{pre}"
+                ),
                 runnable=True,
             )
         if installer == "pipx":
-            if extras:
+            # ``pipx reinstall`` re-pulls the spec pipx recorded, so it only
+            # works as an in-place refresh. Extras and a retarget both need
+            # the spec spelled out.
+            if extras or target_vcs_url is not None:
                 return _UpgradeSuggestion(
                     command=f"pipx install --force {vcs_url_with_extras}",
                     runnable=True,
                 )
-            # pipx tracks the original spec; ``reinstall`` re-pulls it.
             return _UpgradeSuggestion(command=f"pipx reinstall {_DIST_NAME}{pre}", runnable=True)
-        if installer in ("pip", None):
+        # An unknown installer is only assumed to be pip when the install
+        # itself came from a VCS URL. On a retarget we know nothing about how
+        # omnigent was installed, so guessing could write to the wrong
+        # environment; fall through to the non-runnable suggestion instead.
+        if installer == "pip" or (installer is None and info.vcs_url is not None):
             return _UpgradeSuggestion(
                 command=(
                     f"{_pip_invocation()} install --force-reinstall {vcs_url_with_extras}{pre}"
@@ -1536,7 +1590,7 @@ def _build_upgrade_suggestion(
             # version), not extras. Reinstall with the full PEP 508 spec
             # to preserve the extras the user originally requested.
             return _UpgradeSuggestion(
-                command=f"uv tool install --reinstall {registry_spec}{pre}",
+                command=f"uv tool install --reinstall{_uv_python_pin()} {registry_spec}{pre}",
                 runnable=True,
             )
         return _UpgradeSuggestion(command=f"uv tool upgrade {_DIST_NAME}{pre}", runnable=True)
@@ -1560,6 +1614,100 @@ def _build_upgrade_suggestion(
     return _UpgradeSuggestion(
         command=f"reinstall {_DIST_NAME} from your original source",
         runnable=False,
+    )
+
+
+# Canonical public repo for nightly builds. Nightlies are git tags consumed
+# straight from GitHub (they never reach an index), so the channel lives
+# upstream by definition: fork installs also upgrade onto upstream nightlies.
+_NIGHTLY_REPO_URL = "https://github.com/omnigent-ai/omnigent"
+
+
+def _newest_nightly_version(ls_remote_output: str) -> str | None:
+    """Pick the newest nightly version from ``git ls-remote --tags`` output.
+
+    Nightly tags are strictly ``vX.Y.Z.devYYYYMMDD``; the 8-digit datestamp
+    requirement screens out legacy ``.dev0``-style tags, and rc/final tags
+    and annotated-tag peel lines (``^{}``) never match. Ordering is PEP 440,
+    so the first nightly after a main version bump outranks all older ones.
+
+    :param ls_remote_output: Raw ``git ls-remote`` stdout (tab-separated
+        ``<sha> refs/tags/<name>`` lines).
+    :returns: The newest nightly version without the leading ``v`` (e.g.
+        ``"0.8.0.dev20260804"``), or ``None`` when no nightly tag exists.
+    """
+    import re
+
+    from packaging.version import InvalidVersion, Version
+
+    pattern = re.compile(r"^v(\d+\.\d+\.\d+\.dev\d{8})$")
+    versions: list[Version] = []
+    for line in ls_remote_output.splitlines():
+        match = pattern.match(line.rpartition("refs/tags/")[2].strip())
+        if match is None:
+            continue
+        with contextlib.suppress(InvalidVersion):
+            versions.append(Version(match.group(1)))
+    return str(max(versions)) if versions else None
+
+
+def _latest_nightly_version(repo_url: str = _NIGHTLY_REPO_URL) -> str | None:
+    """Resolve the newest nightly version from the repo's tags, or ``None``.
+
+    Best-effort ``git ls-remote`` with a tight timeout, like
+    ``_remote_git_head``: any failure (offline, missing ``git``, no nightly
+    tags yet) yields ``None`` so the caller prints an actionable message
+    instead of crashing.
+
+    :param repo_url: Repo to list tags from; defaults to the canonical repo.
+    :returns: e.g. ``"0.8.0.dev20260804"``, or ``None``.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", "--tags", repo_url, "refs/tags/v*.dev*"],
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT_SECONDS,
+            check=True,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    return _newest_nightly_version(result.stdout)
+
+
+def _build_nightly_upgrade_suggestion(
+    info: _InstalledWheelInfo,
+    nightly_version: str,
+    *,
+    extra_overrides: tuple[str, ...] = (),
+) -> _UpgradeSuggestion:
+    """Build the command that moves this install onto a nightly tag.
+
+    A nightly hop is an ordinary VCS install pinned to a tag, so it reuses
+    :func:`_build_upgrade_suggestion` with the tag URL as the retarget rather
+    than duplicating the per-installer mapping. That keeps one place deciding
+    which installer flag is safe: an upgrade must never remove the working
+    install before the replacement builds, and nightlies build from source
+    (they compile the web UI), so a failure here is the likely case, not the
+    rare one.
+
+    Nightlies are git tags, not index releases, so every installer gets a
+    git-pinned spec for the canonical repo. That includes registry installs
+    (this is how an index install hops onto the nightly channel) and VCS
+    installs of a fork (nightly tags only exist upstream). Extras follow the
+    same union rule as :func:`_build_upgrade_suggestion`; the CLI refuses the
+    registry install shapes that cannot record extras (pip / ``uv pip``)
+    before building.
+
+    :param info: Metadata from ``_read_installed_wheel_info``.
+    :param nightly_version: Target version without the leading ``v``.
+    :param extra_overrides: Extras supplied with ``omni upgrade --extra``.
+    :returns: See :func:`_build_upgrade_suggestion`.
+    """
+    return _build_upgrade_suggestion(
+        info,
+        extra_overrides=extra_overrides,
+        target_vcs_url=f"git+{_NIGHTLY_REPO_URL}@v{nightly_version}",
     )
 
 
@@ -1668,6 +1816,36 @@ def _probe_installed_distribution() -> tuple[str | None, str | None]:
     version = lines[0].strip() if lines and lines[0].strip() else None
     commit = lines[1].strip() if len(lines) >= 2 and lines[1].strip() else None
     return version, commit
+
+
+def _upgrade_failure_message(code: int, extras: Collection[str] = ()) -> str:
+    """Describe a failed upgrade, after checking whether the install survived.
+
+    uv and pipx replace the tool environment before the replacement is built,
+    so a failed build can leave nothing runnable behind. Claiming the previous
+    install is intact on the strength of the exit code alone sends the user to
+    look at their PATH instead of at a missing install, so read the disk the
+    same way the success path does.
+
+    :param code: The installer's exit status.
+    :param extras: Extras this install had, so the recovery line reinstalls
+        the same shape.
+    :returns: The message body for the raised ``ClickException``.
+    """
+    version, _ = _probe_installed_distribution()
+    if version is not None:
+        return f"Upgrade command exited with status {code}; your previous install is intact."
+    extra_flags = "".join(f" --extra {extra}" for extra in sorted(extras))
+    return (
+        f"Upgrade command exited with status {code}, and omnigent is no longer "
+        "installed: the installer replaced the old environment before the new "
+        "build failed. Your agents, history and credentials are untouched; "
+        "reinstall the CLI to get back:\n\n"
+        f"    curl -fsSL https://omnigent.ai/install.sh | sh -s --{extra_flags}\n"
+        "    omnigent login <SERVER-URL>\n\n"
+        "If the web UI build was what failed, install Node 22 LTS and pnpm "
+        "first, or set OMNIGENT_SKIP_WEB_UI=true to install without it."
+    )
 
 
 def _split_vcs_url(vcs_url: str) -> tuple[str, str | None]:

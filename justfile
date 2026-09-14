@@ -10,10 +10,11 @@ DEVICE := env("OMNIGENT_IOS_SIMULATOR", "iPhone 17 Pro")
 
 _check-uv:
     uv run --no-sync ruff --version
+    uv run --no-sync pyrefly --version
     uv run --no-sync pre-commit --version
 
 _ensure-uv:
-    uv sync --extra all --extra dev
+    uv sync --extra all --group dev
 
 # --- iOS Ruby dependencies ---
 
@@ -52,6 +53,24 @@ dev: _ensure-omnidev
 dev-mobile: _ensure-omnidev
     omnidev --vite-host 0.0.0.0 --trust-lan-origins
 
+[group('dev')]
+crdb-up:
+    docker compose -f deploy/cockroachdb/docker-compose.yml up -d --wait --wait-timeout 90
+    docker compose -f deploy/cockroachdb/docker-compose.yml exec -T crdb-23-2-28 cockroach sql --insecure --execute="SET CLUSTER SETTING sql.txn.read_committed_isolation.enabled = true"
+
+[group('dev')]
+crdb-stop:
+    docker compose -f deploy/cockroachdb/docker-compose.yml stop
+
+[group('dev')]
+crdb-test: crdb-up
+    ./scripts/test_crdb_matrix.sh
+
+# Destructive: stops CRDB and deletes all four persistent development volumes.
+[group('dev')]
+crdb-reset:
+    docker compose -f deploy/cockroachdb/docker-compose.yml down --volumes
+
 # --- Mobile builds ---
 
 [group('mobile')]
@@ -66,39 +85,59 @@ run-android:
 android-reverse:
     cd web/android && ./gradlew reverseProxy
 
-# --- Electron desktop app ---
+# --- Web ---
 
 _ensure-web:
     cd web && test -d node_modules || pnpm install
+
+[group('web')]
+storybook: _ensure-web
+    pnpm --filter web run storybook
+
+[group('web')]
+storybook-build: _ensure-web
+    pnpm --filter web run build:storybook
+
+[group('web')]
+generate-theme-palettes: _ensure-web
+    cd web && node --experimental-strip-types scripts/generate-theme-palettes.mjs
+
+# --- Electron desktop app ---
 
 _ensure-electron:
     cd web/electron && test -d node_modules || pnpm install
 
 [group('electron')]
 electron-dev: _ensure-web _ensure-electron
-    pnpm --filter web/electron run dev
+    pnpm --filter ./web/electron run dev
 
 [group('electron')]
 electron-build: _ensure-web _ensure-electron
-    pnpm --filter web/electron run build
+    pnpm --filter ./web/electron run build
 
 # --- Lint ---
 
 [group('lint')]
 lint: _ensure-uv
-    uv run pre-commit run
+    uv run --no-sync pre-commit run
 
 [group('lint')]
 lint-all: _ensure-uv
-    uv run pre-commit run --all-files
+    uv run --no-sync pre-commit run --all-files
+
+[group('lint')]
+typecheck-python: _ensure-uv
+    uv run --no-sync pyrefly check
 
 [group('lint')]
 lint-ts:
-    pnpm install --frozen-lockfile --filter web
+    pnpm install --frozen-lockfile --filter web --filter omnigent-vscode
     pnpm --filter web run lint
+    pnpm --filter web run type-check
+    pnpm --filter omnigent-vscode run type-check
 
 # --- Lockfile maintenance ---
 
 [group('lint')]
 normalize-locks: _ensure-uv
-    uv run scripts/normalize_uv_lock_registry.py uv.lock || true
+    uv run --no-sync scripts/normalize_uv_lock_registry.py uv.lock || true

@@ -79,6 +79,7 @@ function renderPanel({
 function childInfo(overrides: Partial<ChildSessionInfo> & { id: string }): ChildSessionInfo {
   return {
     title: null,
+    task_summary: null,
     tool: null,
     session_name: null,
     current_task_status: null,
@@ -450,6 +451,7 @@ describe("SubagentsPanel", () => {
         {
           id: "conv_child_a",
           title: "researcher:auth",
+          task_summary: null,
           tool: "researcher",
           session_name: "auth",
           current_task_status: "completed",
@@ -460,6 +462,7 @@ describe("SubagentsPanel", () => {
         {
           id: "conv_child_b",
           title: "frontend_engineer:rail",
+          task_summary: null,
           tool: "frontend_engineer",
           session_name: "rail",
           current_task_status: "in_progress",
@@ -488,12 +491,14 @@ describe("SubagentsPanel", () => {
         childInfo({
           id: "conv_child",
           title: "codex:auth-refactor",
+          task_summary: null,
           tool: "codex",
           session_name: "auth-refactor",
         }),
         childInfo({
           id: "conv_title_only",
           title: "codex:fix-sse-error",
+          task_summary: null,
           tool: "codex",
           session_name: null,
         }),
@@ -516,6 +521,7 @@ describe("SubagentsPanel", () => {
         childInfo({
           id: "conv_child",
           title: "codex-native-ui-subagent:thread_child_alpha",
+          task_summary: null,
           tool: "auth-auditor",
           session_name: "thread_child_alpha",
           labels: { "omnigent.wrapper": "codex-native-ui-subagent" },
@@ -530,12 +536,37 @@ describe("SubagentsPanel", () => {
     expect(within(row).queryByText("thread_child_alpha")).toBeNull();
   });
 
+  it("labels native Antigravity sub-agent rows by role instead of cascade id", () => {
+    // The server titles an agy child ``"<role>:<cascade id>"``, so the rail's
+    // first-colon split lands the role in ``tool`` and the UUID in
+    // ``session_name``. Without the wrapper registered as a native sub-agent
+    // the row took the generic path and rendered that UUID.
+    mockChildTree({
+      conv_root: [
+        childInfo({
+          id: "conv_child",
+          title: "App Router Reviewer:1eca7625-9d2f-4c6b-8a31-7f5e2c0d4b8a",
+          tool: "App Router Reviewer",
+          session_name: "1eca7625-9d2f-4c6b-8a31-7f5e2c0d4b8a",
+          labels: { "omnigent.wrapper": "antigravity-native-ui-subagent" },
+        }),
+      ],
+    });
+
+    const { container } = renderPanel({ rootSessionId: "conv_root" });
+
+    const row = childRow(container, "conv_child");
+    expect(within(row).getByText("App Router Reviewer")).toBeInTheDocument();
+    expect(within(row).queryByText("1eca7625-9d2f-4c6b-8a31-7f5e2c0d4b8a")).toBeNull();
+  });
+
   it("uses native logos for Claude Code, Codex, OpenCode, and Kiro child rows", () => {
     mockChildTree({
       conv_root: [
         childInfo({
           id: "conv_codex",
           title: "codex:auth-refactor",
+          task_summary: null,
           tool: "codex",
           session_name: "auth-refactor",
           labels: { "omnigent.wrapper": "codex-native-ui" },
@@ -543,6 +574,7 @@ describe("SubagentsPanel", () => {
         childInfo({
           id: "conv_opencode",
           title: "opencode:port-auth-refactor",
+          task_summary: null,
           tool: "opencode",
           session_name: "port-auth-refactor",
           labels: { "omnigent.wrapper": "opencode-native-ui" },
@@ -550,6 +582,7 @@ describe("SubagentsPanel", () => {
         childInfo({
           id: "conv_claude",
           title: "claude_code:review-auth-refactor",
+          task_summary: null,
           tool: "claude_code",
           session_name: "review-auth-refactor",
           labels: { "omnigent.wrapper": "claude-code-native-ui" },
@@ -557,6 +590,7 @@ describe("SubagentsPanel", () => {
         childInfo({
           id: "conv_kiro",
           title: "kiro:harden-auth",
+          task_summary: null,
           tool: "kiro",
           session_name: "harden-auth",
           labels: { "omnigent.wrapper": "kiro-native-ui" },
@@ -621,6 +655,7 @@ describe("SubagentsPanel", () => {
         childInfo({
           id: "conv_custom",
           title: "codex:custom-review",
+          task_summary: null,
           tool: "codex",
           session_name: "custom-review",
         }),
@@ -642,6 +677,7 @@ describe("SubagentsPanel", () => {
         childInfo({
           id: "conv_pi",
           title: "pi:review-auth",
+          task_summary: null,
           tool: "pi",
           session_name: "review-auth",
         }),
@@ -649,6 +685,7 @@ describe("SubagentsPanel", () => {
         childInfo({
           id: "conv_pipeline",
           title: "pipeline:build",
+          task_summary: null,
           tool: "pipeline",
           session_name: "build",
         }),
@@ -675,6 +712,7 @@ describe("SubagentsPanel", () => {
         childInfo({
           id: "conv_native_pi",
           title: "pi:port-fix",
+          task_summary: null,
           tool: "pi",
           session_name: "port-fix",
           labels: { "omnigent.wrapper": "claude-code-native-ui" },
@@ -716,6 +754,7 @@ describe("SubagentsPanel", () => {
         {
           id: "conv_child_a",
           title: "researcher:auth",
+          task_summary: null,
           tool: "researcher",
           session_name: "auth",
           current_task_status: "in_progress",
@@ -726,6 +765,7 @@ describe("SubagentsPanel", () => {
         {
           id: "conv_child_b",
           title: "frontend_engineer:rail",
+          task_summary: null,
           tool: "frontend_engineer",
           session_name: "rail",
           current_task_status: "completed",
@@ -756,6 +796,7 @@ describe("SubagentsPanel", () => {
         {
           id: "conv_child",
           title: "researcher:auth",
+          task_summary: null,
           tool: "researcher",
           session_name: "auth",
           current_task_status: "failed",
@@ -780,6 +821,7 @@ describe("SubagentsPanel", () => {
         childInfo({
           id: "conv_child",
           title: "researcher:auth",
+          task_summary: null,
           tool: "researcher",
           session_name: "auth",
           last_task_error: {
@@ -820,6 +862,7 @@ describe("SubagentsPanel", () => {
           childInfo({
             id: "conv_child",
             title: "researcher:auth",
+            task_summary: null,
             tool: "researcher",
             session_name: "auth",
             current_task_status: "failed",
@@ -863,6 +906,7 @@ describe("SubagentsPanel", () => {
         childInfo({
           id: "conv_child",
           title: "researcher:auth",
+          task_summary: null,
           tool: "researcher",
           session_name: "auth",
           current_task_status: "failed",
@@ -1015,6 +1059,7 @@ describe("SubagentsPanel", () => {
         {
           id: "conv_child",
           title: "researcher:auth",
+          task_summary: null,
           tool: "researcher",
           session_name: "auth",
           current_task_status: "in_progress",
@@ -1339,12 +1384,14 @@ describe("SubagentsPanel", () => {
         childInfo({
           id: "conv_added",
           title: "ui:claude-native-ui:jimmy",
+          task_summary: null,
           tool: "claude-native-ui",
           session_name: "jimmy",
         }),
         childInfo({
           id: "conv_llm",
           title: "researcher:auth",
+          task_summary: null,
           tool: "researcher",
           session_name: "auth",
         }),
@@ -1359,6 +1406,44 @@ describe("SubagentsPanel", () => {
     const llmSpawned = childRow(container, "conv_llm");
     expect(llmSpawned).toHaveTextContent("auth");
     expect(llmSpawned).not.toHaveTextContent("researcher");
+  });
+
+  it("shows the Task description for Claude Code sub-agents, never the hex id", () => {
+    // A Claude sub-agent's title is "<agentType>:<subagentId>", a per-parent
+    // uniqueness key ending in an opaque hex id. Splitting it left the rail
+    // showing bare ids — in a 21-worker wave, 17 indistinguishable rows. The
+    // readable label rides on ``tool``: the Task description, else the agent
+    // type's trailing segment (plugin-namespaced types carry their own colon).
+    mockChildTree({
+      conv_parent: [
+        childInfo({
+          id: "conv_described",
+          title: "general-purpose:a09d1dd1d8dbc0151",
+          tool: "wave-worker-696",
+          session_name: "a09d1dd1d8dbc0151",
+          labels: {
+            "omnigent.wrapper": "claude-code-native-ui-subagent",
+            "omnigent.claude_native.description": "wave-worker-696",
+          },
+        }),
+        childInfo({
+          id: "conv_namespaced",
+          title: "rpw-published:debug-lead:a361e6a6aa05689cb",
+          tool: "debug-lead",
+          session_name: "a361e6a6aa05689cb",
+          labels: { "omnigent.wrapper": "claude-code-native-ui-subagent" },
+        }),
+      ],
+    });
+
+    const { container } = renderPanel();
+
+    const described = childRow(container, "conv_described");
+    expect(described).toHaveTextContent("wave-worker-696");
+    expect(described).not.toHaveTextContent("a09d1dd1d8dbc0151");
+    const namespaced = childRow(container, "conv_namespaced");
+    expect(namespaced).toHaveTextContent("debug-lead");
+    expect(namespaced).not.toHaveTextContent("a361e6a6aa05689cb");
   });
 
   it("renders grandchildren and deeper levels indented under their parents", () => {
@@ -1465,6 +1550,30 @@ describe("SubagentsPanel", () => {
     // fetching c3's children.
     expect(useChildSessionsMock).toHaveBeenCalledWith(null);
     expect(useChildSessionsMock).not.toHaveBeenCalledWith("c3");
+  });
+
+  it("shows the router's model on a routed sub-agent row, and nothing when unrouted", () => {
+    // Per-subagent routing visibility: the row carries the short model name
+    // the router picked. An unrouted sibling must stay unchanged — the pill
+    // would otherwise imply a decision that never happened.
+    mockChildTree({
+      conv_root: [
+        childInfo({
+          id: "conv_routed",
+          tool: "researcher",
+          routed_model: "databricks-claude-sonnet-5",
+        }),
+        childInfo({ id: "conv_plain", tool: "researcher" }),
+      ],
+    });
+
+    const { container } = renderPanel({ rootSessionId: "conv_root" });
+
+    const routed = childRow(container, "conv_routed");
+    expect(within(routed).getByTestId("subagent-routed-model").textContent).toBe("sonnet");
+    expect(
+      within(childRow(container, "conv_plain")).queryByTestId("subagent-routed-model"),
+    ).toBeNull();
   });
 
   it("highlights the active grandchild row", () => {

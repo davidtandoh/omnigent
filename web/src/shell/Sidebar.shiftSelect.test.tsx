@@ -57,6 +57,7 @@ const { projectsMock, conversationsRef, projectSessionsMock, bulkArchiveMock } =
 
 vi.mock("@/hooks/useConversations", () => ({
   useConversations: vi.fn(),
+  useLeaveSession: () => ({ mutate: vi.fn(), isPending: false }),
   useArchiveConversation: () => ({ mutate: vi.fn() }),
   useBulkArchiveConversations: () => ({
     mutate: bulkArchiveMock.mutate,
@@ -64,6 +65,7 @@ vi.mock("@/hooks/useConversations", () => ({
     isError: false,
   }),
   useBulkDeleteConversations: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
+  useBulkMoveToProject: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
   useBulkStopSessions: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
   useConnectedConversations: () => [],
   useStopAndDeleteConversation: () => ({ mutate: vi.fn() }),
@@ -328,25 +330,30 @@ describe("Sidebar shift-click selection", () => {
   });
 
   it("labels Delete with the owned count when the selection is mixed-ownership", async () => {
-    // A project folder can hold sessions owned by other users (the folder query
-    // isn't ownership-filtered). Delete acts only on owned rows, so its label
-    // must reflect the owned count — not the raw "N selected" — when they differ.
-    projectsMock.push("Alpha");
-    const mine = conv("mine", { owner: "viewer", labels: { omni_project: "Alpha" } });
-    const theirs = conv("theirs", { owner: "someone_else", labels: { omni_project: "Alpha" } });
+    // The flat "All sessions" list mixes the viewer's own sessions with ones
+    // shared to them by other owners. Delete acts only on owned rows, so its
+    // label must reflect the owned count — not the raw "N selected" — when they
+    // differ. (Project folders are owner-only, so mixed ownership only arises in
+    // the flat list, not a folder.)
+    const mine = conv("mine", { owner: "viewer" });
+    const theirs = conv("theirs", { owner: "someone_else" });
     mockConversations([mine, theirs]);
-    localStorage.setItem("omnigent:expanded-project-sections", JSON.stringify(["Alpha"]));
     renderSidebar();
 
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Project list actions" }), {
+    // Mixed ownership only shows on "All sessions"; the default "My sessions"
+    // filter hides the shared row, so switch to All before selecting.
+    fireEvent.pointerDown(screen.getByTestId("session-filter"), {
       button: 0,
       ctrlKey: false,
+      pointerType: "mouse",
     });
-    fireEvent.click(await screen.findByTestId("projects-select-sessions"));
+    fireEvent.click(screen.getByTestId("session-filter-all"));
+
+    fireEvent.click(screen.getByRole("button", { name: /select/i }));
 
     // Select both rows — "2 selected", but only the owned one is deletable.
     fireEvent.click(await screen.findByRole("link", { name: "mine" }));
-    fireEvent.click(screen.getByRole("link", { name: "theirs" }));
+    fireEvent.click(screen.getByRole("link", { name: /^theirs/ }));
     await waitFor(() => {
       expect(screen.getByText("2 selected")).toBeInTheDocument();
     });

@@ -26,6 +26,7 @@ from omnigent_client import (
     OmnigentClient,
     OmnigentError,
     ReasoningBlock,
+    RegisteredAgent,
     ResponseEndBlock,
     ResponseStartBlock,
     Session,
@@ -67,6 +68,7 @@ from rich.console import RenderableType
 from rich.markup import escape
 from rich.text import Text
 
+from omnigent.cli_invocation import cli_invocation
 from omnigent.spec.types import SkillSpec
 
 if TYPE_CHECKING:
@@ -111,11 +113,18 @@ def _is_recoverable_sse_transport_error(exc: BaseException) -> bool:
         httpx.ReadTimeout,
         httpx.ConnectError,
         httpx.ConnectTimeout,
+        # A peer that drops the connection while the request is still
+        # being sent surfaces as a write error — the same transient
+        # interruption as a read-side drop, just caught one syscall earlier.
+        httpx.WriteError,
+        httpx.WriteTimeout,
         httpcore.RemoteProtocolError,
         httpcore.ReadError,
         httpcore.ReadTimeout,
         httpcore.ConnectError,
         httpcore.ConnectTimeout,
+        httpcore.WriteError,
+        httpcore.WriteTimeout,
     )
     seen: set[int] = set()
     current: BaseException | None = exc
@@ -492,8 +501,8 @@ def _render_startup_banner_ansi(
         ``None`` for the minimal banner.
     :returns: ANSI-styled string ready to be written to stdout.
     """
-    from omnigent.conversation_browser import display_server_url, is_workspace_hosted_url
     from omnigent.inner.banner import BannerLine, startup_banner_strings
+    from omnigent.util.server_url import display_server_url, is_workspace_hosted_url
 
     remote = _is_remote_server_url(server_url)
     # User-facing form of the URL: a Databricks workspace-hosted server is
@@ -674,9 +683,7 @@ def _humanize_agent_name(agent_name: str) -> str:
 class TimedFormatter(RichBlockFormatter):  # type: ignore[misc]
     """Shows final elapsed time after response completes."""
 
-    def __init__(self, **kwargs: object) -> None:
-        super().__init__(**kwargs)
-        self._start_time: float | None = None
+    _start_time: float | None = None
 
     def format_response_start(self, block: ResponseStartBlock) -> list[FormattedItem]:
         self._start_time = block.ctx.timestamp
@@ -1197,7 +1204,7 @@ def _server_event_to_sdk_event(event: object) -> object | None:
     if isinstance(event, CompletedEvent):
         return ResponseCompleted(response=_resp(event))
     if isinstance(event, FailedEvent):
-        return ResponseFailed(response=_resp(event))
+        return ResponseFailed(response=_resp(event), source=event.source)
     if isinstance(event, CancelledEvent):
         return ResponseCancelled(response=_resp(event))
     if isinstance(event, IncompleteEvent):
@@ -1687,64 +1694,10 @@ class _SessionsChatReplAdapter:
             if self._session_id is not None and self._stream_task is not None:
                 return self._session_id
             if self._session_id is None:
-                if self._session_bundle is None:
-                    raise RuntimeError(
-                        "Sessions API fresh session creation requires a local agent bundle. "
-                        "Start the REPL from `omnigent run <agent.yaml>` so the CLI can "
-                        "upload the bundle through POST /v1/sessions."
-                    )
-                if _dbg:
-                    print(
-                        "[sessions-adapter] POST /v1/sessions multipart bundle",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                # Snapshot pre-create /model pick before hydration
-                # clobbers it; PATCHed below since create() has no
-                # model_override metadata field.
-                pending_model_override = self._model_override
-                session = await self._client.sessions.create(
-                    self._session_bundle,
-                    filename=self._session_bundle_filename,
-                    reasoning_effort=self._reasoning_effort,
-                    # Record the user's terminal cwd so the Web UI
-                    # can show "running locally in <workspace>" for
-                    # CLI sessions. Doesn't drive any behavior —
-                    # CLI sessions don't bind to a host_id, so the
-                    # ck_conversations_workspace_required_for_host
-                    # constraint isn't active.
-                    workspace=os.getcwd(),
-                )
-                self._session_id = session.id
-                self._hydrate_from_session_snapshot(session)
-                if pending_model_override is not None and session.model_override is None:
-                    # PATCH the pre-session ``/model`` pick so the
-                    # first event picks it up via conv.model_override.
-                    # ``silent`` skips the tmux ``/model`` forward —
-                    # the user already typed the command locally; we
-                    # don't want a second copy injected into the pane.
-                    try:
-                        patched = await self._client.sessions.set_model_override(
-                            self._session_id,
-                            model_override=pending_model_override,
-                            silent=True,
-                        )
-                        self._model_override = patched.model_override
-                    except Exception:  # noqa: BLE001 — REPL boundary; log and clear
-                        _log.warning(
-                            "Failed to apply pending /model=%r to session %s; "
-                            "clearing local cache.",
-                            pending_model_override,
-                            self._session_id,
-                            exc_info=True,
-                        )
-                        self._model_override = None
-                if _dbg:
-                    print(
-                        f"[sessions-adapter] session created id={self._session_id!r}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
+                if self._session_bundle is not None:
+                    await self._create_session_from_bundle(pending_debug=_dbg)
+                else:
+                    await self._create_session_from_registered_agent(pending_debug=_dbg)
             else:
                 if _dbg:
                     print(
@@ -1766,7 +1719,144 @@ class _SessionsChatReplAdapter:
                     name=f"sessions-adapter-recover-{self._session_id}",
                 )
             self._notify_session_start_once()
+            assert self._session_id is not None
             return self._session_id
+
+    async def _create_session_from_registered_agent(self, *, pending_debug: bool) -> None:
+        """
+        Create a session bound to an agent already registered server-side.
+
+        The remote-URL path: there is no local bundle to upload, so
+        resolve the picked name to its id and use the JSON create route.
+        A remote client also has no runner of its own, so adopt one the
+        server already has online — otherwise the first turn fails the
+        runner-binding precondition.
+
+        :param pending_debug: Whether to emit adapter debug lines.
+        :returns: None.
+        """
+        if pending_debug:
+            print(
+                "[sessions-adapter] POST /v1/sessions json agent_id",
+                file=sys.stderr,
+                flush=True,
+            )
+        # Skip the name lookup only when nothing needs it: we already know
+        # the id, and a bound runner means we don't need the harness either.
+        agent: RegisteredAgent | None = None
+        if self._agent_id is None or self._runner_id is None:
+            agent = await self._client.sessions.resolve_agent(self._agent_name)
+        agent_id = self._agent_id or (agent.id if agent is not None else None)
+        if agent_id is None:
+            raise RuntimeError(f"Could not resolve an agent id for {self._agent_name!r}")
+        if self._runner_id is None:
+            from omnigent.harness_aliases import canonicalize_harness
+
+            self._runner_id = await self._client.sessions.resolve_online_runner(
+                harness=agent.harness if agent is not None else None,
+                canonicalize=lambda name: canonicalize_harness(name) or name,
+            )
+            if pending_debug:
+                print(
+                    f"[sessions-adapter] adopted server runner {self._runner_id!r}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        # Snapshot the pre-create /model pick before hydration clobbers
+        # it; applied after create since create has no such field.
+        pending_model_override = self._model_override
+        session = await self._client.sessions.create_from_agent_id(
+            agent_id,
+            reasoning_effort=self._reasoning_effort,
+            workspace=os.getcwd(),
+        )
+        self._session_id = session.id
+        self._hydrate_from_session_snapshot(session)
+        await self._apply_pending_model_override(pending_model_override, session)
+        if pending_debug:
+            print(
+                f"[sessions-adapter] session created id={self._session_id!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    async def _create_session_from_bundle(self, *, pending_debug: bool) -> None:
+        """
+        Create a session by uploading the local agent bundle.
+
+        :param pending_debug: Whether to emit adapter debug lines.
+        :returns: None.
+        :raises RuntimeError: If called with no bundle available.
+        """
+        if self._session_bundle is None:
+            raise RuntimeError("Cannot create a bundled session without a bundle")
+        if pending_debug:
+            print(
+                "[sessions-adapter] POST /v1/sessions multipart bundle",
+                file=sys.stderr,
+                flush=True,
+            )
+        # Snapshot the pre-create /model pick before hydration clobbers
+        # it; applied after create since create has no such field.
+        pending_model_override = self._model_override
+        session = await self._client.sessions.create(
+            self._session_bundle,
+            filename=self._session_bundle_filename,
+            reasoning_effort=self._reasoning_effort,
+            # Record the user's terminal cwd so the Web UI can show
+            # "running locally in <workspace>" for CLI sessions. Doesn't
+            # drive any behavior — CLI sessions don't bind to a host_id,
+            # so the ck_conversations_workspace_required_for_host
+            # constraint isn't active.
+            workspace=os.getcwd(),
+        )
+        self._session_id = session.id
+        self._hydrate_from_session_snapshot(session)
+        await self._apply_pending_model_override(pending_model_override, session)
+        if pending_debug:
+            print(
+                f"[sessions-adapter] session created id={self._session_id!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    async def _apply_pending_model_override(
+        self, pending_model_override: str | None, session: _SessionSnapshot
+    ) -> None:
+        """
+        Apply a pre-session ``/model`` pick to a freshly created session.
+
+        Neither create route carries a ``model_override`` field, so a
+        ``/model`` typed before the first turn has to be PATCHed after
+        create for the first event to pick it up via
+        ``conv.model_override``. ``silent`` skips the tmux ``/model``
+        forward: the user already typed the command locally and we don't
+        want a second copy injected into the pane.
+
+        :param pending_model_override: The pick captured before create,
+            e.g. ``"opus"``. ``None`` is a no-op.
+        :param session: The created session snapshot.
+        :returns: None.
+        """
+        if pending_model_override is None or session.model_override is not None:
+            return
+        if self._session_id is None:
+            return
+        try:
+            patched = await self._client.sessions.set_model_override(
+                self._session_id,
+                model_override=pending_model_override,
+                silent=True,
+            )
+            self._model_override = patched.model_override
+        except Exception:  # noqa: BLE001 — REPL boundary; log and clear
+            _log.warning(
+                "Failed to apply pending /model=%r to session %s; clearing local cache.",
+                pending_model_override,
+                self._session_id,
+                exc_info=True,
+            )
+            self._model_override = None
 
     def _notify_session_start_once(self) -> None:
         """
@@ -1803,9 +1893,17 @@ class _SessionsChatReplAdapter:
             if self._session_id is None:
                 raise RuntimeError("Cannot bind runner before a session exists")
             if self._runner_id is None:
+                if self._session_bundle is None:
+                    # Remote target: we tried to adopt one of the server's
+                    # online runners at create time and found none.
+                    raise RuntimeError(
+                        "This server has no online runner to run the turn. Start one "
+                        f"against it with `{cli_invocation()} host --server <url>` (or run the "
+                        f"agent locally with `{cli_invocation()} run <agent.yaml>`), then retry."
+                    )
                 raise RuntimeError(
                     "Sessions API dispatch requires a registered runner id. "
-                    "Start through `omnigent run <agent>` or pass --server so the CLI "
+                    f"Start through `{cli_invocation()} run <agent>` or pass --server so the CLI "
                     "can launch and bind a runner."
                 )
             if self._bound_runner_id == self._runner_id:
@@ -1819,10 +1917,15 @@ class _SessionsChatReplAdapter:
                     file=sys.stderr,
                     flush=True,
                 )
-            session = await self._client.sessions.bind_runner(
-                self._session_id,
-                runner_id=self._runner_id,
-            )
+            try:
+                session = await self._client.sessions.bind_runner(
+                    self._session_id,
+                    runner_id=self._runner_id,
+                )
+            except OmnigentError as exc:
+                session = await self._reconcile_runner_after_bind_failure(exc)
+                if session is None:
+                    raise
             self._hydrate_from_session_snapshot(session)
             self._clear_runner_recovery_error()
             if _dbg:
@@ -1831,6 +1934,38 @@ class _SessionsChatReplAdapter:
                     file=sys.stderr,
                     flush=True,
                 )
+
+    async def _reconcile_runner_after_bind_failure(
+        self, exc: OmnigentError
+    ) -> _SessionSnapshot | None:
+        """
+        Adopt the server's live runner after a stale-runner bind failure.
+
+        A dead runner that the server has relaunched under a new id leaves
+        the cached ``_runner_id`` stale, so the bind 400s forever. Re-read
+        the snapshot and rebind onto the runner the server now reports.
+
+        Only when the server owns relaunch (``runner_recover is None``); a
+        client-owned runner is driven by ``_recover_runner_if_needed``.
+
+        :param exc: The bind failure to recover from.
+        :returns: The rebind snapshot, or ``None`` to re-raise *exc*.
+        """
+        if self._runner_recover is not None:
+            return None
+        if not self._is_terminal_runner_recovery_error(exc):
+            return None
+        if self._session_id is None:
+            return None
+        snapshot = await self._client.sessions.get(self._session_id)
+        live_runner_id = snapshot.runner_id
+        if not live_runner_id or live_runner_id == self._runner_id:
+            return None
+        self._runner_id = live_runner_id
+        return await self._client.sessions.bind_runner(
+            self._session_id,
+            runner_id=live_runner_id,
+        )
 
     def _clear_runner_recovery_error(self) -> None:
         """
@@ -1875,6 +2010,41 @@ class _SessionsChatReplAdapter:
                 error=RetryErrorDetail(
                     code=code or "runner_recovery_failed",
                     message=message,
+                ),
+            )
+        )
+
+    def _emit_elicitation_resolve_error(self, exc: Exception) -> None:
+        """
+        Render an undeliverable elicitation verdict in the error panel.
+
+        Bounded transport retries can still end with the verdict
+        undelivered, which leaves the elicitation parked server-side and
+        the turn waiting on an answer that will never arrive. Emitting the
+        same typed error event normal streams use lets the existing REPL
+        renderer show it, so the user learns to re-answer rather than
+        sitting at an apparently live prompt.
+
+        :param exc: Last transport failure raised by the resolve POST,
+            e.g. an ``httpx.ConnectError``.
+        :returns: None.
+        """
+        if self._on_event is None:
+            return
+
+        from omnigent.server.schemas import ErrorEvent, RetryErrorDetail
+
+        self._on_event(
+            ErrorEvent(
+                type="response.error",
+                source="execution",
+                error=RetryErrorDetail(
+                    code="elicitation_resolve_failed",
+                    message=(
+                        f"Could not deliver your answer to the server: {exc}. "
+                        "The request is still waiting for an answer, and this "
+                        "prompt is gone, so answer it from the web UI."
+                    ),
                 ),
             )
         )
@@ -2471,23 +2641,42 @@ class _SessionsChatReplAdapter:
                 else:
                     resolve_payload["action"] = "decline"
 
-        try:
-            # URL-based elicitation: deliver the verdict to the
-            # elicitation's dedicated resolve URL rather than as an
-            # in-band ``approval`` session event. Same server-side
-            # effect (both converge on ``_resolve_elicitation``).
-            await self._client.sessions.resolve_elicitation(
-                session_id,
-                elicitation_id,
-                resolve_payload,
-            )
-        except OmnigentError as exc:
-            if exc.code == "not_found":
-                # Elicitation already resolved by another client (e.g. web
-                # UI approved while the terminal prompt was still open).
-                # The harness already received the verdict — treat as no-op.
+        # URL-based elicitation: deliver the verdict to the elicitation's
+        # dedicated resolve URL rather than as an in-band ``approval`` event.
+        # A transport error can happen after the server accepted the POST but
+        # before the client received its response, so retrying is safe: the
+        # server either accepts the retry or reports the elicitation resolved.
+        for attempt in range(3):
+            try:
+                await self._client.sessions.resolve_elicitation(
+                    session_id,
+                    elicitation_id,
+                    resolve_payload,
+                )
                 return
-            raise
+            except OmnigentError as exc:
+                if exc.code == "not_found":
+                    # Another client may have resolved it while the terminal
+                    # prompt was open, or the first POST reached the server.
+                    return
+                raise
+            except Exception as exc:
+                if not _is_recoverable_sse_transport_error(exc):
+                    raise
+                if attempt == 2:
+                    # One line here, postmortem behind DEBUG: the REPL
+                    # configures no log handlers, so a WARNING carrying
+                    # exc_info falls through to ``logging.lastResort`` and
+                    # paints a traceback over the TUI frame. Same split
+                    # ``_stream_pump`` makes for the same reason.
+                    _log.warning("Could not resolve elicitation after transport retries")
+                    _log.debug("elicitation resolve failed", exc_info=exc)
+                    # The elicitation is still parked server-side, so the
+                    # turn waits on a verdict that will never arrive. Say so
+                    # instead of leaving an apparently live prompt.
+                    self._emit_elicitation_resolve_error(exc)
+                    return
+                await asyncio.sleep(0.1 * (2**attempt))
 
     async def _prompt_schema_fields(
         self,
@@ -3674,12 +3863,12 @@ async def run_repl(
                         if isinstance(call_id, str) and name is not None:
                             call_id_to_tool_metadata[call_id] = (name, arguments or {})
                     if tape_entry is not None:
-                        captured: list[object] = []
+                        captured: list[FormattedItem | None] = []
                         original_output = host.output
 
-                        def _capturing_output(it: object) -> None:
-                            captured.append(it)
-                            original_output(it)
+                        def _capturing_output(item: FormattedItem | None) -> None:
+                            captured.append(item)
+                            original_output(item)
 
                         host.output = _capturing_output
                         try:
@@ -3779,7 +3968,7 @@ async def run_repl(
                 fmt.format_error(
                     ErrorBlock(
                         message=msg,
-                        source="llm",
+                        source=sdk_ev.source,
                         ctx=BlockContext(agent=None, depth=0, turn=0),
                     ),
                 )
@@ -4109,9 +4298,11 @@ async def run_repl(
     # Warp) and prompt-toolkit binds it cleanly.
     from omnigent_ui_sdk import Overlay
 
-    async def _overview_builder(target: OverlayTarget) -> RenderableType:
+    async def _overview_builder(target: OverlayTarget | None) -> RenderableType:
         from omnigent.cli_diagnostics import current_cli_log_path
 
+        if target is None:
+            return Text.from_markup("[dim]No debug target available.[/dim]")
         return await _build_debug_overview(
             target,
             client=client,
@@ -4420,7 +4611,7 @@ async def run_repl(
         #   - the server is a Databricks workspace mount — a workspace build
         #     reports no meaningful version string (its /api/version returns a
         #     placeholder like "source"), so showing it is noise.
-        from omnigent.conversation_browser import is_workspace_hosted_url
+        from omnigent.util.server_url import is_workspace_hosted_url
 
         _show_version = _header is not None and not (
             server_url is not None and is_workspace_hosted_url(server_url)
@@ -4721,7 +4912,7 @@ async def _cmd_theme(
     host.output(_build_preview(selected.name))
 
 
-_EFFORT_VALUES = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+_EFFORT_VALUES = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 _EFFORT_CLEAR_ALIASES = {"default", "off", "reset"}
 
 
@@ -4787,7 +4978,8 @@ async def _cmd_effort(
         host.output(
             Text.from_markup(
                 "  [bold red]Invalid effort: "
-                f"{value} · expected none, minimal, low, medium, high, xhigh, max, or default[/]"
+                f"{value} · expected none, minimal, low, medium, high, "
+                "xhigh, max, ultra, or default[/]"
             )
         )
         return
@@ -4931,7 +5123,8 @@ def _build_model_readout_lines(
         else:
             lines.append("Active:  None  ·  None")
             lines.append(
-                "no model configured — run `omnigent setup --no-internal-beta` to add one"
+                f"no model configured — run `{cli_invocation()} setup --no-internal-beta` "
+                "to add one"
             )
         lines.append("usage: /model <name> · /model default | off | reset to clear")
         return lines
@@ -5173,7 +5366,7 @@ async def _cmd_model(
         host.output(
             Text.from_markup(
                 f"  [{fmt.muted}]Active provider: {active_label}. To use {target_label}, run "
-                f"`omnigent setup --no-internal-beta` and select it as the "
+                f"`{cli_invocation()} setup --no-internal-beta` and select it as the "
                 f"default, then restart. "
                 f"(You can still change the model within {active_label}: /model <model-name>.)"
                 f"[/{fmt.muted}]"
@@ -5239,10 +5432,9 @@ async def _start_new_conversation(
     """
     from rich.text import Text
 
-    starter = getattr(session, "start_new_conversation", None)
-    if callable(starter):
+    if isinstance(session, _SessionsChatReplAdapter):
         try:
-            await starter()
+            await session.start_new_conversation()
         except Exception as exc:  # noqa: BLE001 — REPL boundary
             _log.exception("New conversation failed")
             host.output(Text.from_markup(f"  [bold red]New conversation failed: {exc}[/]"))
@@ -5305,7 +5497,7 @@ async def _cmd_switch(
     host: TerminalHost,
     fmt: RichBlockFormatter,
 ) -> None:
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     from rich.table import Table
     from rich.text import Text
@@ -5320,7 +5512,11 @@ async def _cmd_switch(
             table.add_column("Status", style="dim")
             table.add_column("Created", style="dim")
             for i, s in enumerate(sessions_list, 1):
-                when = datetime.fromtimestamp(s.created_at).strftime("%b %d %H:%M")
+                when = (
+                    datetime.fromtimestamp(s.created_at, tz=timezone.utc)
+                    .astimezone()
+                    .strftime("%b %d %H:%M")
+                )
                 table.add_row(str(i), s.id, s.title or "(untitled)", s.status, when)
             host.output(table)
             host.output(
@@ -5447,9 +5643,8 @@ async def _attach_to_conversation(
     # local REPL right away — without this, they only surface after
     # the local user sends a message and triggers the lazy bind.
     # Idempotent: a later ``send()`` short-circuits in ``_ensure_session``.
-    ensure = getattr(session, "_ensure_session", None)
-    if callable(ensure):
-        await ensure()
+    if isinstance(session, _SessionsChatReplAdapter):
+        await session._ensure_session()
 
     items = await _list_all_conversation_items(client, conversation_id)
 
@@ -5962,6 +6157,19 @@ async def _cmd_compact(
     """Request proactive context compaction for the current conversation."""
     from rich.text import Text
 
+    from omnigent.harness_aliases import is_native_harness
+
+    _harness = getattr(session, "harness", None)
+    if _harness is not None and not is_native_harness(_harness):
+        host.output(
+            Text.from_markup(
+                f"  [{fmt.muted}]/compact is only available for native-TUI sessions "
+                f"(claude, codex, cursor, …). This session uses the "
+                f"{_harness} harness, which manages its own "
+                f"context window.[/{fmt.muted}]"
+            )
+        )
+        return
     if session.is_streaming:
         host.output(
             Text.from_markup(
@@ -8288,8 +8496,7 @@ def register_skill_commands(skills: list[SkillSpec]) -> list[str]:
                 host: TerminalHost,
                 fmt: RichBlockFormatter,
             ) -> None:
-                send_skill = getattr(session, "send_skill_slash_command", None)
-                if not callable(send_skill):
+                if not isinstance(session, _SessionsChatReplAdapter):
                     raise RuntimeError("Skill slash commands require the sessions API adapter")
                 if arg:
                     host.output(Text.from_markup(f"  [{fmt.muted}]/{sk.name}[/{fmt.muted}]"))
@@ -8301,7 +8508,7 @@ def register_skill_commands(skills: list[SkillSpec]) -> list[str]:
                     )
                 host.start_timer()
                 await asyncio.sleep(0)
-                async for _ in send_skill(sk.name, arg):
+                async for _ in session.send_skill_slash_command(sk.name, arg):
                     pass
 
             return _skill_handler

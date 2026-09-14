@@ -43,6 +43,8 @@ from typing import Any
 
 from playwright.async_api import Route, async_playwright, expect
 
+from tests.e2e_ui.start_session.test_start_session import _open_entry_config as open_entry_config
+
 # Stubbed host the composer auto-selects (the tunneled runner registers no
 # host). Keyed identically in the recent-workspaces localStorage seed.
 _HOST_ID = "host_e2e"
@@ -198,9 +200,7 @@ async def _open_entry_config(page, agent_id: str) -> None:
     :param page: The Playwright page (the landing picker is already mounted).
     :param agent_id: The stubbed agent id to configure, e.g. ``"ag_polly_e2e"``.
     """
-    await page.get_by_test_id("new-chat-landing-agent-select").click()
-    await page.get_by_test_id(f"new-chat-landing-agent-{agent_id}").click()
-    await page.get_by_test_id("new-chat-landing-config-gear").click()
+    await open_entry_config(page, agent_id)
     await page.get_by_test_id("new-chat-landing-config-harness").click()
 
 
@@ -335,7 +335,7 @@ async def _drive_codex_badge(base_url: str) -> None:
             await _open_entry_config(page, "ag_polly_e2e")
             badge = page.get_by_test_id("new-chat-landing-harness-warning-codex").first
             await expect(badge).to_be_visible(timeout=30_000)
-            # This test doesn't enable OMNIGENT_HARNESS_INSTALL_ENABLED, so the
+            # This test doesn't enable harness_install in OMNIGENT_FEATURES, so the
             # picker runs on the feature-OFF default — where the badge keeps the
             # original per-reason text ("needs auth"). (With the feature ON the
             # badge collapses to a single "needs setup" and the reason moves into

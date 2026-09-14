@@ -30,6 +30,11 @@ describe("sessionWorkspaceState", () => {
     });
   });
 
+  it("remembers a selected GitHub tab", () => {
+    writeSessionWorkspaceState("conv_github", { rightRailTab: "github" });
+    expect(readSessionWorkspaceState("conv_github").rightRailTab).toBe("github");
+  });
+
   it("keeps sessions isolated by id", () => {
     writeSessionWorkspaceState("conv_a", { open: true });
     writeSessionWorkspaceState("conv_b", { open: false, widthPx: 600 });
@@ -50,6 +55,37 @@ describe("sessionWorkspaceState", () => {
     // wrong end (kept the stale tabs instead of the recent ones).
     const stored = readSessionWorkspaceState("conv_files").openFiles;
     expect(stored).toEqual(Array.from({ length: 20 }, (_, i) => `f${i + 5}`));
+  });
+
+  it("persists shell tabs (openTerminals + selectedTerminalKey) per session", () => {
+    writeSessionWorkspaceState("conv_shell", {
+      openTerminals: ["terminal:a", "terminal:b"],
+      selectedTerminalKey: "terminal:b",
+    });
+
+    // Shell tabs round-trip like file tabs so a session switch / reload can
+    // restore the strip. A failure means the fields aren't persisted or the
+    // sanitizer drops them.
+    expect(readSessionWorkspaceState("conv_shell")).toEqual({
+      openTerminals: ["terminal:a", "terminal:b"],
+      selectedTerminalKey: "terminal:b",
+    });
+  });
+
+  it("caps the persisted shell tabs at 20, keeping the most recent", () => {
+    const terminals = Array.from({ length: 25 }, (_, i) => `terminal:t${i}`);
+    writeSessionWorkspaceState("conv_terms", { openTerminals: terminals });
+
+    const stored = readSessionWorkspaceState("conv_terms").openTerminals;
+    expect(stored).toEqual(Array.from({ length: 20 }, (_, i) => `terminal:t${i + 5}`));
+  });
+
+  it("caps the persisted browser tabs at 20, keeping the most recent", () => {
+    const browsers = Array.from({ length: 25 }, (_, i) => `browser:b${i}`);
+    writeSessionWorkspaceState("conv_browsers", { openBrowsers: browsers });
+
+    const stored = readSessionWorkspaceState("conv_browsers").openBrowsers;
+    expect(stored).toEqual(Array.from({ length: 20 }, (_, i) => `browser:b${i + 5}`));
   });
 
   it("prunes the least-recently-touched session past the cap (numeric ids)", () => {

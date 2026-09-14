@@ -33,9 +33,11 @@ vi.mock("@/hooks/useConversations", () => ({
   setConversationPinned: vi.fn(() => Promise.resolve({})),
   PINNED_CONVERSATIONS_KEY: ["pinned-conversations"],
   useRenameConversation: () => ({ mutate: vi.fn() }),
+  useLeaveSession: () => ({ mutate: vi.fn(), isPending: false }),
   useArchiveConversation: () => ({ mutate: vi.fn() }),
   useBulkArchiveConversations: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
   useBulkDeleteConversations: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
+  useBulkMoveToProject: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
   useBulkStopSessions: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
   useStopSession: () => ({ mutate: vi.fn() }),
   // Project sidebar feature: the Sidebar reads the project list and each
@@ -148,6 +150,8 @@ describe("bulk-action bar layout", () => {
     // neighbours (the mobile-overflow bug this guards against).
     const pill = actionGroup.parentElement as HTMLElement;
     expect(pill).toContainElement(exitBtn);
+    expect(pill).toHaveClass("bg-transparent");
+    expect(pill).not.toHaveClass("bg-background");
     for (const el of [exitBtn, deleteBtn, archiveBtn, actionGroup, pill]) {
       expect(el.className).not.toMatch(/\babsolute\b/);
     }

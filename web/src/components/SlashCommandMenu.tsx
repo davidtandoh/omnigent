@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
-import { CommandIcon, WandSparklesIcon } from "lucide-react";
+import { CommandIcon, LoaderCircleIcon, WandSparklesIcon } from "lucide-react";
+import type { SkillsStatus } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /**
@@ -18,6 +19,7 @@ export const BUILTIN_SLASH_COMMANDS: Record<string, string> = {
   "/context": "Show context window usage for this session",
   "/effort": "Set reasoning effort: /effort low | medium | high | default",
   "/model": "Switch the model for this session: /model <name> | default",
+  "/btw": "Ask a side question — answered in a dismissable overlay, not saved to the conversation",
   "/help": "Show available slash commands",
 };
 
@@ -98,6 +100,9 @@ interface SlashCommandMenuProps {
    * with the flat match order.
    */
   commands: Record<string, string>;
+  /** Absent for menus without asynchronous skill discovery. */
+  skillsStatus?: SkillsStatus | null;
+  onRetrySkills?: () => void;
 }
 
 /** One filtered menu row, carrying its index in the flat match order. */
@@ -134,8 +139,8 @@ function MenuRowButton({
       data-testid={`slash-menu-item-${row.name.slice(1)}`}
       data-active={active ? "true" : undefined}
       className={cn(
-        "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] text-foreground hover:bg-accent",
-        active && "bg-accent",
+        "flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-ui text-foreground hover:bg-muted dark:hover:bg-muted/50",
+        active && "bg-muted dark:bg-muted/50",
       )}
       // preventDefault keeps the textarea focused while the user clicks.
       onMouseDown={(e) => e.preventDefault()}
@@ -169,6 +174,8 @@ export function SlashCommandMenu({
   activeIndex,
   onSelect,
   commands,
+  skillsStatus,
+  onRetrySkills,
 }: SlashCommandMenuProps) {
   const matchedNames = rankedSlashCommandNames(commands, query);
   const listRef = useRef<HTMLDivElement>(null);
@@ -180,7 +187,7 @@ export function SlashCommandMenu({
     if (activeIndex < 0 || !listRef.current) return;
     listRef.current.querySelector('[data-active="true"]')?.scrollIntoView({ block: "nearest" });
   }, [activeIndex]);
-  if (matchedNames.length === 0) return null;
+  if (matchedNames.length === 0 && skillsStatus == null) return null;
 
   // The flat match order (from rankedSlashCommandNames) drives the caller's
   // keyboard index. It ranks built-ins before skills, so the partition below
@@ -196,13 +203,13 @@ export function SlashCommandMenu({
   const active = activeIndex >= 0 ? rows[activeIndex] : undefined;
 
   const sectionHeader = (label: string) => (
-    <div className="px-2 pb-0.5 pt-1.5 text-[11px] font-medium text-muted-foreground">{label}</div>
+    <div className="px-1.5 py-1 text-sm font-medium text-muted-foreground">{label}</div>
   );
 
   return (
     <div className="absolute bottom-full left-0 z-10 mb-2 flex items-end gap-2">
-      <div className="w-64 shrink-0 overflow-hidden rounded-xl border border-border bg-popover shadow-lg">
-        <div ref={listRef} className="max-h-80 overflow-y-auto p-1">
+      <div className="w-64 shrink-0 overflow-hidden rounded-[12px] border border-border bg-popover p-2 shadow-menu">
+        <div ref={listRef} className="max-h-80 overflow-y-auto">
           {builtinRows.length > 0 && sectionHeader("Commands")}
           {builtinRows.map((row) => (
             <MenuRowButton
@@ -212,7 +219,41 @@ export function SlashCommandMenu({
               onSelect={onSelect}
             />
           ))}
-          {skillRows.length > 0 && sectionHeader("Skills")}
+          {(skillRows.length > 0 || skillsStatus != null) && sectionHeader("Skills")}
+          {skillsStatus === "loading" && (
+            <div
+              role="status"
+              className="flex items-center gap-2 px-1.5 py-1 text-ui text-muted-foreground"
+            >
+              <LoaderCircleIcon aria-hidden="true" className="size-3.5 shrink-0 animate-spin" />
+              Loading skills…
+            </div>
+          )}
+          {skillsStatus === "error" && (
+            <div role="status" className="px-1.5 py-1 text-ui text-muted-foreground">
+              Couldn’t load skills.{" "}
+              {onRetrySkills && (
+                <button
+                  type="button"
+                  className="underline hover:text-foreground"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={onRetrySkills}
+                >
+                  Retry
+                </button>
+              )}
+            </div>
+          )}
+          {skillsStatus === "unavailable" && (
+            <div role="status" className="px-1.5 py-1 text-ui text-muted-foreground">
+              Skills unavailable while disconnected.
+            </div>
+          )}
+          {skillsStatus === "ready" && skillRows.length === 0 && (
+            <div role="status" className="px-1.5 py-1 text-ui text-muted-foreground">
+              {query ? "No matching skills" : "No skills available"}
+            </div>
+          )}
           {skillRows.map((row) => (
             <MenuRowButton
               key={row.name}
@@ -229,10 +270,10 @@ export function SlashCommandMenu({
       {active && (
         <div
           data-testid="slash-menu-detail"
-          className="hidden max-h-80 w-80 shrink-0 overflow-y-auto rounded-xl border border-border bg-popover p-3 shadow-lg md:block"
+          className="hidden max-h-80 w-80 shrink-0 overflow-y-auto rounded-[12px] border border-border bg-popover p-2 shadow-menu md:block"
         >
-          <p className="font-mono text-xs font-medium text-foreground">{active.name}</p>
-          <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
+          <p className="font-mono text-sm font-medium text-foreground">{active.name}</p>
+          <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">
             {active.description}
           </p>
         </div>

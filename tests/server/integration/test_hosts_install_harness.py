@@ -9,23 +9,26 @@ owner-scoped, host-forwarded design.
 
 These are the executable acceptance criteria for Milestone 1 of the
 "Setup From the UI" project: turning the dead-end "binary missing"
-warning into a working Install action. The route is gated behind
-``OMNIGENT_HARNESS_INSTALL_ENABLED``; the fixture enables it so the
-happy-path and validation cases can run, and one test asserts the route
-is 404 (invisible) when the flag is off.
+warning into a working Install action. The route is gated by
+``harness_install`` in ``OMNIGENT_FEATURES``; the fixture enables it so the
+happy-path and validation cases can run, and one test asserts the route is 404
+(invisible) when the flag is off.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from typing import Any
 
 import pytest
 from asgiref.testing import ApplicationCommunicator
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 
+from omnigent.errors import OmnigentError
 from omnigent.host.frames import (
     HostHelloFrame,
     HostInstallHarnessFrame,
@@ -33,7 +36,9 @@ from omnigent.host.frames import (
     decode_host_frame,
     encode_host_frame,
 )
+from omnigent.server.feature_flags import FeatureFlags
 from omnigent.server.host_registry import HostRegistry
+from omnigent.server.routes import hosts as hosts_module
 from omnigent.server.routes.host_tunnel import create_host_tunnel_router
 from omnigent.server.routes.hosts import create_hosts_router
 from omnigent.stores.conversation_store.sqlalchemy_store import (
@@ -56,10 +61,10 @@ _HOST_NAME = "install-test-laptop"
 def _enable_install_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """Enable the feature flag for every test except the flag-off case.
 
-    The route is invisible (404) unless ``OMNIGENT_HARNESS_INSTALL_ENABLED``
-    is truthy; the happy-path and validation tests need it on.
+    The route is invisible (404) unless ``harness_install`` is in the enabled
+    feature set; the happy-path and validation tests need it on.
     """
-    monkeypatch.setenv("OMNIGENT_HARNESS_INSTALL_ENABLED", "1")
+    monkeypatch.setenv("OMNIGENT_FEATURES", "harness_install")
 
 
 def _websocket_scope(path: str) -> dict[str, object]:
@@ -136,6 +141,18 @@ def install_app(
         create_hosts_router(registry, host_store, conv_store),
         prefix="/v1",
     )
+
+    @app.exception_handler(OmnigentError)
+    async def _handle_omnigent_error(
+        request: Request,
+        exc: OmnigentError,
+    ) -> JSONResponse:
+        """Convert application errors to structured JSON responses."""
+        return JSONResponse(
+            status_code=exc.http_status,
+            content={"error": {"code": exc.code, "message": exc.message}},
+        )
+
     return app, registry, host_store, conv_store
 
 
@@ -171,19 +188,11 @@ async def install_setup(
     conn = registry.get(_HOST_ID)
     assert conn is not None
     replies: dict[str, dict[str, Any]] = {}
-    stop_drain = asyncio.Event()
 
     async def _drain() -> None:
-        """Drain outbound WS frames and reply to install_harness frames.
-
-        :returns: None when ``stop_drain`` is set or no events arrive
-            within the per-iteration timeout.
-        """
-        while not stop_drain.is_set():
-            try:
-                output = await comm.receive_output(timeout=0.5)
-            except asyncio.TimeoutError:
-                continue
+        """Reply to install frames until fixture teardown cancels the drain."""
+        while True:
+            output = await comm.receive_output(timeout=None)
             if output.get("type") != "websocket.send":
                 continue
             text = output.get("text")
@@ -219,14 +228,36 @@ async def install_setup(
     try:
         yield app, registry, comm, replies, drain_task
     finally:
-        stop_drain.set()
+        drain_task.cancel()
         try:
-            await asyncio.wait_for(drain_task, timeout=1.0)
-        except asyncio.TimeoutError:
-            drain_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await drain_task
+        finally:
+            await comm.send_input({"type": "websocket.disconnect", "code": 1000})
+            await comm.wait(timeout=5.0)
 
 
 # ── Happy path ──────────────────────────────────────────
+
+
+async def test_install_harness_survives_idle_mock_host(
+    install_setup: tuple[
+        FastAPI,
+        HostRegistry,
+        ApplicationCommunicator,
+        dict[str, dict[str, Any]],
+        asyncio.Task[None],
+    ],
+) -> None:
+    """An idle mock host stays connected until fixture teardown."""
+    app, registry, comm, _replies, _drain = install_setup
+    await asyncio.sleep(0.75)
+    assert not comm.future.done()
+    assert registry.get(_HOST_ID) is not None
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/claude/install")
+    assert response.status_code == 200, response.text
+    assert response.json()["configured_harnesses"]["claude"] is True
 
 
 async def test_install_harness_returns_refreshed_readiness(
@@ -260,6 +291,50 @@ async def test_install_harness_returns_refreshed_readiness(
     assert body["object"] == "harness_install"
     assert body["harness"] == "claude"
     assert body["configured_harnesses"]["claude"] is True
+
+
+async def test_install_harness_tolerates_a_garbled_gateway_inference(
+    install_setup: tuple[
+        FastAPI,
+        HostRegistry,
+        ApplicationCommunicator,
+        dict[str, dict[str, Any]],
+        asyncio.Task[None],
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A host that answers with a non-mapping ``gateway_inference`` must not 500.
+
+    The reply is host-supplied, so it goes through the same tolerant decode the
+    tunnel path uses: anything that isn't a string→bool object reads as
+    "unknown". Recording it straight would have blown up in ``dict(...)``.
+
+    The garbled value is injected at the proxy's return, not through the mock
+    host: the frame decoder normalises it on the way in, so a fixture reply
+    could never reach the route with it still garbled.
+    """
+    app, registry, _comm, _replies, _drain = install_setup
+
+    async def _garbled_reply(**_kwargs: Any) -> dict[str, Any]:
+        """A host reply whose gateway_inference is a list, not a map."""
+        return {
+            "status": "ok",
+            "configured_harnesses": {"claude": True},
+            "gateway_inference": ["claude-native"],
+        }
+
+    monkeypatch.setattr(
+        "omnigent.server.routes.hosts._proxy_install_harness",
+        _garbled_reply,
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/claude/install")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["gateway_inference"] is None
+    assert registry.gateway_inference(_HOST_ID) is None
 
 
 async def test_install_harness_codex_reports_needs_auth_not_ready(
@@ -298,6 +373,7 @@ async def test_install_harness_codex_reports_needs_auth_not_ready(
 
 async def test_install_coalesces_concurrent_same_family(
     install_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
     Two overlapping installs of one family reach the host as a single frame.
@@ -315,8 +391,18 @@ async def test_install_coalesces_concurrent_same_family(
     assert conn is not None
 
     install_frames: list[str] = []
+    first_install_arrived = asyncio.Event()
+    second_install_arrived = asyncio.Event()
     release = asyncio.Event()
-    stop_drain = asyncio.Event()
+    original_install_key = hosts_module.ui_install_key
+
+    def observe_install_key(harness: str) -> str | None:
+        install_key = original_install_key(harness)
+        if harness == "codex-native":
+            second_install_arrived.set()
+        return install_key
+
+    monkeypatch.setattr(hosts_module, "ui_install_key", observe_install_key)
 
     async def _drain_holding_reply() -> None:
         """Record each install frame, then reply once ``release`` is set.
@@ -325,11 +411,8 @@ async def test_install_coalesces_concurrent_same_family(
         request lands while the first is still pending — exactly the
         window coalescing must cover.
         """
-        while not stop_drain.is_set():
-            try:
-                output = await comm.receive_output(timeout=0.5)
-            except asyncio.TimeoutError:
-                continue
+        while True:
+            output = await comm.receive_output(timeout=None)
             if output.get("type") != "websocket.send":
                 continue
             text = output.get("text")
@@ -339,6 +422,7 @@ async def test_install_coalesces_concurrent_same_family(
             if not isinstance(frame, HostInstallHarnessFrame):
                 continue
             install_frames.append(frame.harness)
+            first_install_arrived.set()
             await release.wait()
             await comm.send_input(
                 {
@@ -353,32 +437,29 @@ async def test_install_coalesces_concurrent_same_family(
                 }
             )
 
-    drain_task = asyncio.create_task(_drain_holding_reply())
     try:
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            # Fire the first request and wait until its task is registered
-            # in-flight before firing the second, so the second provably hits
-            # the coalescing branch instead of racing task creation.
-            first = asyncio.create_task(
-                client.post(f"/v1/hosts/{_HOST_ID}/harnesses/codex/install")
-            )
-            while "openai" not in conn.inflight_installs:
-                await asyncio.sleep(0.01)
-            second = asyncio.create_task(
+        async with (
+            AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client,
+            asyncio.TaskGroup() as tasks,
+        ):
+            drain_task = tasks.create_task(_drain_holding_reply())
+            first = tasks.create_task(client.post(f"/v1/hosts/{_HOST_ID}/harnesses/codex/install"))
+            await asyncio.wait_for(first_install_arrived.wait(), timeout=5.0)
+            assert "openai" in conn.inflight_installs
+            second = tasks.create_task(
                 client.post(f"/v1/hosts/{_HOST_ID}/harnesses/codex-native/install")
             )
-            # Let the second request reach the coalescing branch (it only has to
-            # clear an in-memory host lookup) before releasing the held reply.
-            await asyncio.sleep(0.1)
+            await asyncio.wait_for(second_install_arrived.wait(), timeout=5.0)
+            assert not first.done()
+            assert not second.done()
             release.set()
-            resp_first, resp_second = await asyncio.gather(first, second)
-    finally:
-        stop_drain.set()
-        release.set()
-        try:
-            await asyncio.wait_for(drain_task, timeout=1.0)
-        except asyncio.TimeoutError:
+            resp_first, resp_second = await asyncio.wait_for(
+                asyncio.gather(first, second), timeout=5.0
+            )
             drain_task.cancel()
+    finally:
+        await comm.send_input({"type": "websocket.disconnect", "code": 1000})
+        await comm.wait(timeout=5.0)
 
     # Exactly one frame reached the host despite two concurrent requests.
     assert install_frames == ["codex"]
@@ -397,16 +478,24 @@ async def test_install_coalesces_concurrent_same_family(
 
 async def test_install_harness_route_hidden_when_flag_off(
     install_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
     With the flag off the route is 404 — the feature is invisible.
 
     Ships dark by default; only opt-in deployments expose it.
     """
-    monkeypatch.setenv("OMNIGENT_HARNESS_INSTALL_ENABLED", "0")
-    app, _reg, _hs, _cs = install_app
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    _app, registry, host_store, conv_store = install_app
+    off_app = FastAPI()
+    off_app.include_router(
+        create_hosts_router(
+            registry,
+            host_store,
+            conv_store,
+            feature_flags=FeatureFlags(),
+        ),
+        prefix="/v1",
+    )
+    async with AsyncClient(transport=ASGITransport(app=off_app), base_url="http://test") as client:
         resp = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/claude/install")
 
     assert resp.status_code == 404
@@ -513,18 +602,19 @@ async def test_install_harness_offline_host_returns_409(
     install_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
 ) -> None:
     """
-    Installing on a registered-but-offline host returns 409.
+    Installing on an offline host returns 409.
 
-    A host row can exist in the store while no live tunnel connection is
-    present; the install needs a live connection to forward the frame.
+    A host row can exist in the store while offline (no live tunnel connection
+    present); the install needs a live connection to forward the frame.
     """
     app, _reg, host_store, _cs = install_app
-    # Persist a host row without a live registry connection.
+    # Persist a host row as offline without a live registry connection.
     host_store.upsert_on_connect(
         host_id=_HOST_ID,
         name=_HOST_NAME,
         user_id="local",
     )
+    host_store.set_offline(_HOST_ID)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/claude/install")
 

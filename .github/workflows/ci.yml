@@ -133,12 +133,14 @@ jobs:
               --ignore=tests/runner
               --ignore=tests/stores
             dist: worksteal
-          # Databricks-coupled tests (Lakebase token engine, psycopg). This is
-          # the only lane that installs the `databricks` extra; the
-          # @pytest.mark.databricks marker keeps these tests off the lean lanes
-          # (which run -m "not databricks") and selects them here.
+          # Databricks-coupled tests (Lakebase token engine, psycopg, the
+          # router's ambient workspace-credential chain). This is the only lane
+          # that installs the `databricks` extra; the @pytest.mark.databricks
+          # marker keeps these tests off the lean lanes (which run
+          # -m "not databricks") and selects them here. Paths carrying marked
+          # tests must be listed here or those tests run nowhere.
           - group: databricks
-            paths: tests/db tests/deploy
+            paths: tests/db tests/deploy tests/server/test_smart_routing.py
             extra: databricks
             markexpr: databricks
           # Slack integration (integrations/slack). Its tests live outside the
@@ -186,7 +188,7 @@ jobs:
       - name: Install dependencies
         # matrix.extra (e.g. "databricks") adds an extra for lanes that need it;
         # empty for the default lanes.
-        run: uv sync --locked --extra all --extra dev ${{ matrix.extra && format('--extra {0}', matrix.extra) || '' }}
+        run: uv sync --locked --extra all --group test ${{ matrix.extra && format('--extra {0}', matrix.extra) || '' }}
 
       - name: Run pytest
         shell: bash
@@ -264,7 +266,7 @@ jobs:
         with:
           enable-cache: true
       - name: Install dependencies
-        run: uv sync --locked --extra all --extra dev --extra databricks
+        run: uv sync --locked --extra all --group test --extra databricks
       - name: Run store + DB tests against PostgreSQL
         env:
           OMNIGENT_TEST_DB_URI: postgresql+psycopg://postgres:omnigent@localhost:5432/omnigent_root
@@ -279,6 +281,57 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: pytest-stores-postgres-${{ github.run_id }}
+          path: artifacts/
+          retention-days: 14
+
+  # One lane on the minimum supported CockroachDB, mirroring the single-version
+  # postgres/mysql lanes. The full version matrix runs locally via `just crdb-test`.
+  stores-cockroachdb:
+    name: Pytest (stores-crdb-${{ matrix.crdb_version }})
+    needs: gate
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - crdb_version: "23.2.28"
+            crdb_service: crdb-23-2-28
+            crdb_port: 26323
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version-file: ".python-version"
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a
+        with:
+          enable-cache: true
+      - name: Start CockroachDB
+        run: |
+          docker compose -f deploy/cockroachdb/docker-compose.yml up \
+            --detach --wait --wait-timeout 90 "${{ matrix.crdb_service }}"
+          if [[ "${{ matrix.crdb_version }}" == "23.2.28" ]]; then
+            docker compose -f deploy/cockroachdb/docker-compose.yml exec -T \
+              "${{ matrix.crdb_service }}" cockroach sql --insecure \
+              --execute="SET CLUSTER SETTING sql.txn.read_committed_isolation.enabled = true"
+          fi
+      - name: Install dependencies
+        run: uv sync --locked --extra all --extra cockroachdb --group test
+      - name: Run store + DB tests against CockroachDB
+        env:
+          OMNIGENT_TEST_DB_URI: cockroachdb+psycopg://root@localhost:${{ matrix.crdb_port }}/defaultdb?sslmode=disable
+        run: |
+          uv run pytest tests/stores tests/db \
+            -m "not databricks" \
+            -n 4 \
+            --dist=loadfile \
+            --timeout=300 \
+            --junitxml=artifacts/pytest-stores-crdb.xml
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pytest-stores-crdb-${{ matrix.crdb_version }}-${{ github.run_id }}
           path: artifacts/
           retention-days: 14
 
@@ -312,7 +365,7 @@ jobs:
       - name: Install system MySQL client library
         run: sudo apt-get update -qq && sudo apt-get install -y -q libmysqlclient-dev
       - name: Install dependencies
-        run: uv sync --locked --extra all --extra dev --extra databricks && uv pip install mysqlclient
+        run: uv sync --locked --extra all --group test --extra databricks && uv pip install mysqlclient
       - name: Run store + DB tests against MySQL
         env:
           OMNIGENT_TEST_DB_URI: mysql+mysqldb://root:omnigent@127.0.0.1:3306/omnigent_root
@@ -387,7 +440,7 @@ jobs:
           key: venv-${{ runner.os }}-${{ hashFiles('.python-version') }}-${{ hashFiles('uv.lock') }}
 
       - name: Install dependencies
-        run: uv sync --locked --extra all --extra dev
+        run: uv sync --locked --extra all --group test
 
       - name: Build parity sidecar
         if: steps.sidecar-cache.outputs.cache-hit != 'true'

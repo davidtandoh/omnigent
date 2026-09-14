@@ -41,12 +41,26 @@ Generate the description from the actual diff and this session's context — lea
 with the motivation, then the change. Don't pass a `--body` that skips these
 sections.
 
+### Demo media
+
+Do not commit screenshots or recordings created only as PR or issue evidence.
+Upload them as GitHub attachments and embed the attachment URLs in the PR's
+Demo section or issue comments. Keep local captures outside the tracked tree,
+and redact private data before uploading.
+
+Commit media only when it serves maintained documentation, product assets, or
+test baselines, not merely to obtain a public demo URL. If attachment upload is
+unavailable, explain the limitation and ask for help instead of committing the
+files as a workaround.
+
 ## Finishing a task
 
 When you finish a task, print instructions to the user on how to test it: the
 commands to run, the inputs to provide, or the steps to reproduce so they can
-verify the result themselves. Don't leave the user guessing how to confirm the
-work — tell them exactly what to do.
+verify the result themselves. Prefer verification that is best performed by a
+human, such as concrete manual behavior checks, rather than only listing unit
+test commands. Don't leave the user guessing how to confirm the work — tell
+them exactly what to do.
 
 ## Deprecating features
 
@@ -66,6 +80,15 @@ Keep comments short and focused on the code, not on the change history.
   *why* it exists, in terms a future reader needs. Don't reference PR numbers,
   issue numbers, or ticket IDs (e.g. `#1646`, `fixes JIRA-123`); the scenario
   should be clear without chasing external links.
+
+## Database query names
+
+Application stores use `make_named_managed_session_maker` and give every
+session a stable semantic operation name. The session-level name must describe
+the caller's intent rather than repeat SQL syntax; use a nested
+`query_name_scope` only when one transaction needs distinct names for important
+subqueries. Because the named session covers implicit flush and commit, don't
+add an explicit `flush()` only to make a query name observable.
 
 ## Framework-owned instructions
 
