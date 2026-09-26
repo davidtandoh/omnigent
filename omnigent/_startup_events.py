@@ -14,7 +14,7 @@ import math
 import os
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Literal, ParamSpec, TypeVar
@@ -25,6 +25,7 @@ _P = ParamSpec("_P")
 _R = TypeVar("_R")
 StartupEvent = Literal[
     "launch_started",
+    "host_state_observed",
     "session_resolved",
     "runner_requested",
     "runner_connected",
@@ -37,6 +38,7 @@ StartupEvent = Literal[
     "launch_cancelled",
     "launch_incomplete",
 ]
+NativeHarness = Literal["claude-native", "codex-native"]
 
 
 @dataclass(frozen=True)
@@ -107,6 +109,7 @@ def capture_cli_entry(function: Callable[_P, _R]) -> Callable[_P, _R]:
 @dataclass
 class _Attempt:
     entry: _Entry
+    harness: NativeHarness
     launch_kind: Literal["create", "resume"]
     session_id: str | None = None
     events: set[str] = field(default_factory=set)
@@ -118,6 +121,7 @@ class _Attempt:
         *,
         session_id: str | None = None,
         exit_code: int | None = None,
+        details: Mapping[str, object] | None = None,
     ) -> None:
         if (self.attached and event != "terminal_attach_exited") or event in self.events:
             return
@@ -130,7 +134,7 @@ class _Attempt:
             "schema_version": 1,
             "event": event,
             "attempt_id": self.entry.attempt_id,
-            "harness": "codex-native",
+            "harness": self.harness,
             "launch_kind": self.launch_kind,
             "start_boundary": self.entry.start_boundary,
             "started_at_unix_ms": self.entry.started_at_unix_ms,
@@ -142,6 +146,10 @@ class _Attempt:
         }
         if exit_code is not None:
             attributes["exit_code"] = exit_code
+        if details is not None:
+            for key, value in details.items():
+                if key not in attributes:
+                    attributes[key] = value
         # This matches debug_logging's structured event seam without importing
         # its exporter on the launch path. Keep JSON for local diagnostics too.
         with contextlib.suppress(Exception):
@@ -160,20 +168,26 @@ _attempt: ContextVar[_Attempt | None] = ContextVar("startup_attempt", default=No
 
 
 def record_startup_event(
-    event: StartupEvent, *, session_id: str | None = None, exit_code: int | None = None
+    event: StartupEvent,
+    *,
+    session_id: str | None = None,
+    exit_code: int | None = None,
+    details: Mapping[str, object] | None = None,
 ) -> None:
     """Record a milestone only inside an instrumented CLI launch."""
     attempt = _attempt.get()
     if attempt is not None:
-        attempt.record(event, session_id=session_id, exit_code=exit_code)
+        attempt.record(event, session_id=session_id, exit_code=exit_code, details=details)
 
 
 @contextlib.contextmanager
-def codex_startup_attempt(
-    *, launch_kind: Literal["create", "resume"] = "create"
+def native_startup_attempt(
+    *,
+    harness: NativeHarness,
+    launch_kind: Literal["create", "resume"] = "create",
 ) -> Iterator[None]:
     """Track one launch through attachment, retaining unsuccessful attempts."""
-    attempt = _Attempt(_entry.get() or _capture_entry(), launch_kind)
+    attempt = _Attempt(_entry.get() or _capture_entry(), harness, launch_kind)
     token = _attempt.set(attempt)
     # Fleet telemetry must survive a quieter CLI. Local file/stderr handlers
     # still apply their own configured level.
@@ -203,17 +217,22 @@ def codex_startup_attempt(
         _attempt.reset(token)
 
 
-def observe_codex_startup(function: Callable[_P, _R]) -> Callable[_P, _R]:
-    """Instrument the command callback, including validation and backend setup."""
+def observe_native_startup(
+    harness: NativeHarness,
+) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:
+    """Instrument a native command, including validation and backend setup."""
 
-    @functools.wraps(function)
-    def wrapped(*args: _P.args, **kwargs: _P.kwargs) -> _R:
-        launch_kind = (
-            "resume"
-            if kwargs.get("resume") is not None or kwargs.get("session_id") is not None
-            else "create"
-        )
-        with codex_startup_attempt(launch_kind=launch_kind):
-            return function(*args, **kwargs)
+    def decorate(function: Callable[_P, _R]) -> Callable[_P, _R]:
+        @functools.wraps(function)
+        def wrapped(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+            launch_kind = (
+                "resume"
+                if kwargs.get("resume") is not None or kwargs.get("session_id") is not None
+                else "create"
+            )
+            with native_startup_attempt(harness=harness, launch_kind=launch_kind):
+                return function(*args, **kwargs)
 
-    return wrapped
+        return wrapped
+
+    return decorate
