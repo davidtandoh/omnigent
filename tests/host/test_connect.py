@@ -69,6 +69,7 @@ from omnigent.host.frames import (
 from omnigent.host.identity import HostIdentity
 from omnigent.host.maintenance import HostMaintenanceJanitor
 from omnigent.host.runner_zygote import ZygoteUnavailable
+from omnigent.native.launch_environment import NATIVE_LAUNCH_ENV_VAR
 from omnigent.runner.identity import (
     RUNNER_CONNECT_MARKER_ENV_VAR,
     RUNNER_DELEGATED_AUTH_ENV_VAR,
@@ -3573,6 +3574,31 @@ def test_handle_stat_expands_tilde(tmp_path: Path, monkeypatch) -> None:
     assert result.exists is True
     assert result.type == "directory"
     assert result.canonical_path == os.path.realpath(target)
+
+
+def test_build_runner_env_encodes_only_explicit_native_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The daemon envelope contains requested values, not arbitrary host state."""
+    monkeypatch.setattr(
+        "omnigent.onboarding.provider_config.load_config",
+        dict,
+    )
+    env = _build_runner_env(
+        {"PATH": "/usr/bin", "UNAPPROVED_SECRET": "must-not-cross-boundary"},
+        server_url="http://server",
+        runner_id="runner_abc",
+        binding_token="tok",
+        workspace="/ws",
+        parent_pid=42,
+        native_env={"FM_TASK_ID": "task-123", "CLEAR_OVERRIDE": ""},
+    )
+
+    assert json.loads(env[NATIVE_LAUNCH_ENV_VAR]) == {
+        "FM_TASK_ID": "task-123",
+        "CLEAR_OVERRIDE": "",
+    }
+    assert "UNAPPROVED_SECRET" not in env
 
 
 def test_build_runner_env_allowlists_host_env_and_strips_secrets(tmp_path: Path) -> None:

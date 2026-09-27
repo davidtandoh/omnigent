@@ -423,6 +423,7 @@ def run_codex_native(
     model: str | None = None,
     prompt: str | None = None,
     auto_open_conversation: bool = False,
+    launch_env: dict[str, str] | None = None,
 ) -> None:
     """
     Launch Codex TUI in an Omnigent terminal.
@@ -464,6 +465,7 @@ def run_codex_native(
             model=model,
             prompt=prompt,
             auto_open_conversation=auto_open_conversation,
+            launch_env=launch_env,
         )
 
 
@@ -774,6 +776,7 @@ def _run_with_remote_server(
     model: str | None,
     prompt: str | None,
     auto_open_conversation: bool = False,
+    launch_env: dict[str, str] | None = None,
 ) -> None:
     """
     Launch Codex on an Omnigent server via a daemon-spawned runner.
@@ -832,6 +835,7 @@ def _run_with_remote_server(
                     host_id=host_id,
                     workspace=str(Path.cwd().resolve()),
                     startup_progress=progress,
+                    launch_env=launch_env,
                 )
             if resolved_session_id is None:
                 _record_launch_for_fresh_session(prepared.session_id)
@@ -898,6 +902,7 @@ async def _prepare_codex_terminal_via_daemon(
     model: str | None,
     host_id: str,
     workspace: str,
+    launch_env: dict[str, str] | None = None,
     startup_progress: RunnerStartupProgress | None = None,
 ) -> PreparedCodexTerminal:
     """
@@ -1007,6 +1012,7 @@ async def _prepare_codex_terminal_via_daemon(
             session_id=session_id,
             workspace=workspace,
             fresh=fresh_session,
+            **({"native_env": launch_env} if launch_env else {}),
         )
         _update_startup_progress(startup_progress, "Waiting for runner...")
         await wait_for_runner_online(client, runner_id, timeout_s=_DAEMON_RUNNER_ONLINE_TIMEOUT_S)

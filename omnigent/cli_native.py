@@ -41,9 +41,35 @@ from omnigent.cli_common import (
 # Sourced from the stdlib-only bridge leaf, so importing it here adds no
 # launcher/runner imports to CLI startup.
 from omnigent.harnesses.devin_native.bridge import DEVIN_EFFORTS, DEVIN_PERMISSION_MODES
+from omnigent.native.launch_environment import (
+    NativeLaunchEnvironmentError,
+    parse_native_launch_environment,
+)
 
 _Args = ParamSpec("_Args")
 _Return = TypeVar("_Return")
+
+
+def _native_env_option(function: Callable[_Args, _Return]) -> Callable[_Args, _Return]:
+    """Add the explicit per-launch environment option to a native wrapper."""
+    return click.option(
+        "--env",
+        "launch_env_entries",
+        multiple=True,
+        metavar="KEY=VALUE",
+        help=(
+            "Set one environment variable in the new native terminal. "
+            "May be passed multiple times; values are sent only when explicitly provided."
+        ),
+    )(function)
+
+
+def _parse_native_env_option(entries: tuple[str, ...]) -> dict[str, str]:
+    """Translate shared parser errors into value-free Click usage errors."""
+    try:
+        return parse_native_launch_environment(entries)
+    except NativeLaunchEnvironmentError as exc:
+        raise click.UsageError(str(exc)) from None
 
 
 def _late_bound(
@@ -173,6 +199,7 @@ def register_native_commands(cli: click.Group) -> None:
         default=None,
         help="Open the Claude Code TUI with this as its initial prompt.",
     )
+    @_native_env_option
     @click.option(
         "--smart-routing",
         "smart_routing",
@@ -195,6 +222,7 @@ def register_native_commands(cli: click.Group) -> None:
         claude_command: str | None,
         prompt: str | None,
         smart_routing: bool,
+        launch_env_entries: tuple[str, ...],
         claude_args: tuple[str, ...],
     ) -> None:
         # Param docs live in comments — Click uses the docstring for --help.
@@ -219,6 +247,7 @@ def register_native_commands(cli: click.Group) -> None:
           omnigent claude --smart-routing           # first message picks the model
         """
         _reject_native_on_windows("claude")
+        launch_env = _parse_native_env_option(launch_env_entries)
         if smart_routing:
             # Validate before any side effects (daemon spawn, server discovery)
             # so an unroutable invocation fails instantly.
@@ -310,6 +339,7 @@ def register_native_commands(cli: click.Group) -> None:
             auto_open_conversation=auto_open_conversation,
             startup_profiler=startup_profiler,
             command=resolved_command,
+            launch_env=launch_env,
         )
 
     @cli.command(
@@ -368,6 +398,7 @@ def register_native_commands(cli: click.Group) -> None:
     )
     @click.argument("codex_args", nargs=-1, type=click.UNPROCESSED)
     @observe_native_startup("codex-native")
+    @_native_env_option
     def codex(
         server: str | None,
         resume: str | None,
@@ -375,6 +406,7 @@ def register_native_commands(cli: click.Group) -> None:
         model: str | None,
         prompt: str | None,
         smart_routing: bool,
+        launch_env_entries: tuple[str, ...],
         codex_args: tuple[str, ...],
     ) -> None:
         # Param docs live in comments — Click uses the docstring for --help.
@@ -397,6 +429,7 @@ def register_native_commands(cli: click.Group) -> None:
           omnigent codex --smart-routing           # first message picks the model
         """
         _reject_native_on_windows("codex")
+        launch_env = _parse_native_env_option(launch_env_entries)
         if smart_routing:
             # Validate before any side effects (daemon spawn, server discovery)
             # so an unroutable invocation fails instantly.
@@ -455,6 +488,7 @@ def register_native_commands(cli: click.Group) -> None:
             prompt=prompt,
             auto_open_conversation=auto_open_conversation,
             command=resolved_command,
+            launch_env=launch_env,
         )
 
     @cli.command(
@@ -967,6 +1001,7 @@ def register_native_commands(cli: click.Group) -> None:
         help="Send this as the initial Kiro chat input when the TUI starts.",
     )
     @click.argument("kiro_args", nargs=-1, type=click.UNPROCESSED)
+    @_native_env_option
     def kiro(
         server: str | None,
         resume: str | None,
@@ -977,6 +1012,7 @@ def register_native_commands(cli: click.Group) -> None:
         trust_tools: tuple[str, ...],
         trust_all_tools: bool,
         prompt: str | None,
+        launch_env_entries: tuple[str, ...],
         kiro_args: tuple[str, ...],
     ) -> None:
         """Launch Kiro with Omnigent.
@@ -988,6 +1024,7 @@ def register_native_commands(cli: click.Group) -> None:
           omnigent kiro --resume                  # interactive picker
           omnigent kiro --model auto -p "review this repo"
         """
+        launch_env = _parse_native_env_option(launch_env_entries)
         choice = _split_resume_value(resume)
         if session_id is not None and (choice.picker or choice.conversation_id is not None):
             raise click.UsageError(
@@ -1033,6 +1070,7 @@ def register_native_commands(cli: click.Group) -> None:
             model=model,
             prompt=prompt,
             auto_open_conversation=auto_open_conversation,
+            launch_env=launch_env,
         )
 
     @cli.command(
@@ -1248,11 +1286,13 @@ def register_native_commands(cli: click.Group) -> None:
     )
     @click.option("--model", default=None, help="Antigravity (agy) model to use for the session.")
     @click.argument("antigravity_args", nargs=-1, type=click.UNPROCESSED)
+    @_native_env_option
     def antigravity(
         server: str | None,
         resume: str | None,
         session_id: str | None,
         model: str | None,
+        launch_env_entries: tuple[str, ...],
         antigravity_args: tuple[str, ...],
     ) -> None:
         """Launch Antigravity (agy) with Omnigent.
@@ -1264,6 +1304,7 @@ def register_native_commands(cli: click.Group) -> None:
           omni agy --resume                  # interactive picker
           omni agy --server https://<app>.databricksapps.com
         """
+        launch_env = _parse_native_env_option(launch_env_entries)
         # Validate option combinations BEFORE any side effects (daemon spawn,
         # server discovery) -- see the same comment in the claude command.
         choice = _split_resume_value(resume)
@@ -1308,6 +1349,7 @@ def register_native_commands(cli: click.Group) -> None:
             model=model,
             auto_open_conversation=auto_open_conversation,
             command=resolved_command or None,
+            launch_env=launch_env,
         )
 
     # Register ``agy`` CLI shortcut for parity with the upstream binary name.

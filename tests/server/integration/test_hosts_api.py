@@ -589,6 +589,10 @@ async def test_launch_runner_happy_path(
                 continue
             frame = decode_host_frame(output["text"])
             if isinstance(frame, HostLaunchRunnerFrame):
+                assert frame.native_env == {
+                    "FM_TASK_ID": "task-server-boundary",
+                    "CLEAR_OVERRIDE": "",
+                }
                 result = encode_host_frame(
                     HostLaunchRunnerResultFrame(
                         request_id=frame.request_id,
@@ -610,6 +614,10 @@ async def test_launch_runner_happy_path(
             json={
                 "session_id": conv.id,
                 "workspace": "/tmp/test-workspace",
+                "native_env": {
+                    "FM_TASK_ID": "task-server-boundary",
+                    "CLEAR_OVERRIDE": "",
+                },
             },
         )
 
@@ -628,6 +636,28 @@ async def test_launch_runner_happy_path(
         "runner_id should be written to the session row before sending the launch frame"
     )
     assert updated_conv.host_id == _HOST_ID, "host_id should be written to the session row"
+
+
+async def test_launch_runner_rejects_invalid_native_environment_without_value_leak(
+    host_api_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+) -> None:
+    """The API validates its trust boundary and does not echo supplied values."""
+    app, _registry, _host_store, conv_store = host_api_app
+    conv = conv_store.create_conversation(agent_id=None)
+    secret = "sentinel-secret-value"
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            f"/v1/hosts/{_HOST_ID}/runners",
+            json={
+                "session_id": conv.id,
+                "workspace": "/tmp/test-workspace",
+                "native_env": {"INVALID-NAME": secret},
+            },
+        )
+
+    assert resp.status_code == 400
+    assert secret not in resp.text
 
 
 @pytest.mark.parametrize(

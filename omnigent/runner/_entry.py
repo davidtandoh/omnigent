@@ -2058,6 +2058,12 @@ def main() -> None:
     if cwd not in sys.path:
         sys.path.insert(0, cwd)
 
+    from omnigent.native.launch_environment import (
+        install_native_launch_environment_from_process,
+    )
+
+    install_native_launch_environment_from_process()
+
     configure_process_logging("runner", force=True)
     _install_crash_logging()
     _maybe_prewarm_ambient_detection()

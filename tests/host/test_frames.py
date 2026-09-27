@@ -359,6 +359,7 @@ def test_launch_runner_frame_round_trip() -> None:
         binding_token="secret_token_xyz",
         workspace="/Users/corey/projects/frontend",
         session_id="conv_abc123",
+        native_env={"FM_HOME": "/tmp/fm", "CLEAR_OVERRIDE": ""},
     )
     decoded = decode_host_frame(encode_host_frame(original))
     assert isinstance(decoded, HostLaunchRunnerFrame)
@@ -366,6 +367,25 @@ def test_launch_runner_frame_round_trip() -> None:
     assert decoded.binding_token == "secret_token_xyz"
     assert decoded.workspace == "/Users/corey/projects/frontend"
     assert decoded.session_id == "conv_abc123"
+    assert decoded.native_env == {"FM_HOME": "/tmp/fm", "CLEAR_OVERRIDE": ""}
+
+
+def test_launch_runner_rejects_malformed_native_environment_without_values() -> None:
+    """Invalid launch variables fail without echoing their supplied values."""
+    secret = "sentinel-secret-value"
+    with pytest.raises(ValueError) as exc_info:
+        decode_host_frame(
+            json.dumps(
+                {
+                    "kind": "host.launch_runner",
+                    "request_id": "bad-env",
+                    "binding_token": "runner-binding",
+                    "workspace": "/workspace",
+                    "native_env": {"INVALID-NAME": secret},
+                }
+            )
+        )
+    assert secret not in str(exc_info.value)
 
 
 def test_launch_runner_preserves_the_full_saved_inference_profile() -> None:
