@@ -25,9 +25,7 @@ def parse_native_launch_environment(entries: Iterable[str]) -> dict[str, str]:
     parsed: dict[str, str] = {}
     for index, entry in enumerate(entries, start=1):
         if "=" not in entry:
-            raise NativeLaunchEnvironmentError(
-                f"--env entry {index} must use KEY=VALUE syntax"
-            )
+            raise NativeLaunchEnvironmentError(f"--env entry {index} must use KEY=VALUE syntax")
         key, value = entry.split("=", 1)
         if key in parsed:
             raise NativeLaunchEnvironmentError(f"--env repeats variable {key!r}")
@@ -69,8 +67,7 @@ def validate_native_launch_environment(
         value_bytes = len(raw_value.encode("utf-8"))
         if value_bytes > _MAX_VALUE_BYTES:
             raise NativeLaunchEnvironmentError(
-                f"native launch environment variable {raw_key!r} exceeds "
-                f"{_MAX_VALUE_BYTES} bytes"
+                f"native launch environment variable {raw_key!r} exceeds {_MAX_VALUE_BYTES} bytes"
             )
         total_bytes += len(raw_key.encode("utf-8")) + value_bytes
         if total_bytes > _MAX_TOTAL_BYTES:

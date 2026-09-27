@@ -553,7 +553,10 @@ async def test_prepare_kiro_terminal_via_daemon_rejects_env_on_live_runner(
                 200,
                 json={"labels": {WRAPPER_LABEL_KEY: KIRO_NATIVE_WRAPPER_VALUE}},
             )
-        if request.method == "GET" and path == f"/v1/sessions/conv_live/resources/terminals/{terminal_id}":
+        if (
+            request.method == "GET"
+            and path == f"/v1/sessions/conv_live/resources/terminals/{terminal_id}"
+        ):
             return httpx.Response(
                 200,
                 json={
