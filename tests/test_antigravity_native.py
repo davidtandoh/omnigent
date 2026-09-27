@@ -262,6 +262,65 @@ async def test_daemon_resume_reattaches_to_running_terminal(
     assert prepared.tmux_target == "main"
 
 
+async def test_daemon_resume_rejects_env_on_running_terminal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """
+    ``--env`` must fail loudly, not silently drop, on a live-terminal resume.
+
+    Changing a running process's environment is not possible, so the design
+    contract requires ``--env`` to reject a resume whose terminal is already
+    live rather than reattach to it with the old environment in effect.
+
+    :param monkeypatch: pytest monkeypatch fixture.
+    :param tmp_path: pytest temp dir, used to isolate the bridge root.
+    :returns: None.
+    """
+    import omnigent.harnesses.antigravity_native.bridge as bridge_mod
+
+    monkeypatch.setattr(bridge_mod, "_BRIDGE_ROOT", tmp_path / "antigravity-native")
+    terminal_id = antigravity_terminal_resource_id()
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "GET" and path.endswith(f"/resources/terminals/{terminal_id}"):
+            return httpx.Response(
+                200,
+                json={
+                    "id": terminal_id,
+                    "metadata": {
+                        "running": True,
+                        "tmux_socket": "/tmp/s.sock",
+                        "tmux_target": "main",
+                    },
+                },
+            )
+        if request.method == "GET":
+            return httpx.Response(200, json=_antigravity_session_payload())
+        if request.method == "POST" and path.endswith("/runners"):
+            raise AssertionError("must not launch a runner when rejecting --env")
+        raise AssertionError(f"unexpected request: {request.method} {path}")
+
+    async with _mock_client(_handler) as client:
+        _patch_prepare_client(monkeypatch, client)
+        with pytest.raises(
+            _mod.click.ClickException, match="--env applies only when a new native runner"
+        ):
+            await _mod._prepare_antigravity_terminal_via_daemon(
+                base_url="http://127.0.0.1:0",
+                headers={"Authorization": "Bearer t"},
+                session_id="conv_abc123",
+                session_bundle=None,
+                antigravity_args=(),
+                command="agy",
+                model=None,
+                host_id="host_1",
+                workspace="/tmp/ws",
+                launch_env={"FM_TASK_ID": "worker-8"},
+                startup_progress=None,
+            )
+
+
 async def test_daemon_resume_cold_falls_through_to_launch(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

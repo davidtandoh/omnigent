@@ -963,6 +963,11 @@ async def _prepare_codex_terminal_via_daemon(
                 )
             existing_terminal = await _find_running_codex_terminal(client, session_id)
             if existing_terminal is not None:
+                if launch_env:
+                    raise click.ClickException(
+                        "--env applies only when a new native runner starts; stop the "
+                        "existing session runner before changing its launch environment."
+                    )
                 external_session_id = payload.get("external_session_id")
                 thread_id = external_session_id if isinstance(external_session_id, str) else None
                 if persist_args or model is not None:

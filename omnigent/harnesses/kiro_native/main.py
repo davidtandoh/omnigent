@@ -393,6 +393,11 @@ async def _prepare_kiro_terminal_via_daemon(
                 )
             existing_terminal = await _find_running_kiro_terminal(client, session_id)
             if existing_terminal is not None:
+                if launch_env:
+                    raise click.ClickException(
+                        "--env applies only when a new native runner starts; stop the "
+                        "existing session runner before changing its launch environment."
+                    )
                 if persist_args:
                     click.echo(
                         "Ignoring Kiro launch args for an already-running terminal; "

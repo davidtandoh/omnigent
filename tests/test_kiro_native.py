@@ -529,6 +529,65 @@ async def test_find_running_kiro_terminal_returns_attach_details() -> None:
     assert terminal.tmux_socket == Path("/tmp/k.sock")
 
 
+async def test_prepare_kiro_terminal_via_daemon_rejects_env_on_live_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    ``--env`` must fail loudly, not silently drop, on a live-terminal resume.
+
+    Changing a running process's environment is not possible, so the design
+    contract requires ``--env`` to reject a resume whose terminal is already
+    live rather than reattach to it with the old environment in effect.
+    """
+    import httpx
+
+    from omnigent.harnesses.kiro_native import main as kiro_native
+
+    original_async_client = httpx.AsyncClient
+    terminal_id = kiro_terminal_resource_id()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "GET" and path == "/v1/sessions/conv_live":
+            return httpx.Response(
+                200,
+                json={"labels": {WRAPPER_LABEL_KEY: KIRO_NATIVE_WRAPPER_VALUE}},
+            )
+        if request.method == "GET" and path == f"/v1/sessions/conv_live/resources/terminals/{terminal_id}":
+            return httpx.Response(
+                200,
+                json={
+                    "id": terminal_id,
+                    "metadata": {"tmux_socket": "/tmp/live.sock", "tmux_target": "live:main"},
+                },
+            )
+        if request.method == "POST" and path.endswith("/runners"):
+            raise AssertionError("must not launch a runner when rejecting --env")
+        return httpx.Response(404, json={"error": {"message": path}})
+
+    transport = httpx.MockTransport(handler)
+
+    def client_factory(*args: object, **kwargs: object) -> httpx.AsyncClient:
+        kwargs["transport"] = transport
+        return original_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(kiro_native.httpx, "AsyncClient", client_factory)
+
+    with pytest.raises(ClickException, match="--env applies only when a new native runner"):
+        await kiro_native._prepare_kiro_terminal_via_daemon(
+            base_url="https://example.com",
+            headers={},
+            session_id="conv_live",
+            session_bundle=None,
+            kiro_args=(),
+            model=None,
+            prompt=None,
+            host_id="host_local",
+            workspace="/repo",
+            launch_env={"FM_TASK_ID": "worker-8"},
+        )
+
+
 async def test_wait_for_kiro_terminal_ready_returns_first_hit() -> None:
     """The poll loop returns as soon as the terminal resource appears."""
     client = _FakeClient()

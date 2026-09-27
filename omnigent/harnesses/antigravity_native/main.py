@@ -836,6 +836,11 @@ async def _prepare_antigravity_terminal_via_daemon(
             # it); a cold resume returns ``None`` and falls through to launch.
             existing = await _find_running_antigravity_terminal(client, session_id)
             if existing is not None:
+                if launch_env:
+                    raise click.ClickException(
+                        "--env applies only when a new native runner starts; stop the "
+                        "existing session runner before changing its launch environment."
+                    )
                 if antigravity_args or model is not None:
                     click.echo(
                         "Ignoring Antigravity launch args/model for an already-running "
