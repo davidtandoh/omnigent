@@ -290,6 +290,28 @@ omnigent hermes                      # Hermes Agent (Nous Research)
 omnigent pi                          # Pi
 ```
 
+Claude, Codex, Kiro, and Antigravity can receive explicit variables in the
+native terminal that Omnigent creates:
+
+```bash
+omnigent codex --env FM_HOME=/opt/firstmate --env FM_TASK_ID=worker-7 \
+  --env COMPACT_ADVISER_DISABLE=1
+omnigent claude --env CLAUDE_CONFIG_DIR=/opt/claude-worker \
+  --env CLAUDE_ACCOUNT=
+```
+
+Repeat `--env KEY=VALUE` for each variable. Omnigent splits at the first `=`.
+An empty value, such as `CLAUDE_ACCOUNT=`, clears an inherited override.
+Duplicate or invalid names fail before launch. The option applies only to a
+new runner. Stop an existing session runner before you change its launch
+environment.
+
+Omnigent sends only the entries that you specify. It does not copy the client
+environment, and it does not store these values in session metadata. The
+values cross the configured Omnigent server and host-daemon control channel.
+Use a trusted server and host. Do not put secrets on a command line because
+shell history and process inspection can expose command-line values.
+
 `omnigent agy` requires agy 1.1.13 or newer. When `GEMINI_API_KEY` is set,
 direct Gemini API authentication takes precedence over agy's saved OAuth login.
 

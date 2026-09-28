@@ -514,6 +514,58 @@ def _fake_run_kiro_native_capture(
     return _stub
 
 
+@pytest.mark.parametrize(
+    ("command", "run_target"),
+    [
+        ("claude", "omnigent.harnesses.claude_native.main.run_claude_native"),
+        ("codex", "omnigent.harnesses.codex_native.main.run_codex_native"),
+        ("kiro", "omnigent.harnesses.kiro_native.main.run_kiro_native"),
+        ("agy", "omnigent.harnesses.antigravity_native.main.run_antigravity_native"),
+    ],
+)
+def test_native_wrapper_env_option_is_explicit_and_preserves_empty_values(
+    command: str,
+    run_target: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each Firstmate wrapper forwards only its repeatable ``--env`` entries."""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("omnigent.cli._load_effective_config", dict)
+    monkeypatch.setattr("omnigent.cli._ensure_backend", lambda *_: "http://localhost:0")
+    monkeypatch.setattr(run_target, lambda **kwargs: captured.update(kwargs))
+
+    result = CliRunner().invoke(
+        cli,
+        [command, "--env", "FM_TASK_ID=worker-7", "--env", "CLAUDE_ACCOUNT="],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["launch_env"] == {
+        "FM_TASK_ID": "worker-7",
+        "CLAUDE_ACCOUNT": "",
+    }
+
+
+@pytest.mark.parametrize("command", ["claude", "codex", "kiro", "agy"])
+def test_native_wrapper_env_rejects_duplicates_before_backend_start(
+    command: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Duplicate keys fail before any daemon or server side effect."""
+    monkeypatch.setattr(
+        "omnigent.cli._ensure_backend",
+        lambda *_: pytest.fail("invalid --env must not start the backend"),
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        [command, "--env", "FM_TASK_ID=one", "--env", "FM_TASK_ID=two"],
+    )
+
+    assert result.exit_code != 0
+    assert "repeats variable 'FM_TASK_ID'" in result.output
+
+
 def test_claude_command_resume_binds_session_and_passes_unknown_args(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -445,6 +445,10 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     monkeypatch.setattr(codex_native_bridge, "_BRIDGE_ROOT", tmp_path / "codex-bridge")
     monkeypatch.setenv("OMNIGENT_RUNNER_WORKSPACE", str(tmp_path / "workspace"))
     monkeypatch.setenv("RUNNER_SERVER_URL", "http://ap.example")
+    monkeypatch.setattr(
+        "omnigent.runner.native.orchestration.native_launch_environment",
+        lambda: {"COMPACT_ADVISER_DISABLE": "1", "CLEAR_OVERRIDE": ""},
+    )
     monkeypatch.delenv("DATABRICKS_CONFIG_PROFILE", raising=False)
     monkeypatch.setattr("omnigent.runner._entry._make_auth_token_factory", lambda: None)
     session_reap_calls: list[Path] = []
@@ -733,6 +737,8 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     assert readiness[0].session_id == session_id
     assert terminal_view.id == "terminal_codex_main"
     assert app_server.started is True
+    assert app_server.env["COMPACT_ADVISER_DISABLE"] == "1"
+    assert app_server.env["CLEAR_OVERRIDE"] == ""
     expected_codex_home = codex_native_bridge.codex_home_for_bridge_dir(
         codex_native_bridge.bridge_dir_for_bridge_id(session_id)
     )
@@ -745,6 +751,8 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     assert len(launched_specs) == 1
     launched = launched_specs[0]
     assert launched.command == "codex-wrapper"
+    assert launched.env["COMPACT_ADVISER_DISABLE"] == "1"
+    assert launched.env["CLEAR_OVERRIDE"] == ""
     # Older TUIs still need permission flags; Codex 0.154+ rejects them.
     assert launched.args == [
         "codex",
@@ -2063,6 +2071,7 @@ async def _run_antigravity_auto_create(
     pane_agy_found: bool = True,
     lsof_attributes_ports: bool = False,
     build_agy_launch_calls: list[dict[str, Any]] | None = None,
+    terminal_specs: list[Any] | None = None,
 ) -> tuple[Any, list[tuple[int, str]], list[dict[str, Any]], list[tuple[str, dict[str, Any]]]]:
     """
     Drive ``_auto_create_antigravity_terminal`` with every live collaborator faked.
@@ -2216,6 +2225,8 @@ async def _run_antigravity_auto_create(
             assert terminal_name == "antigravity"
             assert session_key == "main"
             assert resource_role == ANTIGRAVITY_NATIVE_TERMINAL_ROLE
+            if terminal_specs is not None:
+                terminal_specs.append(spec)
             return SessionResourceView(
                 id="terminal_antigravity_main",
                 type="terminal",
@@ -2261,12 +2272,18 @@ async def test_auto_create_antigravity_cold_starts_real_conversation(
     continues it.
     """
     session_id = "72a4f9222c7ac0f45ba2736b57b51f62"
+    terminal_specs: list[Any] = []
+    monkeypatch.setattr(
+        "omnigent.runner.native.orchestration.native_launch_environment",
+        lambda: {"FM_TASK_ID": "task-agy", "CLEAR_OVERRIDE": ""},
+    )
     state, start_cascade_calls, reader_calls, patch_calls = await _run_antigravity_auto_create(
         tmp_path,
         monkeypatch,
         session_id=session_id,
         snapshot={},  # fresh: no external_session_id
         candidate_ports=[52548],
+        terminal_specs=terminal_specs,
     )
     # start_cascade was called once, on the discovered port, with a real id.
     assert len(start_cascade_calls) == 1
@@ -2283,6 +2300,8 @@ async def test_auto_create_antigravity_cold_starts_real_conversation(
     assert patch_calls == []  # cold-start no longer records the phantom cascade (#2 data-loss)
     # The RPC reader spawns (it replaced the transcript forwarder).
     assert len(reader_calls) == 1
+    assert terminal_specs[0].env["FM_TASK_ID"] == "task-agy"
+    assert terminal_specs[0].env["CLEAR_OVERRIDE"] == ""
 
 
 @pytest.mark.asyncio

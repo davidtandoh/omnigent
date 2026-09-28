@@ -519,6 +519,7 @@ class LaunchRunnerRequest(BaseModel):
     session_id: str
     workspace: str
     git: SessionGitOptions | None = None
+    native_env: dict[str, str] | None = None
 
 
 async def _resolve_agent_spec_cwd(
@@ -789,6 +790,16 @@ def create_hosts_router(
         # a runner on another user's host. 401 instead.
         user_id = require_user(request, auth_provider)
 
+        from omnigent.native.launch_environment import (
+            NativeLaunchEnvironmentError,
+            validate_native_launch_environment,
+        )
+
+        try:
+            native_env = validate_native_launch_environment(body.native_env)
+        except NativeLaunchEnvironmentError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
         # Authorize against BOTH the host and the session before
         # spawning anything (see _host_launch for the threat model).
         target = await asyncio.to_thread(
@@ -1013,6 +1024,7 @@ def create_hosts_router(
                     if target.conv.inference_snapshot
                     else None
                 ),
+                native_env=native_env or None,
             )
         )
         try:

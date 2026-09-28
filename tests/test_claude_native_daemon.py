@@ -81,6 +81,29 @@ async def test_launch_or_reuse_daemon_runner_reuses_online_runner() -> None:
     assert posted == []
 
 
+async def test_launch_environment_rejects_online_runner_reuse() -> None:
+    """A launch environment cannot silently miss an already-running runner."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/sessions/conv_a":
+            return httpx.Response(200, json={"runner_id": "runner_live"})
+        if request.url.path == "/v1/runners/runner_live/status":
+            return httpx.Response(200, json={"runner_id": "runner_live", "online": True})
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://e.com"
+    ) as client:
+        with pytest.raises(click.ClickException, match="only when a new native runner starts"):
+            await daemon_launch.launch_or_reuse_daemon_runner(
+                client,
+                host_id="host_1",
+                session_id="conv_a",
+                workspace="/w",
+                native_env={"FM_TASK_ID": "task-123"},
+            )
+
+
 async def test_launch_or_reuse_daemon_runner_launches_when_unbound() -> None:
     """
     A session with no runner triggers a launch on the host endpoint.
@@ -104,11 +127,19 @@ async def test_launch_or_reuse_daemon_runner_launches_when_unbound() -> None:
         transport=httpx.MockTransport(handler), base_url="https://e.com"
     ) as client:
         runner_id = await daemon_launch.launch_or_reuse_daemon_runner(
-            client, host_id="host_1", session_id="conv_a", workspace="/work"
+            client,
+            host_id="host_1",
+            session_id="conv_a",
+            workspace="/work",
+            native_env={"FM_TASK_ID": "task-123", "CLAUDE_ACCOUNT": ""},
         )
 
     assert runner_id == "runner_new"
-    assert launched["body"] == {"session_id": "conv_a", "workspace": "/work"}
+    assert launched["body"] == {
+        "session_id": "conv_a",
+        "workspace": "/work",
+        "native_env": {"FM_TASK_ID": "task-123", "CLAUDE_ACCOUNT": ""},
+    }
 
 
 async def test_launch_or_reuse_daemon_runner_clears_stale_binding() -> None:

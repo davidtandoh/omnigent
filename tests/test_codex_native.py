@@ -8102,6 +8102,7 @@ def test_run_codex_native_does_not_require_local_codex_binary(
         model: str | None,
         prompt: str | None,
         auto_open_conversation: bool,
+        launch_env: dict[str, str] | None = None,
     ) -> None:
         """
         Record that the remote daemon path was selected.
@@ -8118,6 +8119,7 @@ def test_run_codex_native_does_not_require_local_codex_binary(
             model,
             prompt,
             auto_open_conversation,
+            launch_env,
         )
         remote_called = True
 
@@ -9130,6 +9132,70 @@ async def test_prepare_codex_terminal_via_daemon_live_resume_skips_config_patch(
     assert not any(method == "PATCH" for method, _path, _body in calls)
     assert live_rollout.read_bytes() == before
     assert "Ignoring Codex launch args/model" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+async def test_prepare_codex_terminal_via_daemon_rejects_env_on_live_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    ``--env`` must fail loudly, not silently drop, on a live-terminal resume.
+
+    Changing a running process's environment is not possible, so the design
+    contract requires ``--env`` to reject a resume whose terminal is already
+    live rather than reattach to it with the old environment in effect.
+    """
+    original_async_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.bridge._BRIDGE_ROOT", tmp_path / "bridges"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "GET" and path == "/v1/sessions/conv_live":
+            return httpx.Response(
+                200,
+                json={
+                    "labels": {"omnigent.wrapper": "codex-native-ui"},
+                    "external_session_id": "019e96aa-0be2-7343-8d3b-6f914d60936b",
+                },
+            )
+        if request.method == "GET" and path.endswith("/resources/terminals/terminal_codex_main"):
+            return httpx.Response(
+                200,
+                json={
+                    "id": "terminal_codex_main",
+                    "metadata": {
+                        "tmux_socket": "/tmp/live.sock",
+                        "tmux_target": "live:main",
+                    },
+                },
+            )
+        if request.method == "POST" and path.endswith("/runners"):
+            raise AssertionError("must not launch a runner when rejecting --env")
+        return httpx.Response(404, json={"error": {"message": path}})
+
+    transport = httpx.MockTransport(handler)
+
+    def client_factory(*args: object, **kwargs: object) -> httpx.AsyncClient:
+        kwargs["transport"] = transport
+        return original_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(codex_native.httpx, "AsyncClient", client_factory)
+
+    with pytest.raises(click.ClickException, match="--env applies only when a new native runner"):
+        await codex_native._prepare_codex_terminal_via_daemon(
+            base_url="https://example.com",
+            headers={},
+            session_id="conv_live",
+            session_bundle=None,
+            codex_args=(),
+            model=None,
+            host_id="host_local",
+            workspace="/repo",
+            launch_env={"FM_TASK_ID": "worker-8"},
+        )
 
 
 @pytest.mark.asyncio

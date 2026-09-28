@@ -239,6 +239,7 @@ async def launch_or_reuse_daemon_runner(
     session_id: str,
     workspace: str,
     fresh: bool = False,
+    native_env: dict[str, str] | None = None,
 ) -> str:
     """
     Ensure the session is bound to a daemon-spawned runner; return its id.
@@ -268,6 +269,11 @@ async def launch_or_reuse_daemon_runner(
         existing = _json_body(snap).get("runner_id") if snap.status_code == 200 else None
     if isinstance(existing, str) and existing:
         if await runner_is_online(client, existing):
+            if native_env:
+                raise click.ClickException(
+                    "--env applies only when a new native runner starts; stop the "
+                    "existing session runner before changing its launch environment."
+                )
             return existing
         # Stale binding (offline runner): clear it so the launch
         # endpoint's atomic ``UPDATE ... WHERE runner_id IS NULL`` can
@@ -290,7 +296,11 @@ async def launch_or_reuse_daemon_runner(
             await asyncio.sleep(_RETRY_DELAYS_S[attempt - 1])
         resp = await client.post(
             f"/v1/hosts/{url_component(host_id)}/runners",
-            json={"session_id": session_id, "workspace": workspace},
+            json={
+                "session_id": session_id,
+                "workspace": workspace,
+                **({"native_env": native_env} if native_env else {}),
+            },
             timeout=60.0,
         )
         if resp.status_code < 400:

@@ -651,6 +651,10 @@ async def test_auto_create_kiro_terminal_launches_required_terminal_with_isolate
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("RUNNER_SERVER_URL", "http://127.0.0.1:6767")
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-leak")
+    monkeypatch.setattr(
+        "omnigent.runner.native.orchestration.native_launch_environment",
+        lambda: {"FM_TASK_ID": "task-kiro", "CLEAR_OVERRIDE": ""},
+    )
     monkeypatch.setattr(kiro_native_bridge, "_BRIDGE_ROOT", tmp_path / "kiro-bridge")
     monkeypatch.setattr(
         kiro_native,
@@ -752,6 +756,8 @@ async def test_auto_create_kiro_terminal_launches_required_terminal_with_isolate
     assert spec.inherit_env is False
     assert "OPENAI_API_KEY" not in spec.env
     assert "OPENAI_API_KEY" in spec.env_unset
+    assert spec.env["FM_TASK_ID"] == "task-kiro"
+    assert spec.env["CLEAR_OVERRIDE"] == ""
     assert spec.env[kiro_native_bridge.KIRO_NATIVE_BRIDGE_DIR_ENV_VAR] == str(
         kiro_native_bridge.bridge_dir_for_session_id("823dbd1aab969b5a813fac59bb977a77")
     )
@@ -1610,6 +1616,11 @@ async def test_auto_create_claude_terminal_injects_ucode_gateway_config(
     """
     from omnigent.harnesses.claude_native.main import ClaudeNativeUcodeConfig
 
+    monkeypatch.setattr(
+        "omnigent.runner.native.orchestration.native_launch_environment",
+        lambda: {"FM_HOME": "/tmp/firstmate", "CLAUDE_ACCOUNT": ""},
+    )
+
     monkeypatch.setattr(claude_native_bridge, "_TRUSTED_PARENT", tmp_path)
     monkeypatch.setattr(claude_native_bridge, "_BRIDGE_ROOT", tmp_path / "root")
     monkeypatch.setenv("RUNNER_SERVER_URL", "http://127.0.0.1:8000")
@@ -1708,6 +1719,8 @@ async def test_auto_create_claude_terminal_injects_ucode_gateway_config(
         "ENABLE_TOOL_SEARCH": "true",
         "CLAUDE_CODE_DISABLE_AGENT_VIEW": "1",
         "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY": "1",
+        "FM_HOME": "/tmp/firstmate",
+        "CLAUDE_ACCOUNT": "",
     }
     assert spec.command == "claude"
     # The gateway default model is applied (no per-session override here).

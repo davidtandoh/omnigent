@@ -1578,6 +1578,7 @@ def run_claude_native(
     use_claude_config: bool = False,
     auto_open_conversation: bool = False,
     startup_profiler: StartupProfiler | None = None,
+    launch_env: dict[str, str] | None = None,
 ) -> None:
     """
     Launch Claude Code in an Omnigent terminal and attach locally.
@@ -1676,6 +1677,7 @@ def run_claude_native(
                 claude_args=sanitized_args,
                 auto_open_conversation=auto_open_conversation,
                 startup_profiler=startup_profiler,
+                launch_env=launch_env,
             )
 
 
@@ -4526,6 +4528,7 @@ async def _prepare_claude_terminal_via_daemon(
     claude_args: tuple[str, ...],
     host_id: str,
     workspace: str,
+    launch_env: dict[str, str] | None = None,
     startup_profiler: StartupProfiler | None = None,
     startup_progress: RunnerStartupProgress | None = None,
 ) -> PreparedClaudeTerminal:
@@ -4660,6 +4663,7 @@ async def _prepare_claude_terminal_via_daemon(
             session_id=session_id,
             workspace=workspace,
             fresh=fresh_session,
+            **({"native_env": launch_env} if launch_env else {}),
         )
         record_startup_event("session_runner_bound")
         _mark_startup_step(
@@ -4763,6 +4767,7 @@ def _run_with_remote_server(
     claude_args: tuple[str, ...],
     auto_open_conversation: bool = False,
     startup_profiler: StartupProfiler | None = None,
+    launch_env: dict[str, str] | None = None,
 ) -> None:
     """
     Launch Claude on a remote Omnigent server via the connect daemon.
@@ -4883,6 +4888,7 @@ def _run_with_remote_server(
                         session_bundle=bundle,
                         claude_args=claude_args,
                         host_id=host_id,
+                        launch_env=launch_env,
                         workspace=str(Path.cwd().resolve()),
                         startup_profiler=startup_profiler,
                         startup_progress=progress,

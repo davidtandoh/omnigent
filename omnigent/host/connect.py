@@ -817,6 +817,7 @@ def _build_runner_env(
     host_owns_global_cleanup: bool = False,
     harness_tmp_parent: Path | None = None,
     inference_config: dict[str, object] | None = None,
+    native_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """
     Build the environment for a spawned runner subprocess.
@@ -912,6 +913,13 @@ def _build_runner_env(
         env[RUNNER_LAUNCH_HARNESS_ENV_VAR] = harness
     if interactive_shells is not None:
         env[RUNNER_INTERACTIVE_SHELLS_ENV_VAR] = json.dumps(interactive_shells)
+    if native_env:
+        from omnigent.native.launch_environment import (
+            NATIVE_LAUNCH_ENV_VAR,
+            encode_native_launch_environment,
+        )
+
+        env[NATIVE_LAUNCH_ENV_VAR] = encode_native_launch_environment(native_env)
     return env
 
 
@@ -1838,6 +1846,7 @@ class HostProcess:
             host_owns_global_cleanup=self._maintenance_janitor is not None,
             harness_tmp_parent=self._harness_tmp_parent,
             inference_config=frame.inference_config,
+            native_env=frame.native_env,
         )
         if frame.inference_config is not None:
             try:

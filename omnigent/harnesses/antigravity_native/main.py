@@ -218,6 +218,7 @@ def run_antigravity_native(
     model: str | None = None,
     permission_mode: str | None = None,
     auto_open_conversation: bool = False,
+    launch_env: dict[str, str] | None = None,
 ) -> None:
     """
     Launch the Antigravity (agy) TUI in an Omnigent terminal and attach.
@@ -292,6 +293,7 @@ def run_antigravity_native(
                 permission_mode=permission_mode,
                 headless=headless,
                 auto_open_conversation=auto_open_conversation,
+                launch_env=launch_env,
             )
 
 
@@ -449,6 +451,7 @@ def _run_with_remote_server(
     permission_mode: str | None = None,
     headless: bool = False,
     auto_open_conversation: bool = False,
+    launch_env: dict[str, str] | None = None,
 ) -> None:
     """
     Launch agy on a remote Omnigent server via a daemon-spawned runner.
@@ -517,6 +520,7 @@ def _run_with_remote_server(
                     host_id=host_id,
                     workspace=str(Path.cwd().resolve()),
                     startup_progress=progress,
+                    launch_env=launch_env,
                 )
             click.echo(f"Web UI: {conversation_url(base_url, prepared.session_id)}", err=True)
             open_conversation_link_if_enabled(
@@ -756,6 +760,7 @@ async def _prepare_antigravity_terminal_via_daemon(
     headless: bool = False,
     host_id: str,
     workspace: str,
+    launch_env: dict[str, str] | None = None,
     startup_progress: RunnerStartupProgress | None = None,
 ) -> PreparedAntigravityTerminal:
     """
@@ -831,6 +836,11 @@ async def _prepare_antigravity_terminal_via_daemon(
             # it); a cold resume returns ``None`` and falls through to launch.
             existing = await _find_running_antigravity_terminal(client, session_id)
             if existing is not None:
+                if launch_env:
+                    raise click.ClickException(
+                        "--env applies only when a new native runner starts; stop the "
+                        "existing session runner before changing its launch environment."
+                    )
                 if antigravity_args or model is not None:
                     click.echo(
                         "Ignoring Antigravity launch args/model for an already-running "
@@ -859,6 +869,7 @@ async def _prepare_antigravity_terminal_via_daemon(
             session_id=session_id,
             workspace=workspace,
             fresh=fresh_session,
+            **({"native_env": launch_env} if launch_env else {}),
         )
         _update_progress(startup_progress, "Waiting for runner...")
         await wait_for_runner_online(client, runner_id, timeout_s=_DAEMON_RUNNER_ONLINE_TIMEOUT_S)

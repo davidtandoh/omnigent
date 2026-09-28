@@ -58,6 +58,7 @@ from omnigent.entities.session_resources import (
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.harness_plugins import native_provider_for_key
 from omnigent.models.model_override import validate_model_override
+from omnigent.native.launch_environment import native_launch_environment
 from omnigent.native.native_coding_agents import (
     native_coding_agent_for_harness,
     native_coding_agent_for_terminal_name,
@@ -3566,7 +3567,10 @@ async def _auto_create_kiro_terminal(
             os_env=OSEnvSpec(type="caller_process", cwd=workspace),
             command=kiro_launch.executable,
             args=kiro_launch.argv[1:],
-            env=build_kiro_native_terminal_env(session_id),
+            env={
+                **build_kiro_native_terminal_env(session_id),
+                **native_launch_environment(),
+            },
             env_unset=list(KIRO_NATIVE_ENV_UNSET),
             inherit_env=False,
             scrollback=100_000,
@@ -4547,7 +4551,7 @@ async def _launch_codex_native_tui(
             ),
             command=codex_command,
             args=codex_launch_args,
-            env=codex_terminal_env(app_server),
+            env={**codex_terminal_env(app_server), **native_launch_environment()},
             # Match the local ``omnigent codex`` terminal scrollback.
             scrollback=100_000,
             # Preserve the final frame and exit status until lifecycle cleanup.
@@ -5180,6 +5184,10 @@ async def _auto_create_codex_terminal(
     # Routing session (pinned or auto) gets the extended catalog. A plain
     # session keeps codex's bundled catalog and never pays the probe.
     app_server.env.update(codex_extended_catalog_env(launch_config.routing_enabled))
+    # Codex executes shell tools in the app-server process, not the remote TUI
+    # process. Apply the explicit launch map to both processes so the agent's
+    # tool shell observes the same per-launch contract as its terminal.
+    app_server.env.update(native_launch_environment())
     # First-message model routing. Advertised in the same bridge dir the
     # ``UserPromptSubmit`` hook is pointed at (so the hook needs no env of
     # its own), and live before the app-server starts because the hook can
@@ -6226,7 +6234,7 @@ async def _auto_create_antigravity_terminal(
             ),
             command=argv[0],
             args=list(argv[1:]),
-            env=env_overrides,
+            env={**env_overrides, **native_launch_environment()},
             # Match the local ``omnigent antigravity`` terminal scrollback.
             scrollback=100_000,
             # Let agy's full-screen TUI escape sequences reach the web xterm.
@@ -8492,7 +8500,10 @@ async def _auto_create_claude_terminal(
         # Tool Search env plus ucode gateway env (ANTHROPIC_BASE_URL
         # etc.) when derived. Empty provider config still forces
         # ENABLE_TOOL_SEARCH=true so MCP schemas are loaded on demand.
-        env=build_native_claude_terminal_env(claude_config),
+        env={
+            **build_native_claude_terminal_env(claude_config),
+            **native_launch_environment(),
+        },
         # Names to strip (see ``_claude_terminal_env_unset``). Dropping
         # ``DATABRICKS_CONFIG_PROFILE`` matters because Claude's MCP servers
         # inherit this env and several build ``WorkspaceClient`` without pinning

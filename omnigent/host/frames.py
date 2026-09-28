@@ -251,6 +251,7 @@ class HostLaunchRunnerFrame:
     session_id: str | None = None
     harness: str | None = None
     inference_config: dict[str, Any] | None = None
+    native_env: dict[str, str] | None = None
 
 
 @dataclass
@@ -1214,6 +1215,7 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "session_id": frame.session_id,
                 "harness": frame.harness,
                 "inference_config": frame.inference_config,
+                **({"native_env": frame.native_env} if frame.native_env else {}),
             }
         )
     if isinstance(frame, HostLaunchRunnerResultFrame):
@@ -1793,6 +1795,12 @@ def _decode_launch_runner(msg: _JsonObject) -> HostLaunchRunnerFrame:
     inference_config = msg.get("inference_config")
     if inference_config is not None and not isinstance(inference_config, dict):
         raise ValueError("inference_config must be an object or null")
+    from omnigent.native.launch_environment import validate_native_launch_environment
+
+    native_env_raw = msg.get("native_env")
+    if native_env_raw is not None and not isinstance(native_env_raw, dict):
+        raise ValueError("native_env must be an object or null")
+    native_env = validate_native_launch_environment(native_env_raw)
     return HostLaunchRunnerFrame(
         request_id=_required_str(msg, "request_id"),
         binding_token=_required_str(msg, "binding_token"),
@@ -1800,6 +1808,7 @@ def _decode_launch_runner(msg: _JsonObject) -> HostLaunchRunnerFrame:
         session_id=_optional_nullable_str(msg, "session_id"),
         harness=_optional_nullable_str(msg, "harness"),
         inference_config=inference_config,
+        native_env=native_env or None,
     )
 
 
