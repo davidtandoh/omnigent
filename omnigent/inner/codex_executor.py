@@ -973,7 +973,7 @@ def _resolve_codex_home_config_source(source_dir: Path, home_codex_home: Path) -
     return source_dir
 
 
-def _codex_home_config_source_from_env() -> Path:
+def _codex_home_config_source_from_env(env: Mapping[str, str] | None = None) -> Path:
     """
     Return the Codex home whose auth/config should be bridged.
 
@@ -983,12 +983,15 @@ def _codex_home_config_source_from_env() -> Path:
     can inherit a parent private home, so this resolver maps that specific
     inherited session-state home back to the user's default ``~/.codex``.
 
+    :param env: Environment that owns this launch. Defaults to ``os.environ``.
     :returns: Host Codex home to read ``auth.json`` and ``config.toml`` from,
         e.g. ``Path.home() / ".codex"`` or an explicit user ``CODEX_HOME``.
     """
-    home_codex_home = Path.home() / ".codex"
+    source_env = os.environ if env is None else env
+    home = None if env is None else source_env.get("HOME") or source_env.get("USERPROFILE")
+    home_codex_home = (Path(home) if home else Path.home()) / ".codex"
     return _resolve_codex_home_config_source(
-        Path(os.environ.get("CODEX_HOME") or str(home_codex_home)),
+        Path(source_env.get("CODEX_HOME") or str(home_codex_home)),
         home_codex_home,
     )
 

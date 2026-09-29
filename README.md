@@ -306,6 +306,10 @@ Duplicate or invalid names fail before launch. The option applies only to a
 new runner. Stop an existing session runner before you change its launch
 environment.
 
+For Codex, Omnigent applies these variables to both the app-server that runs
+tools and the attached terminal UI. The agent's tool shell therefore receives
+the explicit launch environment.
+
 Omnigent sends only the entries that you specify. It does not copy the client
 environment, and it does not store these values in session metadata. The
 values cross the configured Omnigent server and host-daemon control channel.

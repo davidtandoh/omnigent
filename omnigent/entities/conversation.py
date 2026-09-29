@@ -185,8 +185,8 @@ class Conversation:
         recover the external session's prior transcript on a
         fresh runner. Generic across runtimes — at most one
         external session per conversation.
-    :param terminal_launch_args: Pass-through CLI args for a native
-        terminal wrapper (claude / codex), e.g.
+    :param terminal_launch_args: Native harness launch CLI args (claude /
+        codex), e.g.
         ``["--dangerously-skip-permissions"]``. ``None`` for
         non-native sessions, or a native session launched with no
         extra args. Set at session create (so the runner has them

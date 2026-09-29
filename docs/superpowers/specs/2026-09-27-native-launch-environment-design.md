@@ -15,9 +15,11 @@ host daemon validates the map and puts one encoded envelope in the new runner's
 environment. The runner consumes and removes that envelope before it creates a
 terminal.
 
-The four native terminal builders merge the consumed entries into the terminal
-environment. This explicit map has precedence over an inherited value. Existing
-terminal `env_unset` rules still remove protected variables after the merge.
+The four native terminal builders merge the consumed entries into the launch
+environment. Codex applies the entries to both its tool-running app-server and
+its attached terminal UI. This explicit map has precedence over an inherited
+value. For terminal processes, existing `env_unset` rules still remove
+protected variables after the merge.
 
 The map is not stored in session metadata or the database. A request with
 `--env` fails if the session already has a live runner because changing a

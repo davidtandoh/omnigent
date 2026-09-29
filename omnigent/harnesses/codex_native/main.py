@@ -1676,8 +1676,8 @@ async def _create_codex_session(
     :param bridge_id: Opaque bridge id, e.g. ``"bridge_abc123"``.
         ``None`` omits the label so the runner-owned bridge keys by
         session id.
-    :param terminal_launch_args: Pass-through Codex CLI args to persist
-        for runner-owned terminal launch, e.g.
+    :param terminal_launch_args: Codex harness launch CLI args to persist
+        for runner-owned app-server and terminal launch, e.g.
         ``["--config", "approval_policy=on-request"]``.
     :returns: New Omnigent session id.
     """

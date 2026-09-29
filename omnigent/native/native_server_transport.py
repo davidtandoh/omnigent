@@ -26,7 +26,7 @@ class NativeLaunchConfig:
         ``"conv_abc123"``.
     :param workspace: Working directory the server runs in.
     :param model_override: Persisted model override, or ``None``.
-    :param terminal_launch_args: Pass-through CLI args for the TUI/server.
+    :param terminal_launch_args: Native harness launch CLI args for the TUI/server.
     :param external_session_id: Native session id to resume, or ``None``.
     :param server_url: Existing server URL when reusing one, or ``None``.
     :param auth_headers: Auth headers for the native server.

@@ -1,4 +1,4 @@
-"""Canonical Codex launch options and private config-file profile materialization."""
+"""Canonical Codex launch options and process configuration materialization."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import os
 import re
 import tempfile
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -60,6 +61,16 @@ _URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 # An option with its value attached by ``=`` (e.g. ``--remote=ws://...``), so
 # the value can be redacted without treating the whole token as opaque.
 _ATTACHED_OPTION = re.compile(r"^(--?[A-Za-z0-9][A-Za-z0-9-]*)=(.*)$", re.DOTALL)
+
+
+@dataclass(frozen=True)
+class ParsedCodexLaunchArgs:
+    """Config-bearing values and remaining terminal-only Codex arguments."""
+
+    config_overrides: tuple[str, ...]
+    config_profile: str | None
+    strict_config: bool
+    terminal_args: tuple[str, ...]
 
 
 def absolute_codex_path(value: str, base: Path) -> str:
@@ -140,44 +151,78 @@ def canonical_codex_launch_args(args: Sequence[str]) -> list[str]:
     return canonical
 
 
-def codex_config_profile(args: Sequence[str]) -> str | None:
-    """Read the file-profile selector, rejecting ambiguous or missing selectors."""
+def parse_codex_launch_args(args: Sequence[str]) -> ParsedCodexLaunchArgs:
+    """Separate process-wide Codex config from terminal and thread options."""
     canonical = canonical_codex_launch_args(args)
+    config_overrides: list[str] = []
+    terminal_args: list[str] = []
     profile: str | None = None
+    strict_config = False
     index = 0
     while index < len(canonical):
         arg = canonical[index]
         if arg == "--":
+            terminal_args.extend(canonical[index:])
             break
-        if arg in {"--profile", "-p"}:
-            if profile is not None or index + 1 == len(canonical):
-                raise ValueError("Codex requires exactly one value for --profile")
-            profile = canonical[index + 1]
-            if not re.fullmatch(r"[A-Za-z0-9_-]+", profile):
-                raise ValueError("Invalid Codex config profile name")
-        if arg in {
-            "-c",
+        if arg in {"-c", "--config", "--enable", "--disable", "-p", "--profile"}:
+            if index + 1 == len(canonical):
+                if arg in {"-p", "--profile"}:
+                    raise ValueError("Codex requires exactly one value for --profile")
+                terminal_args.append(arg)
+                index += 1
+                continue
+            value = canonical[index + 1]
+            if arg in {"-c", "--config"}:
+                config_overrides.append(value)
+            elif arg == "--enable":
+                config_overrides.append(f"features.{value}=true")
+            elif arg == "--disable":
+                config_overrides.append(f"features.{value}=false")
+            else:
+                if profile is not None:
+                    raise ValueError("Codex requires exactly one value for --profile")
+                profile = value
+                if not re.fullmatch(r"[A-Za-z0-9_-]+", profile):
+                    raise ValueError("Invalid Codex config profile name")
+            index += 2
+            continue
+        attached = _ATTACHED_OPTION.fullmatch(arg)
+        if attached is not None and attached.group(1) in {
             "--config",
-            "-s",
-            "--sandbox",
-            "-a",
-            "--ask-for-approval",
-            "-p",
-            "--profile",
-            "--add-dir",
-            "-m",
-            "--model",
-            "-C",
-            "--cd",
-            "-i",
-            "--image",
-            "--local-provider",
             "--enable",
             "--disable",
         }:
+            option, value = attached.groups()
+            if option == "--config":
+                config_overrides.append(value)
+            else:
+                enabled = "true" if option == "--enable" else "false"
+                config_overrides.append(f"features.{value}={enabled}")
             index += 1
+            continue
+        if arg.startswith("-c="):
+            config_overrides.append(arg[3:])
+            index += 1
+            continue
+        if arg == "--search":
+            config_overrides.append('web_search="live"')
+            index += 1
+            continue
+        if arg == "--strict-config":
+            strict_config = True
+        terminal_args.append(arg)
         index += 1
-    return profile
+    return ParsedCodexLaunchArgs(
+        config_overrides=tuple(config_overrides),
+        config_profile=profile,
+        strict_config=strict_config,
+        terminal_args=tuple(terminal_args),
+    )
+
+
+def codex_config_profile(args: Sequence[str]) -> str | None:
+    """Read the file-profile selector, rejecting ambiguous or missing selectors."""
+    return parse_codex_launch_args(args).config_profile
 
 
 def without_codex_config_profile(args: Sequence[str]) -> list[str]:

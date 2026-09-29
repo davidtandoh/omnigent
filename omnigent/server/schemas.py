@@ -1450,8 +1450,8 @@ class _SessionCreateRequestBase(BaseModel):
         source repository directory. Requires ``host_id``. ``None``
         starts the runner directly in ``workspace``. See
         designs/SESSION_GIT_WORKTREE.md.
-    :param terminal_launch_args: Optional pass-through CLI args for a
-        native terminal wrapper (claude / codex), e.g.
+    :param terminal_launch_args: Optional native harness launch CLI args
+        (claude / codex), e.g.
         ``["--permission-mode", "bypassPermissions"]`` (the web UI's
         permission-mode selector). Set at create-time so the runner has
         them on the session row before it auto-launches the terminal.
@@ -1693,8 +1693,8 @@ class SessionCreateMetadata(BaseModel):
         uploaded agent's ``os_env.cwd`` boundary at session create
         (per designs/SESSION_WORKSPACE_SELECTION.md). Optional
         otherwise.
-    :param terminal_launch_args: Optional pass-through CLI args for a
-        native terminal wrapper (claude / codex), e.g.
+    :param terminal_launch_args: Optional native harness launch CLI args
+        (claude / codex), e.g.
         ``["--dangerously-skip-permissions"]``. Set at create-time so
         the runner has them before it boots. Bounds (count / length)
         are validated server-side. ``None`` for non-native sessions.
@@ -2092,8 +2092,8 @@ class SessionResponse(BaseModel):
         conversation wraps, e.g. a Claude Code session uuid for
         ``omnigent claude`` sessions. ``None`` for regular
         AP-only conversations. Populated by the wrapper bridge.
-    :param terminal_launch_args: Pass-through CLI args the native
-        terminal wrapper (claude / codex) was launched with, e.g.
+    :param terminal_launch_args: Native harness launch CLI args used for
+        the session (claude / codex), e.g.
         ``["--dangerously-skip-permissions"]``. ``None`` for
         non-native sessions or a native session launched with none.
         Lets the launcher reproduce the command on resume.
@@ -2550,8 +2550,8 @@ class SessionForkRequest(BaseModel):
         (``"default"``, ``"off"``, ``"reset"``) resets it. Validated
         against the shared effort vocabulary; provider support is enforced
         at launch. Set by the web fork dialog's effort picker.
-    :param terminal_launch_args: Per-session native-terminal pass-through
-        args to apply to the fork, e.g. ``["--permission-mode", "auto"]``
+    :param terminal_launch_args: Per-session native harness launch args to
+        apply to the fork, e.g. ``["--permission-mode", "auto"]``
         (the fork dialog's permission-/approval-mode selector).
         **Omitting** the field keeps today's behavior — the source's args
         are carried on a same-agent fork and dropped on an agent switch. A
