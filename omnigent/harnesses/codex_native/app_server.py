@@ -1811,6 +1811,8 @@ class CodexNativeAppServer:
         it to the host janitor; standalone callers keep the safe default.
     :param config_profile: Codex user config-file profile materialized into
         the private user layer before app-server and terminal startup.
+    :param strict_config: Whether app-server startup validates configuration
+        with Codex's ``--strict-config`` flag.
     """
 
     codex_path: str
@@ -4423,7 +4425,7 @@ def build_codex_remote_args(
     (``"ws://IP:PORT"``, the host-spawned runner path — see
     :class:`CodexNativeAppServer` ``listen_url``).
 
-    The ``config_overrides`` are the same ``-c key=value`` provider/model
+    The ``config_overrides`` are the same process-wide ``-c key=value``
     overrides the app-server is launched with. The ``--remote`` TUI is a
     *separate* process that loads its own config from ``CODEX_HOME`` and
     does NOT inherit the app-server's ``-c`` flags; without them it falls
@@ -4451,8 +4453,9 @@ def build_codex_remote_args(
     :param config_overrides: Codex ``-c`` config override values to apply
         to the TUI, e.g.
         ``('model="databricks-gpt-5-5"', 'model_provider="omnigent_databricks"')``.
-        Each is emitted as a ``-c <value>`` global flag. Empty for a
-        plain Codex-login launch that needs no provider routing.
+        Each is emitted as a ``-c <value>`` global flag. The values can
+        include provider routing and task-specific settings such as
+        ``notify``.
     :param codex_cli_version: Probed app-server CLI version. Before 0.154,
         preserve permission flags because a remote TUI can reapply its own
         defaults on attach. ``None`` uses the 0.154+ compatible arguments.

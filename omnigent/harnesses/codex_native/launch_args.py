@@ -1,4 +1,4 @@
-"""Canonical Codex launch options and private config-file profile materialization."""
+"""Canonical Codex launch options and process configuration materialization."""
 
 from __future__ import annotations
 

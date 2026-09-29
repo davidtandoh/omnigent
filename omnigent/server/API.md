@@ -552,8 +552,8 @@ Request parts:
   metadata (JSON string, required)
     Session metadata. Shape matches `SessionCreateMetadata`:
     `{title?: string | null, labels?: object, reasoning_effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null, workspace?: string | null, terminal_launch_args?: string[] | null}`.
-    `terminal_launch_args` carries pass-through CLI args for a native
-    terminal wrapper, e.g. `["--permission-mode", "bypassPermissions"]`
+    `terminal_launch_args` carries native harness launch CLI args, e.g.
+    `["--permission-mode", "bypassPermissions"]`
     (same field as the JSON create path below). Unknown fields fail with 400.
 
   bundle (file, required)
@@ -638,11 +638,13 @@ already uploaded or registered an agent. The response is the full
     git ref-format rules. See `designs/SESSION_GIT_WORKTREE.md`.
 
   terminal_launch_args (array of strings or null)
-    Optional pass-through CLI args for a native terminal wrapper
-    (claude / codex), e.g. `["--permission-mode", "bypassPermissions"]`
+    Optional native harness launch CLI args (claude / codex), e.g.
+    `["--permission-mode", "bypassPermissions"]`
     (the web UI's permission-mode selector). Set at create time so the
     runner has them on the session row before it auto-launches the
-    terminal. The flat-list shape is the security
+    harness. For Codex, process-wide config flags initialize the app-server
+    and are reused by the attached terminal UI; terminal-only and thread
+    options remain on the terminal path. The flat-list shape is the security
     boundary — no key for a caller to smuggle launch wiring (bridge
     dir, Omnigent URL, auth), which stay runner-owned. Bounds (count /
     length) are validated server-side; a malformed list returns 400.

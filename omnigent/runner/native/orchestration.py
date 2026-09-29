@@ -551,7 +551,7 @@ class _CodexNativeLaunchConfig:
         e.g. ``Path("/Users/me/repo")``.
     :param policy_server_url: Omnigent server URL for the Codex policy hook and
         forwarder, e.g. ``"http://127.0.0.1:8123"``.
-    :param terminal_launch_args: User pass-through Codex CLI args, e.g.
+    :param terminal_launch_args: User-supplied Codex harness launch CLI args, e.g.
         ``["--config", "approval_policy=on-request"]``.
     :param model_override: Persisted model override, e.g.
         ``"gpt-5.4-mini"``.

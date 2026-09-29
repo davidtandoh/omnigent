@@ -9688,14 +9688,12 @@ def _derive_terminal_launch_args_from_spec(
             return _validate_terminal_launch_args(["--permission-mode", str(permission_mode)])
         return None
     if harness == _CODEX_NATIVE_HARNESS:
-        # Headless default: full bypass. The terminal_launch_args set the
-        # codex --remote TUI's launch flags, which is what creates the
-        # app-server thread and fixes its approval/sandbox stance for the
-        # session; the omnigent executor's later turn/start inherits that
-        # stance (codex_native_executor.run_turn carries no per-turn
-        # approval/sandbox). Without the flag the thread is created at
-        # codex's on-request + own-sandbox default and a headless worker
-        # stalls. An explicit ``yolo: false`` is the opt-out. See #171.
+        # Headless default: full bypass. The runner materializes these launch
+        # args into app-server config before startup, then repeats compatible
+        # permission settings on older remote TUIs. Later executor turns carry
+        # no per-turn approval/sandbox settings. Without this stance a headless
+        # worker can stop on an approval prompt. An explicit ``yolo: false`` is
+        # the opt-out. See #171.
         if _spec_config_flag_explicitly_disabled(spec, "yolo"):
             return None
         if not headless_defaults and not _spec_config_flag_explicitly_enabled(spec, "yolo"):
