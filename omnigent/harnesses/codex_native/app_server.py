@@ -43,6 +43,7 @@ from omnigent.harnesses.codex_native.launch_args import (
     materialize_codex_config_profile,
     parse_codex_launch_args,
     validate_codex_config_profile_state,
+    without_codex_config_profile,
 )
 from omnigent.harnesses.codex_native.process_registry import (
     CodexNativeProcessOwnerLock,
@@ -4492,7 +4493,11 @@ def build_codex_remote_args(
         passthrough = [_CODEX_BYPASS_SANDBOX_FLAG, *_strip_approval_sandbox_flags(codex_args)]
     else:
         passthrough = normalize_codex_permission_launch_args(codex_args)
-    passthrough = list(parse_codex_launch_args(passthrough).terminal_args)
+    parsed_passthrough = parse_codex_launch_args(passthrough)
+    if all(override in config_overrides for override in parsed_passthrough.config_overrides):
+        passthrough = list(parsed_passthrough.terminal_args)
+    else:
+        passthrough = without_codex_config_profile(passthrough)
     if bypass_hook_trust:
         passthrough = [_CODEX_BYPASS_HOOK_TRUST_FLAG, *passthrough]
     if thread_id is None:

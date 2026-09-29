@@ -180,10 +180,16 @@ def test_remote_tui_reuses_materialized_config_without_duplicate_flags() -> None
         codex_args=args,
         thread_id=None,
         remote_url="ws://127.0.0.1:9876",
-        config_overrides=(notify, "features.hooks=false"),
+        config_overrides=(
+            'approvals_reviewer="auto_review"',
+            notify,
+            "features.hooks=false",
+        ),
     )
 
     assert result == [
+        "-c",
+        'approvals_reviewer="auto_review"',
         "-c",
         notify,
         "-c",

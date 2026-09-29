@@ -5424,7 +5424,7 @@
                 "type": "null"
               }
             ],
-            "description": "Per-session native-terminal pass-through args to apply to the fork, e.g. `[\"--permission-mode\", \"auto\"]` (the fork dialog's permission-/approval-mode selector). **Omitting** the field keeps today's behavior \u2014 the source's args are carried on a same-agent fork and dropped on an agent switch. A list (including `[]`, which clears them) replaces them wholesale. Bounds (count / length) are validated server-side.",
+            "description": "Per-session native harness launch args to apply to the fork, e.g. `[\"--permission-mode\", \"auto\"]` (the fork dialog's permission-/approval-mode selector). **Omitting** the field keeps today's behavior \u2014 the source's args are carried on a same-agent fork and dropped on an agent switch. A list (including `[]`, which clears them) replaces them wholesale. Bounds (count / length) are validated server-side.",
             "title": "Terminal Launch Args"
           },
           "title": {
@@ -6987,7 +6987,7 @@
                 "type": "null"
               }
             ],
-            "description": "Pass-through CLI args the native terminal wrapper (claude / codex) was launched with, e.g. `[\"--dangerously-skip-permissions\"]`. `None` for non-native sessions or a native session launched with none. Lets the launcher reproduce the command on resume.",
+            "description": "Native harness launch CLI args used for the session (claude / codex), e.g. `[\"--dangerously-skip-permissions\"]`. `None` for non-native sessions or a native session launched with none. Lets the launcher reproduce the command on resume.",
             "title": "Terminal Launch Args"
           },
           "terminal_pending": {
