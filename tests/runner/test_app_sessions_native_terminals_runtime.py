@@ -26,6 +26,7 @@ from omnigent.harnesses.claude_native.bridge import (
     prepare_bridge_dir,
 )
 from omnigent.harnesses.codex_native import bridge as codex_native_bridge
+from omnigent.harnesses.codex_native.launch_args import parse_codex_launch_args
 from omnigent.harnesses.cursor_native import bridge as cursor_native_bridge
 from omnigent.harnesses.kiro_native import bridge as kiro_native_bridge
 from omnigent.runner import create_runner_app
@@ -555,6 +556,10 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
         assert session_reap_calls == [bridge_dir]
         build_calls.append(kwargs)
         app_server.codex_home = kwargs["codex_home"]
+        app_server.env.update(kwargs["launch_env"])
+        app_server.config_overrides.extend(
+            parse_codex_launch_args(kwargs["terminal_launch_args"]).config_overrides
+        )
         return app_server
 
     class _UnexpectedDiscoveryClient:
@@ -748,19 +753,25 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     assert build_calls[0]["trust_project"] is True
     assert build_calls[0]["reconcile_process_registry"] is False
     assert build_calls[0]["developer_instructions"] == "Be a concise, careful coding assistant."
+    assert build_calls[0]["launch_env"] == {
+        "COMPACT_ADVISER_DISABLE": "1",
+        "CLEAR_OVERRIDE": "",
+    }
     assert len(launched_specs) == 1
     launched = launched_specs[0]
     assert launched.command == "codex-wrapper"
     assert launched.env["COMPACT_ADVISER_DISABLE"] == "1"
     assert launched.env["CLEAR_OVERRIDE"] == ""
-    # Older TUIs still need permission flags; Codex 0.154+ rejects them.
+    # The app-server owns config flags and the TUI reuses its normalized
+    # overrides. Older TUIs still need permission config; Codex 0.154+ rejects it.
+    materialized_permission_args = ["-c", "approval_policy=on-request"] if permission_args else []
     assert launched.args == [
         "codex",
         "--",
+        *materialized_permission_args,
         "-c",
         "check_for_update_on_startup=false",
         "--dangerously-bypass-hook-trust",
-        *permission_args,
         "resume",
         "--remote",
         app_server.listen_url,

@@ -14,6 +14,7 @@ from omnigent.harnesses.codex_native.launch_args import (
     canonical_codex_launch_args,
     codex_config_profile,
     materialize_codex_config_profile,
+    parse_codex_launch_args,
     redact_codex_launch_args,
 )
 
@@ -112,6 +113,87 @@ def test_options_do_not_parse_values_or_prompt() -> None:
     args = ("-c", 'developer_instructions="--yolo -sread-only"', "--", "-pstrict", "--yolo")
     assert canonical_codex_launch_args(args) == list(args)
     assert codex_config_profile(args) is None
+
+
+def test_process_config_flags_are_separated_from_terminal_options() -> None:
+    """Server config is materialized; thread and display flags stay on the TUI."""
+    args = (
+        "-c",
+        'notify=["bash","-c","touch marker"]',
+        "--disable=hooks",
+        "--enable",
+        "multi_agent",
+        "--search",
+        "--strict-config",
+        "--model",
+        "gpt-5.6-sol",
+        "--sandbox",
+        "workspace-write",
+        "--ask-for-approval",
+        "never",
+        "--add-dir=output",
+        "--cd",
+        "/workspace",
+        "--image",
+        "prompt.png",
+        "--oss",
+        "--local-provider",
+        "ollama",
+        "--no-alt-screen",
+    )
+
+    parsed = parse_codex_launch_args(args)
+
+    assert parsed.config_overrides == (
+        'notify=["bash","-c","touch marker"]',
+        "features.hooks=false",
+        "features.multi_agent=true",
+        'web_search="live"',
+    )
+    assert parsed.strict_config is True
+    assert parsed.terminal_args == (
+        "--strict-config",
+        "--model",
+        "gpt-5.6-sol",
+        "--sandbox",
+        "workspace-write",
+        "--ask-for-approval",
+        "never",
+        "--add-dir",
+        "output",
+        "--cd",
+        "/workspace",
+        "--image",
+        "prompt.png",
+        "--oss",
+        "--local-provider",
+        "ollama",
+        "--no-alt-screen",
+    )
+
+
+def test_remote_tui_reuses_materialized_config_without_duplicate_flags() -> None:
+    notify = 'notify=["bash","-c","touch marker"]'
+    args = ("-c", notify, "--disable", "hooks", "--strict-config", "--model", "gpt")
+
+    result = app_server.build_codex_remote_args(
+        codex_args=args,
+        thread_id=None,
+        remote_url="ws://127.0.0.1:9876",
+        config_overrides=(notify, "features.hooks=false"),
+    )
+
+    assert result == [
+        "-c",
+        notify,
+        "-c",
+        "features.hooks=false",
+        "--strict-config",
+        "--model",
+        "gpt",
+        "--remote",
+        "ws://127.0.0.1:9876",
+    ]
 
 
 @pytest.mark.parametrize("profile", ["../other", "/tmp/other", "", "two/parts"])

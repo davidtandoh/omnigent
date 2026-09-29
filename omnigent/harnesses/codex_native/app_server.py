@@ -41,8 +41,8 @@ from omnigent.harnesses.codex_native.launch_args import (
     canonical_codex_launch_args,
     codex_config_profile,
     materialize_codex_config_profile,
+    parse_codex_launch_args,
     validate_codex_config_profile_state,
-    without_codex_config_profile,
 )
 from omnigent.harnesses.codex_native.process_registry import (
     CodexNativeProcessOwnerLock,
@@ -1732,9 +1732,12 @@ def _build_native_codex_app_server_argv(
     tagged_argv0: str,
     listen_url: str,
     config_overrides: Sequence[str],
+    strict_config: bool = False,
 ) -> list[str]:
     """Build argv for the native Codex app-server subprocess."""
     argv = [tagged_argv0, "app-server", "--listen", listen_url]
+    if strict_config:
+        argv.append("--strict-config")
     for override in config_overrides:
         argv.extend(["-c", override])
     return argv
@@ -1838,6 +1841,7 @@ class CodexNativeAppServer:
     router_hooks_registered: bool = False
     reconcile_process_registry: bool = True
     config_profile: str | None = None
+    strict_config: bool = False
     session_id: str | None = None
     stderr_capture_error_type: str | None = field(default=None, init=False)
     _stderr_diagnostics: CodexStderrDiagnostics | None = field(default=None, init=False)
@@ -1885,7 +1889,7 @@ class CodexNativeAppServer:
                 router_bridge_dir = None
         self.router_hooks_registered = router_bridge_dir is not None and policy_hooks_supported
         routed_spawns = router_bridge_dir is not None
-        config_source = _codex_home_config_source_from_env()
+        config_source = _codex_home_config_source_from_env({**os.environ, **self.env})
         model_migration_target: str | None = None
         if self.trust_project and self.pinned_model:
             catalog: object = self.model_catalog_rows
@@ -1994,6 +1998,7 @@ class CodexNativeAppServer:
             tagged_argv0=tagged_argv0,
             listen_url=resolved_listen,
             config_overrides=self.config_overrides,
+            strict_config=self.strict_config,
         )
         proc_env = codex_app_server_diagnostic_env(
             {**self.env, "CODEX_HOME": str(self.codex_home)}
@@ -3050,6 +3055,7 @@ def build_codex_native_server(
     model_catalog_rows: list[_JsonObject] | None = None,
     reconcile_process_registry: bool = True,
     terminal_launch_args: Sequence[str] = (),
+    launch_env: Mapping[str, str] | None = None,
 ) -> CodexNativeAppServer:
     """
     Build a configured native Codex app-server process wrapper.
@@ -3105,8 +3111,11 @@ def build_codex_native_server(
         crash registry sweep. Runner-owned launches disable this because the
         host janitor owns it; standalone callers keep the
         synchronous safety default.
-    :param terminal_launch_args: Original CLI options used to select the Codex
-        config-file profile (distinct from the Databricks routing profile).
+    :param terminal_launch_args: Original CLI options. Process-wide config
+        flags are materialized into the app-server launch; terminal and
+        thread options remain on the remote TUI path.
+    :param launch_env: Explicit task launch environment to apply before the
+        app-server starts. ``None`` keeps the filtered ambient environment.
     :returns: Configured app-server process wrapper.
     :raises ImportError: If no Codex CLI is available.
     :raises OSError: If Databricks routing was requested but no
@@ -3119,7 +3128,10 @@ def build_codex_native_server(
             "installed on a PATH the host daemon didn't inherit (e.g. an "
             "nvm-managed bin dir), set OMNIGENT_CODEX_PATH=/path/to/codex."
         )
+    parsed_launch_args = parse_codex_launch_args(terminal_launch_args)
     env = _clean_codex_env()
+    if launch_env:
+        env.update(launch_env)
     config_overrides: list[str] = []
     pinned_model = model
     if profile is not None:
@@ -3137,6 +3149,7 @@ def build_codex_native_server(
         pinned_model = codex_spawn_model(databricks.model) or databricks.model
     if extra_config_overrides:
         config_overrides.extend(extra_config_overrides)
+    config_overrides.extend(parsed_launch_args.config_overrides)
     if bypass_sandbox:
         # Mirror the --remote TUI's --dangerously-bypass-approvals-and-sandbox
         # on the app-server threads: never prompt for approval, and run
@@ -3163,7 +3176,8 @@ def build_codex_native_server(
         codex_home=codex_home,
         env=env,
         config_overrides=config_overrides,
-        config_profile=codex_config_profile(terminal_launch_args),
+        config_profile=parsed_launch_args.config_profile,
+        strict_config=parsed_launch_args.strict_config,
         cwd=cwd,
         bridge_dir=bridge_dir,
         session_id=session_id,
@@ -4470,7 +4484,7 @@ def build_codex_remote_args(
         passthrough = [_CODEX_BYPASS_SANDBOX_FLAG, *_strip_approval_sandbox_flags(codex_args)]
     else:
         passthrough = normalize_codex_permission_launch_args(codex_args)
-    passthrough = without_codex_config_profile(passthrough)
+    passthrough = list(parse_codex_launch_args(passthrough).terminal_args)
     if bypass_hook_trust:
         passthrough = [_CODEX_BYPASS_HOOK_TRUST_FLAG, *passthrough]
     if thread_id is None:

@@ -1190,6 +1190,51 @@ def test_build_codex_native_server_without_bypass_emits_no_bypass_config(
     assert "sandbox_mode" not in overrides
 
 
+def test_build_codex_native_server_materializes_task_launch_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task config and environment reach the app-server before startup."""
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.app_server._find_codex_cli",
+        lambda: sys.executable,
+    )
+    notify = 'notify=["bash","-c","touch /tmp/task-turn-ended"]'
+
+    app_server = build_codex_native_server(
+        socket_path=tmp_path / "codex.sock",
+        codex_home=tmp_path / "codex-home",
+        cwd=tmp_path,
+        model=None,
+        profile=None,
+        bridge_dir=tmp_path / "bridge",
+        terminal_launch_args=("-c", notify, "--disable", "hooks", "--strict-config"),
+        launch_env={"FM_TASK_ID": "worker-8", "CLEAR_OVERRIDE": ""},
+    )
+
+    assert app_server.config_overrides == [notify, "features.hooks=false"]
+    assert app_server.strict_config is True
+    assert app_server.env["FM_TASK_ID"] == "worker-8"
+    assert app_server.env["CLEAR_OVERRIDE"] == ""
+    argv = _build_native_codex_app_server_argv(
+        tagged_argv0="codex task",
+        listen_url="ws://127.0.0.1:9876",
+        config_overrides=app_server.config_overrides,
+        strict_config=app_server.strict_config,
+    )
+    assert argv == [
+        "codex task",
+        "app-server",
+        "--listen",
+        "ws://127.0.0.1:9876",
+        "--strict-config",
+        "-c",
+        notify,
+        "-c",
+        "features.hooks=false",
+    ]
+
+
 def test_build_codex_native_server_bypass_emits_full_access_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

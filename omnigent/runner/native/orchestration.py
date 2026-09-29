@@ -5144,6 +5144,9 @@ async def _auto_create_codex_terminal(
         bypass_sandbox=launch_config.bypass_sandbox,
         developer_instructions=_codex_developer_instructions,
         terminal_launch_args=launch_config.terminal_launch_args or (),
+        # Codex executes tools in the app-server process. Apply the exact
+        # per-launch environment while constructing that process contract.
+        launch_env=native_launch_environment(),
         reasoning_effort=launch_config.reasoning_effort,
         model_catalog_rows=_fresh_codex_catalog,
         # Codex can show project-trust and legacy-model migration prompts before
@@ -5184,10 +5187,6 @@ async def _auto_create_codex_terminal(
     # Routing session (pinned or auto) gets the extended catalog. A plain
     # session keeps codex's bundled catalog and never pays the probe.
     app_server.env.update(codex_extended_catalog_env(launch_config.routing_enabled))
-    # Codex executes shell tools in the app-server process, not the remote TUI
-    # process. Apply the explicit launch map to both processes so the agent's
-    # tool shell observes the same per-launch contract as its terminal.
-    app_server.env.update(native_launch_environment())
     # First-message model routing. Advertised in the same bridge dir the
     # ``UserPromptSubmit`` hook is pointed at (so the hook needs no env of
     # its own), and live before the app-server starts because the hook can
