@@ -3128,7 +3128,12 @@ def build_codex_native_server(
             "installed on a PATH the host daemon didn't inherit (e.g. an "
             "nvm-managed bin dir), set OMNIGENT_CODEX_PATH=/path/to/codex."
         )
-    parsed_launch_args = parse_codex_launch_args(terminal_launch_args)
+    effective_launch_args = (
+        terminal_launch_args
+        if bypass_sandbox
+        else normalize_codex_permission_launch_args(terminal_launch_args)
+    )
+    parsed_launch_args = parse_codex_launch_args(effective_launch_args)
     env = _clean_codex_env()
     if launch_env:
         env.update(launch_env)

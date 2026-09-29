@@ -1212,7 +1212,11 @@ def test_build_codex_native_server_materializes_task_launch_config(
         launch_env={"FM_TASK_ID": "worker-8", "CLEAR_OVERRIDE": ""},
     )
 
-    assert app_server.config_overrides == [notify, "features.hooks=false"]
+    assert app_server.config_overrides == [
+        notify,
+        "features.hooks=false",
+        'approvals_reviewer="auto_review"',
+    ]
     assert app_server.strict_config is True
     assert app_server.env["FM_TASK_ID"] == "worker-8"
     assert app_server.env["CLEAR_OVERRIDE"] == ""
@@ -1232,7 +1236,43 @@ def test_build_codex_native_server_materializes_task_launch_config(
         notify,
         "-c",
         "features.hooks=false",
+        "-c",
+        'approvals_reviewer="auto_review"',
     ]
+
+
+@pytest.mark.parametrize(
+    ("terminal_launch_args", "expected_override"),
+    [
+        ((), 'approvals_reviewer="auto_review"'),
+        (
+            ("-c", 'default_permissions=":danger-full-access"'),
+            'approval_policy="never"',
+        ),
+    ],
+)
+def test_build_codex_native_server_materializes_effective_permission_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_launch_args: tuple[str, ...],
+    expected_override: str,
+) -> None:
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.app_server._find_codex_cli",
+        lambda: sys.executable,
+    )
+
+    app_server = build_codex_native_server(
+        socket_path=tmp_path / "codex.sock",
+        codex_home=tmp_path / "codex-home",
+        cwd=tmp_path,
+        model=None,
+        profile=None,
+        bridge_dir=tmp_path / "bridge",
+        terminal_launch_args=terminal_launch_args,
+    )
+
+    assert expected_override in app_server.config_overrides
 
 
 def test_build_codex_native_server_bypass_emits_full_access_config(
