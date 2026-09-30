@@ -10,8 +10,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from opentelemetry import trace as otel_trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 import omnigent.inner.codex_native_executor as codex_native_executor
+from omnigent.harnesses.codex_native import forwarder as codex_forwarder
 from omnigent.harnesses.codex_native.app_server import CodexAppServerResponseError
 from omnigent.harnesses.codex_native.bridge import (
     CodexNativeBridgeState,
@@ -21,10 +26,15 @@ from omnigent.harnesses.codex_native.bridge import (
     write_bridge_startup_error,
     write_bridge_startup_timeout,
     write_bridge_state,
+    write_codex_turn_result,
 )
 from omnigent.inner.codex_native_executor import CodexNativeExecutor
 from omnigent.inner.executor import ExecutorConfig, ExecutorError, TurnComplete
 from omnigent.inner.native_attachments import attachment_cache_dir
+from omnigent.inner.tracing import disable_tracing, enable_tracing, is_tracing_enabled
+from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
+from omnigent.runtime.harnesses._scaffold import TurnContext
+from omnigent.server.schemas import CreateResponseRequest
 
 # A 1x1 transparent PNG, base64-encoded — a real decodable image small
 # enough to embed, used to prove image blocks are materialized to disk
@@ -76,6 +86,7 @@ class _FakeCodexNativeClient:
         self.client_name = client_name
         self.connected = False
         self.closed = False
+        self.turn_id: str | None = None
         type(self).created.append((socket_path, ws_url, client_name))
 
     async def connect(self) -> None:
@@ -93,6 +104,18 @@ class _FakeCodexNativeClient:
         :returns: None.
         """
         self.closed = True
+        turn_id = self.turn_id
+        if turn_id is None:
+            turn_id = next(
+                (
+                    params.get("expectedTurnId")
+                    for method, params in reversed(type(self).requests)
+                    if method == "turn/steer" and isinstance(params.get("expectedTurnId"), str)
+                ),
+                None,
+            )
+        if turn_id is not None and self.socket_path is not None:
+            write_codex_turn_result(self.socket_path.parent, turn_id, "final response")
 
     async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """
@@ -106,21 +129,20 @@ class _FakeCodexNativeClient:
         if method == "turn/start":
             turn_id = f"turn_{type(self).next_turn}"
             type(self).next_turn += 1
+            self.turn_id = turn_id
             return {"result": {"turn": {"id": turn_id}}}
         if method == "turn/steer":
+            self.turn_id = "turn_steered"
             return {"result": {"turnId": "turn_steered"}}
         return {"result": {}}
 
     async def iter_events(self) -> Any:
         """
-        Fail if the executor waits on Codex terminal notifications.
+        Fail if the executor subscribes on its injection connection.
 
-        The native executor is only an injection bridge. The
-        separate forwarder owns Codex status and transcript events.
-
-        :returns: Async iterator that raises on first consumption.
+        The native forwarder owns Codex's event subscription.
         """
-        raise AssertionError("native executor must not wait for Codex turn events")
+        raise AssertionError("native executor must not consume Codex events directly")
         yield {}
 
 
@@ -151,17 +173,12 @@ def _collect_turn_events(executor: CodexNativeExecutor, text: str) -> list[Any]:
     return asyncio.run(run())
 
 
-def test_web_started_codex_turn_returns_without_waiting_for_terminal_event(
+def test_web_started_codex_turn_returns_final_assistant_response(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """
-    A web-started Codex turn returns after app-server accepts it.
-
-    The terminal forwarder mirrors Codex completion/status events.
-    Waiting for those events inside the harness turn can leave the
-    runner permanently active after the first web message, so later
-    web messages never reach the local Codex TUI as new dispatches.
+    A web-started Codex turn returns the forwarder's final-answer result.
     """
     _FakeCodexNativeClient.requests = []
     _FakeCodexNativeClient.created = []
@@ -189,6 +206,7 @@ def test_web_started_codex_turn_returns_without_waiting_for_terminal_event(
     state = read_bridge_state(tmp_path)
 
     assert [type(event) for event in events] == [TurnComplete]
+    assert events[0].response == "final response"
     assert state is not None
     assert state.active_turn_id == "turn_1"
     assert _FakeCodexNativeClient.requests == [
@@ -201,6 +219,94 @@ def test_web_started_codex_turn_returns_without_waiting_for_terminal_event(
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_native_final_answer_reaches_agent_span_not_commentary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The Codex final-answer item becomes the agent span output value."""
+
+    class _PhasedCodexClient(_FakeCodexNativeClient):
+        async def close(self) -> None:
+            assert self.turn_id is not None
+            assert self.socket_path is not None
+            for phase, text in (
+                ("commentary", "COMMENTARY_MUST_NOT_REACH_SPAN"),
+                ("final_answer", "CODEX_FINAL_SPAN_SENTINEL"),
+            ):
+                codex_forwarder._record_final_turn_response(
+                    self.socket_path.parent,
+                    {"turnId": self.turn_id},
+                    {
+                        "id": phase,
+                        "type": "agentMessage",
+                        "phase": phase,
+                        "text": text,
+                    },
+                )
+            self.closed = True
+
+    _PhasedCodexClient.requests = []
+    _PhasedCodexClient.created = []
+    _PhasedCodexClient.next_turn = 1
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.app_server.CodexAppServerClient",
+        _PhasedCodexClient,
+    )
+    monkeypatch.setattr("omnigent.runtime.telemetry._capture_content", True)
+    write_bridge_state(
+        tmp_path,
+        CodexNativeBridgeState(
+            session_id="conv_trace",
+            socket_path=str(tmp_path / "app-server.sock"),
+            thread_id="thread_trace",
+            codex_home=str(tmp_path / "codex-home"),
+            active_turn_id=None,
+            cwd=str(tmp_path),
+        ),
+    )
+
+    previous_provider = otel_trace._TRACER_PROVIDER  # type: ignore[attr-defined]
+    previous_done = otel_trace._TRACER_PROVIDER_SET_ONCE._done  # type: ignore[attr-defined]
+    tracing_was_enabled = is_tracing_enabled()
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    otel_trace._TRACER_PROVIDER = provider  # type: ignore[attr-defined]
+    otel_trace._TRACER_PROVIDER_SET_ONCE._done = True  # type: ignore[attr-defined]
+    enable_tracing()
+    try:
+        adapter = ExecutorAdapter(
+            executor_factory=lambda: CodexNativeExecutor(bridge_dir=tmp_path),
+            session_key="conv_trace",
+            harness_label="Codex",
+        )
+        ctx = TurnContext(
+            response_id="resp_0123456789abcdef0123456789abcdef",
+            event_queue=asyncio.Queue(),
+            cancelled=asyncio.Event(),
+            session_id="conv_trace",
+        )
+        await adapter.run_turn(
+            CreateResponseRequest(model="codex", input="Return the sentinel"),
+            ctx,
+        )
+
+        agent_spans = [
+            span for span in exporter.get_finished_spans() if span.name.startswith("agent:")
+        ]
+        assert len(agent_spans) == 1
+        attributes = dict(agent_spans[0].attributes or {})
+        assert attributes["output.value"] == "CODEX_FINAL_SPAN_SENTINEL"
+        assert "COMMENTARY_MUST_NOT_REACH_SPAN" not in attributes.values()
+    finally:
+        provider.shutdown()
+        otel_trace._TRACER_PROVIDER = previous_provider  # type: ignore[attr-defined]
+        otel_trace._TRACER_PROVIDER_SET_ONCE._done = previous_done  # type: ignore[attr-defined]
+        if not tracing_was_enabled:
+            disable_tracing()
 
 
 def test_goal_command_sets_goal_before_starting_objective_turn(

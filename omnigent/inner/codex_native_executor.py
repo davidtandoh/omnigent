@@ -8,6 +8,7 @@ import binascii
 import json
 import logging
 import os
+import time
 from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import cast
@@ -30,6 +31,7 @@ from omnigent.harnesses.codex_native.bridge import (
     read_bridge_startup_error,
     read_bridge_startup_timeout,
     read_bridge_state,
+    read_codex_turn_result,
     read_mcp_startup,
     update_active_turn_id,
     write_codex_config_effort,
@@ -73,6 +75,7 @@ _LEGACY_BRIDGE_STATE_WAIT_SECONDS = 60.0
 _BRIDGE_STATE_FAST_POLL_SECONDS = 0.05
 _BRIDGE_STATE_FAST_POLL_WINDOW_SECONDS = 2.0
 _BRIDGE_STATE_SLOW_POLL_SECONDS = 0.25
+_TURN_COMPLETED_DRAIN_SECONDS = 1.0
 
 
 async def _wait_for_bridge_state(
@@ -166,7 +169,7 @@ async def _start_codex_turn(
     state: CodexNativeBridgeState,
     input_items: list[dict[str, object]],
     settings_overrides: Mapping[str, object],
-) -> None:
+) -> str | None:
     """Apply optional settings and start one Codex turn on an idle thread."""
     if settings_overrides:
         await client.request(
@@ -215,6 +218,8 @@ async def _start_codex_turn(
     if isinstance(turn_id, str) and turn_id:
         update_active_turn_id(bridge_dir, turn_id)
         _logger.info("Codex native started turn: turn_id=%s", turn_id)
+        return turn_id
+    return None
 
 
 async def _steer_codex_turn(
@@ -223,7 +228,7 @@ async def _steer_codex_turn(
     bridge_dir: Path,
     state: CodexNativeBridgeState,
     input_items: list[dict[str, object]],
-) -> None:
+) -> str | None:
     """Steer one bridge-recorded active Codex turn."""
     assert state.active_turn_id is not None
     response = await client.request(
@@ -239,6 +244,8 @@ async def _steer_codex_turn(
     if isinstance(turn_id, str) and turn_id:
         update_active_turn_id(bridge_dir, turn_id)
         _logger.info("Codex native steered active turn: turn_id=%s", turn_id)
+        return turn_id
+    return None
 
 
 async def _inject_codex_turn(
@@ -248,27 +255,25 @@ async def _inject_codex_turn(
     state: CodexNativeBridgeState,
     input_items: list[dict[str, object]],
     settings_overrides: Mapping[str, object],
-) -> None:
+) -> str | None:
     """Steer an active turn or start one, recovering one proven stale steer."""
     if state.active_turn_id is None:
-        await _start_codex_turn(
+        return await _start_codex_turn(
             client,
             bridge_dir=bridge_dir,
             state=state,
             input_items=input_items,
             settings_overrides=settings_overrides,
         )
-        return
 
     expected_turn_id = state.active_turn_id
     try:
-        await _steer_codex_turn(
+        return await _steer_codex_turn(
             client,
             bridge_dir=bridge_dir,
             state=state,
             input_items=input_items,
         )
-        return
     except CodexAppServerResponseError as error:
         if not _is_stale_active_turn(error):
             raise
@@ -285,21 +290,39 @@ async def _inject_codex_turn(
             "Codex native stale steer raced with a newer turn; steering turn_id=%s",
             recovered_state.active_turn_id,
         )
-        await _steer_codex_turn(
+        return await _steer_codex_turn(
             client,
             bridge_dir=bridge_dir,
             state=recovered_state,
             input_items=input_items,
         )
-        return
     _logger.info("Codex native reconciled completed stale turn: turn_id=%s", expected_turn_id)
-    await _start_codex_turn(
+    return await _start_codex_turn(
         client,
         bridge_dir=bridge_dir,
         state=recovered_state,
         input_items=input_items,
         settings_overrides=settings_overrides,
     )
+
+
+async def _await_final_response(bridge_dir: Path, turn_id: str) -> str | None:
+    """Wait for the forwarder's correlated native turn result."""
+    terminal_deadline: float | None = None
+    while True:
+        result = read_codex_turn_result(bridge_dir)
+        if result is not None and result.turn_id == turn_id:
+            if result.response is not None:
+                return result.response
+            if terminal_deadline is None:
+                terminal_deadline = time.monotonic() + _TURN_COMPLETED_DRAIN_SECONDS
+        state = read_bridge_state(bridge_dir)
+        if state is None or state.active_turn_id != turn_id:
+            if terminal_deadline is None:
+                terminal_deadline = time.monotonic() + _TURN_COMPLETED_DRAIN_SECONDS
+        if terminal_deadline is not None and time.monotonic() >= terminal_deadline:
+            return None
+        await asyncio.sleep(_BRIDGE_STATE_FAST_POLL_SECONDS)
 
 
 class CodexNativeExecutor(Executor):
@@ -510,6 +533,7 @@ class CodexNativeExecutor(Executor):
                 )
 
         error_msg: str | None = None
+        final_response: str | None = None
         while True:
             if state is None:
                 (
@@ -533,6 +557,7 @@ class CodexNativeExecutor(Executor):
             # turn/start-vs-turn/steer decision, the RPC, and the
             # active_turn_id write must be atomic with respect to mid-turn
             # steering. The terminal event is yielded after the lock releases.
+            active_turn_id: str | None = None
             async with self._inject_lock:
                 state = read_bridge_state(self._bridge_dir)
                 if state is None:
@@ -591,7 +616,7 @@ class CodexNativeExecutor(Executor):
                                         "objective": goal_objective,
                                     },
                                 )
-                            await _inject_codex_turn(
+                            active_turn_id = await _inject_codex_turn(
                                 client,
                                 bridge_dir=self._bridge_dir,
                                 state=state,
@@ -622,11 +647,13 @@ class CodexNativeExecutor(Executor):
                             error_msg = f"{error_msg} ({waiting})"
                     finally:
                         await client.close()
+            if error_msg is None and active_turn_id is not None:
+                final_response = await _await_final_response(self._bridge_dir, active_turn_id)
             break
         if error_msg is not None:
             yield ExecutorError(message=error_msg)
         else:
-            yield TurnComplete(response=None)
+            yield TurnComplete(response=final_response)
 
 
 def _model_effort_overrides(config: ExecutorConfig | None) -> dict[str, object]:

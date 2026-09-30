@@ -58,6 +58,8 @@ _STARTUP_TIMEOUT_MAX_BYTES = 256
 # events), read by the executor's first-turn gate and the runner's
 # Stop handler.
 _MCP_STARTUP_FILE = "mcp_startup.json"
+_TURN_RESULT_FILE = "turn_result.json"
+_TURN_RESULT_MAX_BYTES = 1024 * 1024
 
 # Startup states mirrored from Codex's ``McpServerStartupState`` enum.
 MCP_STARTUP_STARTING = "starting"
@@ -152,6 +154,14 @@ class CodexNativeBridgeState:
     codex_home: str
     active_turn_id: str | None = None
     cwd: str | None = None
+
+
+@dataclass(frozen=True)
+class CodexNativeTurnResult:
+    """Final assistant response observed by the native event forwarder."""
+
+    turn_id: str
+    response: str | None
 
 
 def bridge_dir_for_bridge_id(bridge_id: str) -> Path:
@@ -960,11 +970,93 @@ def clear_bridge_state(bridge_dir: Path) -> None:
             _STARTUP_ERROR_FILE,
             _STARTUP_TIMEOUT_FILE,
             _MCP_STARTUP_FILE,
+            _TURN_RESULT_FILE,
         ):
             try:
                 (bridge_dir / name).unlink()
             except FileNotFoundError:
                 continue
+
+
+def _read_codex_turn_result_unlocked(bridge_dir: Path) -> CodexNativeTurnResult | None:
+    """Read and validate the bounded native turn-result file."""
+    path = bridge_dir / _TURN_RESULT_FILE
+    try:
+        mode = path.lstat().st_mode
+        if not stat.S_ISREG(mode):
+            return None
+        with path.open("rb") as handle:
+            payload = handle.read(_TURN_RESULT_MAX_BYTES + 1)
+    except OSError:
+        return None
+    if len(payload) > _TURN_RESULT_MAX_BYTES:
+        return None
+    try:
+        raw = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, ValueError, RecursionError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    turn_id = raw.get("turn_id")
+    response = raw.get("response")
+    if not isinstance(turn_id, str) or not turn_id:
+        return None
+    if response is not None and not isinstance(response, str):
+        return None
+    return CodexNativeTurnResult(turn_id=turn_id, response=response)
+
+
+def read_codex_turn_result(bridge_dir: Path) -> CodexNativeTurnResult | None:
+    """Return the latest bounded final response recorded by the forwarder."""
+    return _read_codex_turn_result_unlocked(bridge_dir)
+
+
+def write_codex_turn_result(
+    bridge_dir: Path,
+    turn_id: str,
+    response: str | None,
+    *,
+    preserve_final: bool = False,
+) -> bool:
+    """Publish one correlated native turn result atomically.
+
+    Final text can arrive shortly after ``turn/completed``. A final response
+    therefore replaces a terminal ``None`` result, while the terminal writer
+    preserves final text that arrived first.
+    """
+    if not turn_id:
+        return False
+    with _bridge_state_lock(bridge_dir):
+        state = read_bridge_state(bridge_dir)
+        existing = _read_codex_turn_result_unlocked(bridge_dir)
+        if state is not None and state.active_turn_id is not None:
+            if state.active_turn_id != turn_id:
+                return False
+        elif response is not None and (existing is None or existing.turn_id != turn_id):
+            return False
+        if (
+            preserve_final
+            and existing is not None
+            and existing.turn_id == turn_id
+            and existing.response is not None
+        ):
+            return True
+        bridge_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path = bridge_dir / _TURN_RESULT_FILE
+        fd, tmp_name = tempfile.mkstemp(prefix=f"{_TURN_RESULT_FILE}.", dir=str(bridge_dir))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {"response": response, "turn_id": turn_id},
+                    handle,
+                    sort_keys=True,
+                )
+                handle.write("\n")
+            os.replace(tmp_name, path)
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
+    return True
 
 
 def write_bridge_startup_error(bridge_dir: Path, message: str) -> None:

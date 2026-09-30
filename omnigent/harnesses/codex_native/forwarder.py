@@ -47,6 +47,7 @@ from omnigent.harnesses.codex_native.bridge import (
     update_mcp_server_startup,
     update_thread_id,
     write_bridge_state,
+    write_codex_turn_result,
 )
 from omnigent.harnesses.codex_native.elicitation import (
     codex_elicitation_id,
@@ -3851,6 +3852,14 @@ async def _handle_terminal_turn_boundary_inner(
         params,
         forwarder_state=forwarder_state,
     )
+    terminal_turn_id = _terminal_turn_id_from_params(params)
+    if terminal.handled and terminal_turn_id is not None:
+        write_codex_turn_result(
+            bridge_dir,
+            terminal_turn_id,
+            None,
+            preserve_final=True,
+        )
     if delta_coalescer is not None:
         await delta_coalescer.flush()
     # Safety net: if a compaction was reported in progress but Codex never
@@ -5000,6 +5009,23 @@ def _claim_completed_item(
     return item_key
 
 
+def _record_final_turn_response(
+    bridge_dir: Path | None,
+    params: _JsonObject,
+    item: _JsonObject,
+) -> bool:
+    """Publish only an explicitly final Codex assistant item to the bridge."""
+    if bridge_dir is None or item.get("type") != "agentMessage":
+        return False
+    if item.get("phase") != "final_answer":
+        return False
+    turn_id = _turn_id_from_payload(params)
+    text = item.get("text")
+    if turn_id is None or not isinstance(text, str):
+        return False
+    return write_codex_turn_result(bridge_dir, turn_id, text)
+
+
 async def _handle_completed_item(
     client: httpx.AsyncClient,
     session_id: str,
@@ -5044,6 +5070,7 @@ async def _handle_completed_item_inner(
         return
     item_type = item.get("type")
     turn_id = _turn_id_from_payload(params)
+    _record_final_turn_response(bridge_dir, params, item)
     if item_type in {"agentMessage", "plan"} and forwarder_state is not None and turn_id:
         item_id = item.get("id")
         forwarder_state.discard_partial_text_item(
