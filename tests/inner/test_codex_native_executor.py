@@ -9,6 +9,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from opentelemetry import trace as otel_trace
 from opentelemetry.sdk.trace import TracerProvider
@@ -232,20 +233,39 @@ async def test_native_final_answer_reaches_agent_span_not_commentary(
         async def close(self) -> None:
             assert self.turn_id is not None
             assert self.socket_path is not None
-            for phase, text in (
-                ("commentary", "COMMENTARY_MUST_NOT_REACH_SPAN"),
-                ("final_answer", "CODEX_FINAL_SPAN_SENTINEL"),
-            ):
-                codex_forwarder._record_final_turn_response(
-                    self.socket_path.parent,
-                    {"turnId": self.turn_id},
-                    {
-                        "id": phase,
-                        "type": "agentMessage",
-                        "phase": phase,
-                        "text": text,
-                    },
+            transport = httpx.MockTransport(lambda _request: httpx.Response(200))
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://omnigent.test",
+            ) as forwarder_client:
+                usage_coalescer = codex_forwarder._SessionUsageCoalescer(
+                    forwarder_client,
+                    "conv_trace",
                 )
+                elicitation_tracker = codex_forwarder._CodexElicitationTaskTracker()
+                for phase, text in (
+                    ("commentary", "COMMENTARY_MUST_NOT_REACH_SPAN"),
+                    ("final_answer", "CODEX_FINAL_SPAN_SENTINEL"),
+                ):
+                    await codex_forwarder._handle_event(
+                        forwarder_client,
+                        session_id="conv_trace",
+                        bridge_dir=self.socket_path.parent,
+                        event={
+                            "method": "item/completed",
+                            "params": {
+                                "turnId": self.turn_id,
+                                "item": {
+                                    "id": phase,
+                                    "type": "agentMessage",
+                                    "phase": phase,
+                                    "text": text,
+                                },
+                            },
+                        },
+                        usage_coalescer=usage_coalescer,
+                        elicitation_tracker=elicitation_tracker,
+                    )
             self.closed = True
 
     _PhasedCodexClient.requests = []
