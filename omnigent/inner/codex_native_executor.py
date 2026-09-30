@@ -322,7 +322,7 @@ async def _await_final_response(bridge_dir: Path, turn_id: str) -> str | None:
                 if (result.terminal or final_response is not None) and terminal_deadline is None:
                     terminal_deadline = time.monotonic() + _TURN_COMPLETED_DRAIN_SECONDS
             state = read_bridge_state(bridge_dir)
-            if state is None or state.active_turn_id != turn_id:
+            if result is None and (state is None or state.active_turn_id != turn_id):
                 if terminal_deadline is None:
                     terminal_deadline = time.monotonic() + _TURN_COMPLETED_DRAIN_SECONDS
             if terminal_deadline is not None and time.monotonic() >= terminal_deadline:

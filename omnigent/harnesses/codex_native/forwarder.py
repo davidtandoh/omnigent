@@ -3864,62 +3864,67 @@ async def _handle_terminal_turn_boundary_inner(
         forwarder_state=forwarder_state,
     )
     terminal_turn_id = _terminal_turn_id_from_params(params)
-    if (
-        terminal.handled
-        and terminal_turn_id is not None
-        and turn_result_bridge_dir is not None
-    ):
-        complete_codex_turn_result(
-            turn_result_bridge_dir,
-            terminal_turn_id,
-        )
-    if delta_coalescer is not None:
-        await delta_coalescer.flush()
-    # Safety net: if a compaction was reported in progress but Codex never
-    # emitted a completion signal we recognize (e.g. a protocol-spelling
-    # drift), force the spinner closed at the turn boundary so it can't hang.
-    if forwarder_state is not None and forwarder_state.compaction_status_posted == "in_progress":
-        await _post_compaction_status(
-            client, session_id, "completed", forwarder_state=forwarder_state
-        )
-    await _maybe_persist_interrupted_partial_text(
-        client,
-        session_id=session_id,
-        method=method,
-        params=params,
-        forwarder_state=forwarder_state,
-    )
-    await _flush_turn_diff(
-        client,
-        session_id=session_id,
-        params=params,
-        forwarder_state=forwarder_state,
-    )
-    handled = terminal.handled
-    if terminal.edge is not None:
-        await _post_turn_status_edge(client, session_id, terminal.edge)
-    if handled:
-        await elicitation_tracker.resolve_by_terminal_turn_event(
+    try:
+        if delta_coalescer is not None:
+            await delta_coalescer.flush()
+        # Safety net: if a compaction was reported in progress but Codex never
+        # emitted a completion signal we recognize (e.g. a protocol-spelling
+        # drift), force the spinner closed at the turn boundary so it can't hang.
+        if (
+            forwarder_state is not None
+            and forwarder_state.compaction_status_posted == "in_progress"
+        ):
+            await _post_compaction_status(
+                client, session_id, "completed", forwarder_state=forwarder_state
+            )
+        await _maybe_persist_interrupted_partial_text(
             client,
             session_id=session_id,
-            params=params,
-        )
-    if (
-        handled
-        and method == "turn/completed"
-        and codex_client is not None
-        and forwarder_state is not None
-    ):
-        await _maybe_handle_plan_implementation_prompt(
-            client,
-            codex_client,
-            session_id=session_id,
-            bridge_dir=bridge_dir,
+            method=method,
             params=params,
             forwarder_state=forwarder_state,
         )
-    if handled:
-        await usage_coalescer.flush()
+        await _flush_turn_diff(
+            client,
+            session_id=session_id,
+            params=params,
+            forwarder_state=forwarder_state,
+        )
+        handled = terminal.handled
+        if terminal.edge is not None:
+            await _post_turn_status_edge(client, session_id, terminal.edge)
+        if handled:
+            await elicitation_tracker.resolve_by_terminal_turn_event(
+                client,
+                session_id=session_id,
+                params=params,
+            )
+        if (
+            handled
+            and method == "turn/completed"
+            and codex_client is not None
+            and forwarder_state is not None
+        ):
+            await _maybe_handle_plan_implementation_prompt(
+                client,
+                codex_client,
+                session_id=session_id,
+                bridge_dir=bridge_dir,
+                params=params,
+                forwarder_state=forwarder_state,
+            )
+        if handled:
+            await usage_coalescer.flush()
+    finally:
+        if (
+            terminal.handled
+            and terminal_turn_id is not None
+            and turn_result_bridge_dir is not None
+        ):
+            complete_codex_turn_result(
+                turn_result_bridge_dir,
+                terminal_turn_id,
+            )
 
 
 def _handle_usage_update(

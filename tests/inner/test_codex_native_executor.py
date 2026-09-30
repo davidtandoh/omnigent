@@ -293,6 +293,100 @@ async def test_final_first_result_cleanup_tracks_terminal_and_fallback(
 
 
 @pytest.mark.asyncio
+async def test_slow_terminal_handling_preserves_trailing_final_response(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A delayed terminal post cannot expire the following final-answer item."""
+    monkeypatch.setattr(codex_native_executor, "_TURN_COMPLETED_DRAIN_SECONDS", 0.01)
+    monkeypatch.setattr(codex_native_executor, "_BRIDGE_STATE_FAST_POLL_SECONDS", 0.005)
+    write_bridge_state(
+        tmp_path,
+        CodexNativeBridgeState(
+            session_id="conv_slow_terminal",
+            socket_path=str(tmp_path / "app-server.sock"),
+            thread_id="thread_slow_terminal",
+            codex_home=str(tmp_path / "codex-home"),
+            active_turn_id="turn_slow_terminal",
+            cwd=str(tmp_path),
+        ),
+    )
+    assert begin_codex_turn_result(tmp_path, "turn_slow_terminal")
+
+    terminal_post_started = asyncio.Event()
+    release_terminal_post = asyncio.Event()
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        terminal_post_started.set()
+        await release_terminal_post.wait()
+        return httpx.Response(200)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://omnigent.test",
+    ) as forwarder_client:
+        usage_coalescer = codex_forwarder._SessionUsageCoalescer(
+            forwarder_client,
+            "conv_slow_terminal",
+        )
+        elicitation_tracker = codex_forwarder._CodexElicitationTaskTracker()
+        response_waiter = asyncio.create_task(
+            codex_native_executor._await_final_response(tmp_path, "turn_slow_terminal")
+        )
+        terminal_handler = asyncio.create_task(
+            codex_forwarder._handle_event(
+                forwarder_client,
+                session_id="conv_slow_terminal",
+                bridge_dir=tmp_path,
+                event={
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "thread_slow_terminal",
+                        "turnId": "turn_slow_terminal",
+                        "turn": {
+                            "id": "turn_slow_terminal",
+                            "status": "completed",
+                            "items": [],
+                        },
+                    },
+                },
+                usage_coalescer=usage_coalescer,
+                elicitation_tracker=elicitation_tracker,
+                expected_thread_id="thread_slow_terminal",
+            )
+        )
+        await asyncio.wait_for(terminal_post_started.wait(), timeout=1)
+        await asyncio.sleep(0.03)
+        assert not response_waiter.done()
+
+        release_terminal_post.set()
+        await terminal_handler
+        await codex_forwarder._handle_event(
+            forwarder_client,
+            session_id="conv_slow_terminal",
+            bridge_dir=tmp_path,
+            event={
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread_slow_terminal",
+                    "turnId": "turn_slow_terminal",
+                    "item": {
+                        "id": "final_answer",
+                        "type": "agentMessage",
+                        "phase": "final_answer",
+                        "text": "TRAILING_FINAL",
+                    },
+                },
+            },
+            usage_coalescer=usage_coalescer,
+            elicitation_tracker=elicitation_tracker,
+            expected_thread_id="thread_slow_terminal",
+        )
+
+    assert await response_waiter == "TRAILING_FINAL"
+
+
+@pytest.mark.asyncio
 async def test_native_final_answer_reaches_agent_span_not_commentary(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
