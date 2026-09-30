@@ -21,9 +21,12 @@ from omnigent.harnesses.codex_native import forwarder as codex_forwarder
 from omnigent.harnesses.codex_native.app_server import CodexAppServerResponseError
 from omnigent.harnesses.codex_native.bridge import (
     CodexNativeBridgeState,
+    begin_codex_turn_result,
+    complete_codex_turn_result,
     read_bridge_state,
     read_codex_config_effort,
     read_codex_config_model,
+    read_codex_turn_result,
     update_active_turn_id,
     write_bridge_startup_error,
     write_bridge_startup_timeout,
@@ -118,6 +121,7 @@ class _FakeCodexNativeClient:
             )
         if turn_id is not None and self.socket_path is not None:
             write_codex_turn_result(self.socket_path.parent, turn_id, "final response")
+            complete_codex_turn_result(self.socket_path.parent, turn_id)
 
     async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """
@@ -237,13 +241,55 @@ def test_trailing_final_response_survives_new_active_turn(tmp_path: Path) -> Non
         ),
     )
 
-    assert write_codex_turn_result(tmp_path, "turn_a", None, preserve_final=True)
+    assert begin_codex_turn_result(tmp_path, "turn_a")
+    assert complete_codex_turn_result(tmp_path, "turn_a")
     update_active_turn_id(tmp_path, "turn_b")
     assert write_codex_turn_result(tmp_path, "turn_a", "TURN_A_FINAL")
 
     response = asyncio.run(codex_native_executor._await_final_response(tmp_path, "turn_a"))
 
     assert response == "TURN_A_FINAL"
+
+
+@pytest.mark.asyncio
+async def test_final_first_result_cleanup_tracks_terminal_and_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Final-first results are removed after a terminal edge or bounded fallback."""
+    monkeypatch.setattr(codex_native_executor, "_TURN_COMPLETED_DRAIN_SECONDS", 0.01)
+    write_bridge_state(
+        tmp_path,
+        CodexNativeBridgeState(
+            session_id="conv_lifecycle",
+            socket_path=str(tmp_path / "app-server.sock"),
+            thread_id="thread_lifecycle",
+            codex_home=str(tmp_path / "codex-home"),
+            active_turn_id="turn_terminal",
+            cwd=str(tmp_path),
+        ),
+    )
+
+    assert begin_codex_turn_result(tmp_path, "turn_terminal")
+    assert write_codex_turn_result(tmp_path, "turn_terminal", "TERMINAL_FINAL")
+    terminal_waiter = asyncio.create_task(
+        codex_native_executor._await_final_response(tmp_path, "turn_terminal")
+    )
+    await asyncio.sleep(0)
+    assert not terminal_waiter.done()
+    assert complete_codex_turn_result(tmp_path, "turn_terminal")
+    assert await terminal_waiter == "TERMINAL_FINAL"
+    assert read_codex_turn_result(tmp_path, "turn_terminal") is None
+
+    update_active_turn_id(tmp_path, "turn_fallback")
+    assert begin_codex_turn_result(tmp_path, "turn_fallback")
+    assert write_codex_turn_result(tmp_path, "turn_fallback", "FALLBACK_FINAL")
+    assert (
+        await codex_native_executor._await_final_response(tmp_path, "turn_fallback")
+        == "FALLBACK_FINAL"
+    )
+    assert not complete_codex_turn_result(tmp_path, "turn_fallback")
+    assert read_codex_turn_result(tmp_path, "turn_fallback") is None
 
 
 @pytest.mark.asyncio
@@ -290,6 +336,7 @@ async def test_native_final_answer_reaches_agent_span_not_commentary(
                         usage_coalescer=usage_coalescer,
                         elicitation_tracker=elicitation_tracker,
                     )
+            complete_codex_turn_result(self.socket_path.parent, self.turn_id)
             self.closed = True
 
     _PhasedCodexClient.requests = []

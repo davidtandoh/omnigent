@@ -35,6 +35,7 @@ from omnigent.harnesses.codex_native.bridge import (
     CodexNativeBridgeState,
     DeveloperInstructionsReadState,
     clear_active_turn_id_if_matches,
+    complete_codex_turn_result,
     codex_home_for_bridge_dir,
     pending_mcp_servers,
     read_bridge_state,
@@ -3868,11 +3869,9 @@ async def _handle_terminal_turn_boundary_inner(
         and terminal_turn_id is not None
         and turn_result_bridge_dir is not None
     ):
-        write_codex_turn_result(
+        complete_codex_turn_result(
             turn_result_bridge_dir,
             terminal_turn_id,
-            None,
-            preserve_final=True,
         )
     if delta_coalescer is not None:
         await delta_coalescer.flush()

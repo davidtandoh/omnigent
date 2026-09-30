@@ -27,6 +27,7 @@ from omnigent.harnesses.codex_native.bridge import (
     CodexNativeBridgeState,
     cancel_pending_mcp_startup,
     clear_active_turn_id_if_matches,
+    begin_codex_turn_result,
     mcp_startup_waiting_detail,
     read_bridge_startup_error,
     read_bridge_startup_timeout,
@@ -34,7 +35,6 @@ from omnigent.harnesses.codex_native.bridge import (
     read_codex_turn_result,
     read_mcp_startup,
     remove_codex_turn_result,
-    update_active_turn_id,
     write_codex_config_effort,
     write_codex_config_model,
 )
@@ -217,7 +217,7 @@ async def _start_codex_turn(
     turn = _json_object(result.get("turn")) if result is not None else None
     turn_id = turn.get("id") if turn is not None else None
     if isinstance(turn_id, str) and turn_id:
-        update_active_turn_id(bridge_dir, turn_id)
+        begin_codex_turn_result(bridge_dir, turn_id)
         _logger.info("Codex native started turn: turn_id=%s", turn_id)
         return turn_id
     return None
@@ -243,7 +243,7 @@ async def _steer_codex_turn(
     result = _json_object(response.get("result"))
     turn_id = result.get("turnId") if result is not None else None
     if isinstance(turn_id, str) and turn_id:
-        update_active_turn_id(bridge_dir, turn_id)
+        begin_codex_turn_result(bridge_dir, turn_id)
         _logger.info("Codex native steered active turn: turn_id=%s", turn_id)
         return turn_id
     return None
@@ -310,20 +310,23 @@ async def _inject_codex_turn(
 async def _await_final_response(bridge_dir: Path, turn_id: str) -> str | None:
     """Wait for the forwarder's correlated native turn result."""
     terminal_deadline: float | None = None
+    final_response: str | None = None
     try:
         while True:
             result = read_codex_turn_result(bridge_dir, turn_id)
             if result is not None:
                 if result.response is not None:
-                    return result.response
-                if terminal_deadline is None:
+                    final_response = result.response
+                if result.terminal and final_response is not None:
+                    return final_response
+                if (result.terminal or final_response is not None) and terminal_deadline is None:
                     terminal_deadline = time.monotonic() + _TURN_COMPLETED_DRAIN_SECONDS
             state = read_bridge_state(bridge_dir)
             if state is None or state.active_turn_id != turn_id:
                 if terminal_deadline is None:
                     terminal_deadline = time.monotonic() + _TURN_COMPLETED_DRAIN_SECONDS
             if terminal_deadline is not None and time.monotonic() >= terminal_deadline:
-                return None
+                return final_response
             await asyncio.sleep(_BRIDGE_STATE_FAST_POLL_SECONDS)
     finally:
         remove_codex_turn_result(bridge_dir, turn_id)
