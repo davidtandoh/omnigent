@@ -2670,6 +2670,7 @@ async def _subscribe_until_ready_inner(
             ap_client,
             session_id=session_id,
             bridge_dir=bridge_dir,
+            turn_result_bridge_dir=bridge_dir,
             response=response,
             usage_coalescer=usage_coalescer,
             elicitation_tracker=elicitation_tracker,
@@ -2732,6 +2733,7 @@ async def _replay_resume_response(
     *,
     session_id: str,
     bridge_dir: Path,
+    turn_result_bridge_dir: Path | None = None,
     response: CodexMessage,
     usage_coalescer: _SessionUsageCoalescer,
     elicitation_tracker: _CodexElicitationTaskTracker,
@@ -2748,6 +2750,8 @@ async def _replay_resume_response(
     :param client: HTTP client for Omnigent event posts.
     :param session_id: Omnigent conversation id.
     :param bridge_dir: Native Codex bridge directory.
+    :param turn_result_bridge_dir: Parent bridge directory that owns native
+        turn results, or ``None`` for child replay.
     :param response: Codex ``thread/resume`` response envelope.
     :param usage_coalescer: Token-usage coalescer for replayed
         app-server events.
@@ -2802,6 +2806,7 @@ async def _replay_resume_response(
         client,
         session_id=session_id,
         bridge_dir=bridge_dir,
+        turn_result_bridge_dir=turn_result_bridge_dir,
         thread_id=thread_id,
         turns=turns,
     )
@@ -2826,6 +2831,7 @@ async def _post_resume_terminal_status(
     *,
     session_id: str,
     bridge_dir: Path,
+    turn_result_bridge_dir: Path | None,
     thread_id: str | None,
     turns: list[object],
 ) -> None:
@@ -2842,6 +2848,8 @@ async def _post_resume_terminal_status(
     :param client: HTTP client for Omnigent event posts.
     :param session_id: Omnigent conversation id, e.g. ``"conv_abc123"``.
     :param bridge_dir: Native Codex bridge directory.
+    :param turn_result_bridge_dir: Parent bridge directory that owns native
+        turn results, or ``None`` when no executor awaits this replay.
     :param thread_id: Codex thread id from the resume payload, e.g.
         ``"thread_123"``.
     :param turns: Raw Codex resume turn list.
@@ -2850,7 +2858,11 @@ async def _post_resume_terminal_status(
     if thread_id is None:
         return
     edge = _resume_terminal_status_edge_for_latest_turn(bridge_dir, thread_id, turns)
-    await _post_turn_status_edge(client, session_id, edge)
+    try:
+        await _post_turn_status_edge(client, session_id, edge)
+    finally:
+        if edge is not None and edge.turn_id is not None and turn_result_bridge_dir is not None:
+            complete_codex_turn_result(turn_result_bridge_dir, edge.turn_id)
 
 
 def _resume_terminal_status_edge_for_latest_turn(
@@ -3552,34 +3564,40 @@ async def _maybe_handle_turn_event(
                 _turn_id_from_payload(params),
             )
             return True
-        async with _conversation_item_delivery_scope(session_id):
-            if delta_coalescer is not None:
-                await delta_coalescer.flush()
-            error = _terminal_error_from_notification(params)
-            if error is None:
-                _logger.warning("Codex forwarder ignored malformed error notification")
-                return True
-            turn_id = _turn_id_from_payload(params)
-            if forwarder_state is not None and turn_id is not None:
-                if turn_id in forwarder_state.surfaced_terminal_error_turns:
-                    _logger.info(
-                        "Codex forwarder ignored duplicate terminal error: turn_id=%s",
-                        turn_id,
-                    )
+        terminal_turn_id: str | None = None
+        try:
+            async with _conversation_item_delivery_scope(session_id):
+                if delta_coalescer is not None:
+                    await delta_coalescer.flush()
+                error = _terminal_error_from_notification(params)
+                if error is None:
+                    _logger.warning("Codex forwarder ignored malformed error notification")
                     return True
-                forwarder_state.surfaced_terminal_error_turns.add(turn_id)
-                clear_active_turn_id_if_matches(bridge_dir, turn_id)
-            await _post_turn_status_edge(
-                client,
-                session_id,
-                _CodexTurnStatusEdge(
-                    status="failed",
-                    turn_id=turn_id,
-                    source="error",
-                    error=error,
-                ),
-            )
-            await usage_coalescer.flush()
+                turn_id = _turn_id_from_payload(params)
+                if forwarder_state is not None and turn_id is not None:
+                    if turn_id in forwarder_state.surfaced_terminal_error_turns:
+                        _logger.info(
+                            "Codex forwarder ignored duplicate terminal error: turn_id=%s",
+                            turn_id,
+                        )
+                        return True
+                    forwarder_state.surfaced_terminal_error_turns.add(turn_id)
+                    clear_active_turn_id_if_matches(bridge_dir, turn_id)
+                terminal_turn_id = turn_id
+                await _post_turn_status_edge(
+                    client,
+                    session_id,
+                    _CodexTurnStatusEdge(
+                        status="failed",
+                        turn_id=turn_id,
+                        source="error",
+                        error=error,
+                    )
+                )
+                await usage_coalescer.flush()
+        finally:
+            if terminal_turn_id is not None and turn_result_bridge_dir is not None:
+                complete_codex_turn_result(turn_result_bridge_dir, terminal_turn_id)
         return True
     if method == "turn/started":
         async with _conversation_item_delivery_scope(session_id):

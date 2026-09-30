@@ -387,6 +387,118 @@ async def test_slow_terminal_handling_preserves_trailing_final_response(
 
 
 @pytest.mark.asyncio
+async def test_standalone_error_completes_pending_turn_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A standalone terminal error releases the waiting executor."""
+    monkeypatch.setattr(codex_native_executor, "_TURN_COMPLETED_DRAIN_SECONDS", 0.01)
+    monkeypatch.setattr(codex_native_executor, "_BRIDGE_STATE_FAST_POLL_SECONDS", 0.005)
+    write_bridge_state(
+        tmp_path,
+        CodexNativeBridgeState(
+            session_id="conv_error",
+            socket_path=str(tmp_path / "app-server.sock"),
+            thread_id="thread_error",
+            codex_home=str(tmp_path / "codex-home"),
+            active_turn_id="turn_error",
+            cwd=str(tmp_path),
+        ),
+    )
+    assert begin_codex_turn_result(tmp_path, "turn_error")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200)),
+        base_url="http://omnigent.test",
+    ) as forwarder_client:
+        response_waiter = asyncio.create_task(
+            codex_native_executor._await_final_response(tmp_path, "turn_error")
+        )
+        await codex_forwarder._handle_event(
+            forwarder_client,
+            session_id="conv_error",
+            bridge_dir=tmp_path,
+            event={
+                "method": "error",
+                "params": {
+                    "threadId": "thread_error",
+                    "turnId": "turn_error",
+                    "willRetry": False,
+                    "error": {"message": "model stream failed"},
+                },
+            },
+            usage_coalescer=codex_forwarder._SessionUsageCoalescer(
+                forwarder_client, "conv_error"
+            ),
+            elicitation_tracker=codex_forwarder._CodexElicitationTaskTracker(),
+            expected_thread_id="thread_error",
+            forwarder_state=codex_forwarder._CodexForwarderState(),
+        )
+
+    assert await response_waiter is None
+    assert read_codex_turn_result(tmp_path, "turn_error") is None
+
+
+@pytest.mark.asyncio
+async def test_failed_resume_completes_pending_turn_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed turn recovered from resume releases the waiting executor."""
+    monkeypatch.setattr(codex_native_executor, "_TURN_COMPLETED_DRAIN_SECONDS", 0.01)
+    monkeypatch.setattr(codex_native_executor, "_BRIDGE_STATE_FAST_POLL_SECONDS", 0.005)
+    write_bridge_state(
+        tmp_path,
+        CodexNativeBridgeState(
+            session_id="conv_resume_error",
+            socket_path=str(tmp_path / "app-server.sock"),
+            thread_id="thread_resume_error",
+            codex_home=str(tmp_path / "codex-home"),
+            active_turn_id="turn_resume_error",
+            cwd=str(tmp_path),
+        ),
+    )
+    assert begin_codex_turn_result(tmp_path, "turn_resume_error")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200)),
+        base_url="http://omnigent.test",
+    ) as forwarder_client:
+        response_waiter = asyncio.create_task(
+            codex_native_executor._await_final_response(tmp_path, "turn_resume_error")
+        )
+        await codex_forwarder._replay_resume_response(
+            forwarder_client,
+            session_id="conv_resume_error",
+            bridge_dir=tmp_path,
+            turn_result_bridge_dir=tmp_path,
+            response={
+                "result": {
+                    "thread": {
+                        "id": "thread_resume_error",
+                        "turns": [
+                            {
+                                "id": "turn_resume_error",
+                                "status": "failed",
+                                "error": {"message": "resume recovered failure"},
+                                "items": [],
+                            }
+                        ],
+                    }
+                }
+            },
+            usage_coalescer=codex_forwarder._SessionUsageCoalescer(
+                forwarder_client, "conv_resume_error"
+            ),
+            elicitation_tracker=codex_forwarder._CodexElicitationTaskTracker(),
+            forwarder_state=codex_forwarder._CodexForwarderState(),
+        )
+
+    assert await response_waiter is None
+    assert read_codex_turn_result(tmp_path, "turn_resume_error") is None
+
+
+@pytest.mark.asyncio
 async def test_native_final_answer_reaches_agent_span_not_commentary(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
