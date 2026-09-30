@@ -3091,6 +3091,7 @@ async def _handle_event(
         client,
         session_id=route_session_id,
         bridge_dir=bridge_dir if not is_child else Path(),
+        turn_result_bridge_dir=bridge_dir if not is_child else None,
         method=method,
         params=params,
         usage_coalescer=(child_coalescer if child_coalescer is not None else usage_coalescer),
@@ -3517,6 +3518,7 @@ async def _maybe_handle_turn_event(
     *,
     session_id: str,
     bridge_dir: Path,
+    turn_result_bridge_dir: Path | None = None,
     method: str,
     params: _JsonObject,
     usage_coalescer: _SessionUsageCoalescer,
@@ -3531,6 +3533,8 @@ async def _maybe_handle_turn_event(
     :param client: HTTP client for Omnigent event posts.
     :param session_id: Omnigent conversation id, e.g. ``"conv_abc123"``.
     :param bridge_dir: Native Codex bridge directory.
+    :param turn_result_bridge_dir: Parent bridge directory that owns native
+        turn results, or ``None`` for child threads.
     :param method: Codex method value, e.g. ``"turn/started"``.
     :param params: Codex notification params.
     :param usage_coalescer: Token-usage coalescer.
@@ -3612,6 +3616,7 @@ async def _maybe_handle_turn_event(
             client,
             session_id=session_id,
             bridge_dir=bridge_dir,
+            turn_result_bridge_dir=turn_result_bridge_dir,
             method=method,
             params=params,
             usage_coalescer=usage_coalescer,
@@ -3789,6 +3794,7 @@ async def _handle_terminal_turn_boundary(
     *,
     session_id: str,
     bridge_dir: Path,
+    turn_result_bridge_dir: Path | None = None,
     method: str,
     params: _JsonObject,
     usage_coalescer: _SessionUsageCoalescer,
@@ -3803,6 +3809,7 @@ async def _handle_terminal_turn_boundary(
             client,
             session_id=session_id,
             bridge_dir=bridge_dir,
+            turn_result_bridge_dir=turn_result_bridge_dir,
             method=method,
             params=params,
             usage_coalescer=usage_coalescer,
@@ -3818,6 +3825,7 @@ async def _handle_terminal_turn_boundary_inner(
     *,
     session_id: str,
     bridge_dir: Path,
+    turn_result_bridge_dir: Path | None,
     method: str,
     params: _JsonObject,
     usage_coalescer: _SessionUsageCoalescer,
@@ -3832,6 +3840,8 @@ async def _handle_terminal_turn_boundary_inner(
     :param client: HTTP client for Omnigent event posts.
     :param session_id: Omnigent conversation id, e.g. ``"conv_abc123"``.
     :param bridge_dir: Native Codex bridge directory.
+    :param turn_result_bridge_dir: Parent bridge directory that owns native
+        turn results, or ``None`` for child threads.
     :param method: Codex method, e.g. ``"turn/completed"``.
     :param params: Codex notification params.
     :param usage_coalescer: Coalescer holding latest token usage.
@@ -3853,9 +3863,13 @@ async def _handle_terminal_turn_boundary_inner(
         forwarder_state=forwarder_state,
     )
     terminal_turn_id = _terminal_turn_id_from_params(params)
-    if terminal.handled and terminal_turn_id is not None:
+    if (
+        terminal.handled
+        and terminal_turn_id is not None
+        and turn_result_bridge_dir is not None
+    ):
         write_codex_turn_result(
-            bridge_dir,
+            turn_result_bridge_dir,
             terminal_turn_id,
             None,
             preserve_final=True,

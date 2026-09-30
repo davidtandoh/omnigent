@@ -10876,6 +10876,51 @@ def test_forwarder_routes_live_child_items_to_child_session(
     )
 
 
+def test_forwarder_child_terminal_event_does_not_write_parent_turn_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A child terminal event does not publish through the parent result channel."""
+    posted: list[tuple[str, dict[str, Any]]] = []
+    state = codex_native_forwarder._CodexForwarderState(parent_session_id="conv_parent")
+    state.note_child_thread("thread_child", "conv_child")
+    monkeypatch.chdir(tmp_path)
+
+    async def run() -> None:
+        async with httpx.AsyncClient(
+            base_url="http://127.0.0.1:8000",
+            transport=httpx.MockTransport(_make_omnigent_handler(posted)),
+        ) as client:
+            await codex_native_forwarder._handle_event(
+                client,
+                session_id="conv_parent",
+                bridge_dir=tmp_path / "parent-bridge",
+                event={
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "thread_child",
+                        "turnId": "turn_child",
+                        "turn": {
+                            "id": "turn_child",
+                            "status": "completed",
+                            "items": [],
+                        },
+                    },
+                },
+                usage_coalescer=codex_native_forwarder._SessionUsageCoalescer(
+                    client, "conv_parent"
+                ),
+                elicitation_tracker=_elicitation_tracker(),
+                expected_thread_id="thread_parent",
+                forwarder_state=state,
+            )
+
+    asyncio.run(run())
+
+    assert not (tmp_path / "turn_result.json").exists()
+    assert not (tmp_path / "parent-bridge" / "turn_result.json").exists()
+
+
 def test_forwarder_collab_item_started_registers_child_before_completed(
     tmp_path: Path,
 ) -> None:
