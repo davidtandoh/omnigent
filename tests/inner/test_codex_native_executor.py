@@ -387,6 +387,60 @@ async def test_slow_terminal_handling_preserves_trailing_final_response(
 
 
 @pytest.mark.asyncio
+async def test_terminal_before_start_response_does_not_reactivate_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An early terminal edge survives later handling of the start response."""
+    monkeypatch.setattr(codex_native_executor, "_TURN_COMPLETED_DRAIN_SECONDS", 0.01)
+    monkeypatch.setattr(codex_native_executor, "_BRIDGE_STATE_FAST_POLL_SECONDS", 0.005)
+    write_bridge_state(
+        tmp_path,
+        CodexNativeBridgeState(
+            session_id="conv_fast",
+            socket_path=str(tmp_path / "app-server.sock"),
+            thread_id="thread_fast",
+            codex_home=str(tmp_path / "codex-home"),
+            active_turn_id=None,
+            cwd=str(tmp_path),
+        ),
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200)),
+        base_url="http://omnigent.test",
+    ) as forwarder_client:
+        await codex_forwarder._handle_event(
+            forwarder_client,
+            session_id="conv_fast",
+            bridge_dir=tmp_path,
+            event={
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread_fast",
+                    "turnId": "turn_fast",
+                    "turn": {
+                        "id": "turn_fast",
+                        "status": "completed",
+                        "items": [],
+                    },
+                },
+            },
+            usage_coalescer=codex_forwarder._SessionUsageCoalescer(
+                forwarder_client, "conv_fast"
+            ),
+            elicitation_tracker=codex_forwarder._CodexElicitationTaskTracker(),
+            expected_thread_id="thread_fast",
+        )
+
+    assert begin_codex_turn_result(tmp_path, "turn_fast")
+    state = read_bridge_state(tmp_path)
+    assert state is not None
+    assert state.active_turn_id is None
+    assert await codex_native_executor._await_final_response(tmp_path, "turn_fast") is None
+
+
+@pytest.mark.asyncio
 async def test_standalone_error_completes_pending_turn_result(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -1089,6 +1089,9 @@ def begin_codex_turn_result(bridge_dir: Path, turn_id: str) -> bool:
     if not turn_id:
         return False
     with _bridge_state_lock(bridge_dir):
+        existing = _read_codex_turn_result_unlocked(bridge_dir, turn_id)
+        if existing is not None and existing.terminal:
+            return True
         state = read_bridge_state(bridge_dir)
         if state is None:
             return False
@@ -1103,7 +1106,7 @@ def begin_codex_turn_result(bridge_dir: Path, turn_id: str) -> bool:
                 cwd=state.cwd,
             ),
         )
-        if _read_codex_turn_result_unlocked(bridge_dir, turn_id) is None:
+        if existing is None:
             _write_codex_turn_result_unlocked(
                 bridge_dir,
                 CodexNativeTurnResult(turn_id=turn_id, response=None, terminal=False),
@@ -1139,14 +1142,25 @@ def write_codex_turn_result(
     return True
 
 
-def complete_codex_turn_result(bridge_dir: Path, turn_id: str) -> bool:
+def complete_codex_turn_result(
+    bridge_dir: Path,
+    turn_id: str,
+    *,
+    create_if_missing: bool = False,
+) -> bool:
     """Mark an initialized result terminal without recreating consumed state."""
     if not turn_id:
         return False
     with _bridge_state_lock(bridge_dir):
         existing = _read_codex_turn_result_unlocked(bridge_dir, turn_id)
         if existing is None:
-            return False
+            if not create_if_missing:
+                return False
+            existing = CodexNativeTurnResult(
+                turn_id=turn_id,
+                response=None,
+                terminal=False,
+            )
         _write_codex_turn_result_unlocked(
             bridge_dir,
             CodexNativeTurnResult(

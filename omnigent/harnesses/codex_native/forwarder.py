@@ -3946,6 +3946,9 @@ async def _handle_terminal_turn_boundary_inner(
             complete_codex_turn_result(
                 turn_result_bridge_dir,
                 terminal_turn_id,
+                create_if_missing=(
+                    terminal.edge is not None and ":recovered" in terminal.edge.source
+                ),
             )
 
 
