@@ -35,8 +35,8 @@ from omnigent.harnesses.codex_native.bridge import (
     CodexNativeBridgeState,
     DeveloperInstructionsReadState,
     clear_active_turn_id_if_matches,
-    complete_codex_turn_result,
     codex_home_for_bridge_dir,
+    complete_codex_turn_result,
     pending_mcp_servers,
     read_bridge_state,
     read_codex_config_developer_instructions_state,
@@ -2816,10 +2816,7 @@ async def _replay_resume_response(
                 if not isinstance(turn, dict):
                     continue
                 turn_id = _turn_id_from_payload(turn)
-                if (
-                    turn_id is not None
-                    and _omnigent_status_from_resume_turn(turn) is not None
-                ):
+                if turn_id is not None and _omnigent_status_from_resume_turn(turn) is not None:
                     complete_codex_turn_result(turn_result_bridge_dir, turn_id)
 
 
@@ -3596,7 +3593,7 @@ async def _maybe_handle_turn_event(
                         turn_id=turn_id,
                         source="error",
                         error=error,
-                    )
+                    ),
                 )
                 await usage_coalescer.flush()
         finally:

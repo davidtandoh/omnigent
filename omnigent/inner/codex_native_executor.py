@@ -514,7 +514,9 @@ class CodexNativeExecutor(Executor):
             ``/model`` pick) are applied via a ``thread/settings/update``
             request ahead of ``turn/start``; everything else is ignored
             by this bridge.
-        :returns: Async iterator yielding one terminal event.
+        :returns: Async iterator yielding one terminal event. On success,
+            ``TurnComplete.response`` contains the final assistant response
+            when the Codex event stream reports one.
         """
         del tools, system_prompt
         settings_overrides = _model_effort_overrides(config)

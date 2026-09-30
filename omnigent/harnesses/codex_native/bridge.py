@@ -1057,9 +1057,8 @@ def remove_codex_turn_result(bridge_dir: Path, turn_id: str) -> None:
     """Remove one consumed native turn result."""
     if not turn_id:
         return
-    with _bridge_state_lock(bridge_dir):
-        with contextlib.suppress(OSError):
-            _codex_turn_result_path(bridge_dir, turn_id).unlink()
+    with _bridge_state_lock(bridge_dir), contextlib.suppress(OSError):
+        _codex_turn_result_path(bridge_dir, turn_id).unlink()
 
 
 def prepare_codex_turn_result(bridge_dir: Path) -> None:
@@ -1081,9 +1080,8 @@ def prepare_codex_turn_result(bridge_dir: Path) -> None:
 
 def cancel_pending_codex_turn_result(bridge_dir: Path) -> None:
     """Remove an injection marker after an RPC fails to return a turn id."""
-    with _bridge_state_lock(bridge_dir):
-        with contextlib.suppress(OSError):
-            _pending_codex_turn_result_path(bridge_dir).unlink()
+    with _bridge_state_lock(bridge_dir), contextlib.suppress(OSError):
+        _pending_codex_turn_result_path(bridge_dir).unlink()
 
 
 def _consume_pending_codex_turn_result_unlocked(bridge_dir: Path) -> bool:

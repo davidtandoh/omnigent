@@ -427,9 +427,7 @@ async def test_terminal_before_start_response_does_not_reactivate_turn(
                     },
                 },
             },
-            usage_coalescer=codex_forwarder._SessionUsageCoalescer(
-                forwarder_client, "conv_fast"
-            ),
+            usage_coalescer=codex_forwarder._SessionUsageCoalescer(forwarder_client, "conv_fast"),
             elicitation_tracker=codex_forwarder._CodexElicitationTaskTracker(),
             expected_thread_id="thread_fast",
         )
@@ -449,9 +447,7 @@ async def test_terminal_before_start_response_does_not_reactivate_turn(
                     },
                 },
             },
-            usage_coalescer=codex_forwarder._SessionUsageCoalescer(
-                forwarder_client, "conv_fast"
-            ),
+            usage_coalescer=codex_forwarder._SessionUsageCoalescer(forwarder_client, "conv_fast"),
             elicitation_tracker=codex_forwarder._CodexElicitationTaskTracker(),
             expected_thread_id="thread_fast",
         )
@@ -504,9 +500,7 @@ async def test_standalone_error_completes_pending_turn_result(
                     "error": {"message": "model stream failed"},
                 },
             },
-            usage_coalescer=codex_forwarder._SessionUsageCoalescer(
-                forwarder_client, "conv_error"
-            ),
+            usage_coalescer=codex_forwarder._SessionUsageCoalescer(forwarder_client, "conv_error"),
             elicitation_tracker=codex_forwarder._CodexElicitationTaskTracker(),
             expected_thread_id="thread_error",
             forwarder_state=codex_forwarder._CodexForwarderState(),
