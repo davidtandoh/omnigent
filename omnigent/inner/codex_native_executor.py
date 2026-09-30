@@ -33,6 +33,7 @@ from omnigent.harnesses.codex_native.bridge import (
     read_bridge_state,
     read_codex_turn_result,
     read_mcp_startup,
+    remove_codex_turn_result,
     update_active_turn_id,
     write_codex_config_effort,
     write_codex_config_model,
@@ -309,20 +310,23 @@ async def _inject_codex_turn(
 async def _await_final_response(bridge_dir: Path, turn_id: str) -> str | None:
     """Wait for the forwarder's correlated native turn result."""
     terminal_deadline: float | None = None
-    while True:
-        result = read_codex_turn_result(bridge_dir)
-        if result is not None and result.turn_id == turn_id:
-            if result.response is not None:
-                return result.response
-            if terminal_deadline is None:
-                terminal_deadline = time.monotonic() + _TURN_COMPLETED_DRAIN_SECONDS
-        state = read_bridge_state(bridge_dir)
-        if state is None or state.active_turn_id != turn_id:
-            if terminal_deadline is None:
-                terminal_deadline = time.monotonic() + _TURN_COMPLETED_DRAIN_SECONDS
-        if terminal_deadline is not None and time.monotonic() >= terminal_deadline:
-            return None
-        await asyncio.sleep(_BRIDGE_STATE_FAST_POLL_SECONDS)
+    try:
+        while True:
+            result = read_codex_turn_result(bridge_dir, turn_id)
+            if result is not None:
+                if result.response is not None:
+                    return result.response
+                if terminal_deadline is None:
+                    terminal_deadline = time.monotonic() + _TURN_COMPLETED_DRAIN_SECONDS
+            state = read_bridge_state(bridge_dir)
+            if state is None or state.active_turn_id != turn_id:
+                if terminal_deadline is None:
+                    terminal_deadline = time.monotonic() + _TURN_COMPLETED_DRAIN_SECONDS
+            if terminal_deadline is not None and time.monotonic() >= terminal_deadline:
+                return None
+            await asyncio.sleep(_BRIDGE_STATE_FAST_POLL_SECONDS)
+    finally:
+        remove_codex_turn_result(bridge_dir, turn_id)
 
 
 class CodexNativeExecutor(Executor):

@@ -24,6 +24,7 @@ from omnigent.harnesses.codex_native.bridge import (
     read_bridge_state,
     read_codex_config_effort,
     read_codex_config_model,
+    update_active_turn_id,
     write_bridge_startup_error,
     write_bridge_startup_timeout,
     write_bridge_state,
@@ -220,6 +221,29 @@ def test_web_started_codex_turn_returns_final_assistant_response(
             },
         )
     ]
+
+
+def test_trailing_final_response_survives_new_active_turn(tmp_path: Path) -> None:
+    """Turn A retains its trailing final answer after turn B starts."""
+    write_bridge_state(
+        tmp_path,
+        CodexNativeBridgeState(
+            session_id="conv_race",
+            socket_path=str(tmp_path / "app-server.sock"),
+            thread_id="thread_race",
+            codex_home=str(tmp_path / "codex-home"),
+            active_turn_id="turn_a",
+            cwd=str(tmp_path),
+        ),
+    )
+
+    assert write_codex_turn_result(tmp_path, "turn_a", None, preserve_final=True)
+    update_active_turn_id(tmp_path, "turn_b")
+    assert write_codex_turn_result(tmp_path, "turn_a", "TURN_A_FINAL")
+
+    response = asyncio.run(codex_native_executor._await_final_response(tmp_path, "turn_a"))
+
+    assert response == "TURN_A_FINAL"
 
 
 @pytest.mark.asyncio

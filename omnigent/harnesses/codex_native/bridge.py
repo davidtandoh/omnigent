@@ -58,7 +58,7 @@ _STARTUP_TIMEOUT_MAX_BYTES = 256
 # events), read by the executor's first-turn gate and the runner's
 # Stop handler.
 _MCP_STARTUP_FILE = "mcp_startup.json"
-_TURN_RESULT_FILE = "turn_result.json"
+_TURN_RESULTS_DIR = "turn_results"
 _TURN_RESULT_MAX_BYTES = 1024 * 1024
 
 # Startup states mirrored from Codex's ``McpServerStartupState`` enum.
@@ -970,17 +970,48 @@ def clear_bridge_state(bridge_dir: Path) -> None:
             _STARTUP_ERROR_FILE,
             _STARTUP_TIMEOUT_FILE,
             _MCP_STARTUP_FILE,
-            _TURN_RESULT_FILE,
         ):
             try:
                 (bridge_dir / name).unlink()
             except FileNotFoundError:
                 continue
+        _clear_codex_turn_results_unlocked(bridge_dir)
 
 
-def _read_codex_turn_result_unlocked(bridge_dir: Path) -> CodexNativeTurnResult | None:
+def _codex_turn_result_path(bridge_dir: Path, turn_id: str) -> Path:
+    """Return the fixed-width result path for one Codex turn."""
+    digest = hashlib.sha256(turn_id.encode("utf-8")).hexdigest()
+    return bridge_dir / _TURN_RESULTS_DIR / f"{digest}.json"
+
+
+def _clear_codex_turn_results_unlocked(bridge_dir: Path) -> None:
+    """Remove ephemeral per-turn results from an owned bridge directory."""
+    results_dir = bridge_dir / _TURN_RESULTS_DIR
+    try:
+        mode = results_dir.lstat().st_mode
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(mode):
+        with contextlib.suppress(OSError):
+            results_dir.unlink()
+        return
+    try:
+        entries = list(results_dir.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        with contextlib.suppress(OSError):
+            entry.unlink()
+    with contextlib.suppress(OSError):
+        results_dir.rmdir()
+
+
+def _read_codex_turn_result_unlocked(
+    bridge_dir: Path,
+    turn_id: str,
+) -> CodexNativeTurnResult | None:
     """Read and validate the bounded native turn-result file."""
-    path = bridge_dir / _TURN_RESULT_FILE
+    path = _codex_turn_result_path(bridge_dir, turn_id)
     try:
         mode = path.lstat().st_mode
         if not stat.S_ISREG(mode):
@@ -997,18 +1028,29 @@ def _read_codex_turn_result_unlocked(bridge_dir: Path) -> CodexNativeTurnResult 
         return None
     if not isinstance(raw, dict):
         return None
-    turn_id = raw.get("turn_id")
+    stored_turn_id = raw.get("turn_id")
     response = raw.get("response")
-    if not isinstance(turn_id, str) or not turn_id:
+    if stored_turn_id != turn_id:
         return None
     if response is not None and not isinstance(response, str):
         return None
     return CodexNativeTurnResult(turn_id=turn_id, response=response)
 
 
-def read_codex_turn_result(bridge_dir: Path) -> CodexNativeTurnResult | None:
-    """Return the latest bounded final response recorded by the forwarder."""
-    return _read_codex_turn_result_unlocked(bridge_dir)
+def read_codex_turn_result(bridge_dir: Path, turn_id: str) -> CodexNativeTurnResult | None:
+    """Return the bounded final response recorded for one Codex turn."""
+    if not turn_id:
+        return None
+    return _read_codex_turn_result_unlocked(bridge_dir, turn_id)
+
+
+def remove_codex_turn_result(bridge_dir: Path, turn_id: str) -> None:
+    """Remove one consumed native turn result."""
+    if not turn_id:
+        return
+    with _bridge_state_lock(bridge_dir):
+        with contextlib.suppress(OSError):
+            _codex_turn_result_path(bridge_dir, turn_id).unlink()
 
 
 def write_codex_turn_result(
@@ -1028,11 +1070,12 @@ def write_codex_turn_result(
         return False
     with _bridge_state_lock(bridge_dir):
         state = read_bridge_state(bridge_dir)
-        existing = _read_codex_turn_result_unlocked(bridge_dir)
-        if state is not None and state.active_turn_id is not None:
-            if state.active_turn_id != turn_id:
-                return False
-        elif response is not None and (existing is None or existing.turn_id != turn_id):
+        existing = _read_codex_turn_result_unlocked(bridge_dir, turn_id)
+        if (
+            response is not None
+            and existing is None
+            and (state is None or state.active_turn_id != turn_id)
+        ):
             return False
         if (
             preserve_final
@@ -1041,9 +1084,10 @@ def write_codex_turn_result(
             and existing.response is not None
         ):
             return True
-        bridge_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        path = bridge_dir / _TURN_RESULT_FILE
-        fd, tmp_name = tempfile.mkstemp(prefix=f"{_TURN_RESULT_FILE}.", dir=str(bridge_dir))
+        results_dir = bridge_dir / _TURN_RESULTS_DIR
+        results_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path = _codex_turn_result_path(bridge_dir, turn_id)
+        fd, tmp_name = tempfile.mkstemp(prefix="turn_result.", dir=str(results_dir))
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(

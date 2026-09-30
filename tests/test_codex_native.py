@@ -10917,8 +10917,8 @@ def test_forwarder_child_terminal_event_does_not_write_parent_turn_result(
 
     asyncio.run(run())
 
-    assert not (tmp_path / "turn_result.json").exists()
-    assert not (tmp_path / "parent-bridge" / "turn_result.json").exists()
+    assert not (tmp_path / "turn_results").exists()
+    assert not (tmp_path / "parent-bridge" / "turn_results").exists()
 
 
 def test_forwarder_collab_item_started_registers_child_before_completed(
