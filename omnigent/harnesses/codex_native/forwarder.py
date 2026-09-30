@@ -5054,10 +5054,10 @@ def _record_final_turn_response(
     params: _JsonObject,
     item: _JsonObject,
 ) -> bool:
-    """Publish only an explicitly final Codex assistant item to the bridge."""
+    """Publish a final or legacy unphased Codex assistant item to the bridge."""
     if bridge_dir is None or item.get("type") != "agentMessage":
         return False
-    if item.get("phase") != "final_answer":
+    if item.get("phase") not in {None, "final_answer"}:
         return False
     turn_id = _turn_id_from_payload(params)
     text = item.get("text")

@@ -604,8 +604,15 @@ async def test_native_final_answer_reaches_agent_span_not_commentary(
                 elicitation_tracker = codex_forwarder._CodexElicitationTaskTracker()
                 for phase, text in (
                     ("commentary", "COMMENTARY_MUST_NOT_REACH_SPAN"),
-                    ("final_answer", "CODEX_FINAL_SPAN_SENTINEL"),
+                    (None, "CODEX_FINAL_SPAN_SENTINEL"),
                 ):
+                    item = {
+                        "id": phase or "legacy_final",
+                        "type": "agentMessage",
+                        "text": text,
+                    }
+                    if phase is not None:
+                        item["phase"] = phase
                     await codex_forwarder._handle_event(
                         forwarder_client,
                         session_id="conv_trace",
@@ -614,12 +621,7 @@ async def test_native_final_answer_reaches_agent_span_not_commentary(
                             "method": "item/completed",
                             "params": {
                                 "turnId": self.turn_id,
-                                "item": {
-                                    "id": phase,
-                                    "type": "agentMessage",
-                                    "phase": phase,
-                                    "text": text,
-                                },
+                                "item": item,
                             },
                         },
                         usage_coalescer=usage_coalescer,
