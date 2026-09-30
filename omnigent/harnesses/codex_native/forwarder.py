@@ -3137,7 +3137,7 @@ async def _handle_event(
             params=params,
             delta_coalescer=delta_coalescer if not is_child else None,
             forwarder_state=forwarder_state,
-            bridge_dir=bridge_dir,
+            bridge_dir=bridge_dir if not is_child else None,
         )
 
 
@@ -3946,9 +3946,6 @@ async def _handle_terminal_turn_boundary_inner(
             complete_codex_turn_result(
                 turn_result_bridge_dir,
                 terminal_turn_id,
-                create_if_missing=(
-                    terminal.edge is not None and ":recovered" in terminal.edge.source
-                ),
             )
 
 

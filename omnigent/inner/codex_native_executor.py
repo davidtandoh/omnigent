@@ -25,10 +25,12 @@ from omnigent.harnesses.codex_native.bridge import (
     CODEX_NATIVE_REQUEST_SESSION_ID_ENV_VAR,
     CODEX_NATIVE_STARTUP_PUBLICATION_GRACE_SECONDS,
     CodexNativeBridgeState,
+    begin_codex_turn_result,
+    cancel_pending_codex_turn_result,
     cancel_pending_mcp_startup,
     clear_active_turn_id_if_matches,
-    begin_codex_turn_result,
     mcp_startup_waiting_detail,
+    prepare_codex_turn_result,
     read_bridge_startup_error,
     read_bridge_startup_timeout,
     read_bridge_state,
@@ -200,19 +202,24 @@ async def _start_codex_turn(
                     "Failed to mirror codex effort switch into config.toml: effort=%s",
                     switched_effort,
                 )
-    response = await client.request(
-        "turn/start",
-        {
-            "threadId": state.thread_id,
-            "input": input_items,
-            "environments": [
-                {
-                    "environmentId": "local",
-                    "cwd": state.cwd or str(Path.cwd()),
-                }
-            ],
-        },
-    )
+    prepare_codex_turn_result(bridge_dir)
+    try:
+        response = await client.request(
+            "turn/start",
+            {
+                "threadId": state.thread_id,
+                "input": input_items,
+                "environments": [
+                    {
+                        "environmentId": "local",
+                        "cwd": state.cwd or str(Path.cwd()),
+                    }
+                ],
+            },
+        )
+    except BaseException:
+        cancel_pending_codex_turn_result(bridge_dir)
+        raise
     result = _json_object(response.get("result"))
     turn = _json_object(result.get("turn")) if result is not None else None
     turn_id = turn.get("id") if turn is not None else None
@@ -220,6 +227,7 @@ async def _start_codex_turn(
         begin_codex_turn_result(bridge_dir, turn_id)
         _logger.info("Codex native started turn: turn_id=%s", turn_id)
         return turn_id
+    cancel_pending_codex_turn_result(bridge_dir)
     return None
 
 
@@ -232,20 +240,26 @@ async def _steer_codex_turn(
 ) -> str | None:
     """Steer one bridge-recorded active Codex turn."""
     assert state.active_turn_id is not None
-    response = await client.request(
-        "turn/steer",
-        {
-            "threadId": state.thread_id,
-            "expectedTurnId": state.active_turn_id,
-            "input": input_items,
-        },
-    )
+    prepare_codex_turn_result(bridge_dir)
+    try:
+        response = await client.request(
+            "turn/steer",
+            {
+                "threadId": state.thread_id,
+                "expectedTurnId": state.active_turn_id,
+                "input": input_items,
+            },
+        )
+    except BaseException:
+        cancel_pending_codex_turn_result(bridge_dir)
+        raise
     result = _json_object(response.get("result"))
     turn_id = result.get("turnId") if result is not None else None
     if isinstance(turn_id, str) and turn_id:
         begin_codex_turn_result(bridge_dir, turn_id)
         _logger.info("Codex native steered active turn: turn_id=%s", turn_id)
         return turn_id
+    cancel_pending_codex_turn_result(bridge_dir)
     return None
 
 

@@ -10921,6 +10921,52 @@ def test_forwarder_child_terminal_event_does_not_write_parent_turn_result(
     assert not (tmp_path / "parent-bridge" / "turn_results").exists()
 
 
+def test_forwarder_child_final_item_does_not_touch_bridge_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A child final item does not touch the parent result channel."""
+    posted: list[tuple[str, dict[str, Any]]] = []
+    state = codex_native_forwarder._CodexForwarderState(parent_session_id="conv_parent")
+    state.note_child_thread("thread_child", "conv_child")
+    monkeypatch.chdir(tmp_path)
+
+    async def run() -> None:
+        async with httpx.AsyncClient(
+            base_url="http://127.0.0.1:8000",
+            transport=httpx.MockTransport(_make_omnigent_handler(posted)),
+        ) as client:
+            await codex_native_forwarder._handle_event(
+                client,
+                session_id="conv_parent",
+                bridge_dir=Path(),
+                event={
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": "thread_child",
+                        "turnId": "turn_child",
+                        "item": {
+                            "id": "child_final",
+                            "type": "agentMessage",
+                            "phase": "final_answer",
+                            "text": "child final response",
+                        },
+                    },
+                },
+                usage_coalescer=codex_native_forwarder._SessionUsageCoalescer(
+                    client, "conv_parent"
+                ),
+                elicitation_tracker=_elicitation_tracker(),
+                expected_thread_id="thread_parent",
+                forwarder_state=state,
+            )
+
+    asyncio.run(run())
+
+    assert not (tmp_path / "state.lock").exists()
+    assert not (tmp_path / "turn_results").exists()
+
+
 def test_forwarder_collab_item_started_registers_child_before_completed(
     tmp_path: Path,
 ) -> None:

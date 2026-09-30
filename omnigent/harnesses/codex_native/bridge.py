@@ -59,6 +59,7 @@ _STARTUP_TIMEOUT_MAX_BYTES = 256
 # Stop handler.
 _MCP_STARTUP_FILE = "mcp_startup.json"
 _TURN_RESULTS_DIR = "turn_results"
+_PENDING_TURN_RESULT_FILE = "pending.json"
 _TURN_RESULT_MAX_BYTES = 1024 * 1024
 
 # Startup states mirrored from Codex's ``McpServerStartupState`` enum.
@@ -985,6 +986,10 @@ def _codex_turn_result_path(bridge_dir: Path, turn_id: str) -> Path:
     return bridge_dir / _TURN_RESULTS_DIR / f"{digest}.json"
 
 
+def _pending_codex_turn_result_path(bridge_dir: Path) -> Path:
+    return bridge_dir / _TURN_RESULTS_DIR / _PENDING_TURN_RESULT_FILE
+
+
 def _clear_codex_turn_results_unlocked(bridge_dir: Path) -> None:
     """Remove ephemeral per-turn results from an owned bridge directory."""
     results_dir = bridge_dir / _TURN_RESULTS_DIR
@@ -1057,6 +1062,42 @@ def remove_codex_turn_result(bridge_dir: Path, turn_id: str) -> None:
             _codex_turn_result_path(bridge_dir, turn_id).unlink()
 
 
+def prepare_codex_turn_result(bridge_dir: Path) -> None:
+    """Record that one serialized executor injection awaits a turn id."""
+    with _bridge_state_lock(bridge_dir):
+        results_dir = bridge_dir / _TURN_RESULTS_DIR
+        results_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path = _pending_codex_turn_result_path(bridge_dir)
+        fd, tmp_name = tempfile.mkstemp(prefix="pending_turn_result.", dir=str(results_dir))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump({"pending": True}, handle, sort_keys=True)
+                handle.write("\n")
+            os.replace(tmp_name, path)
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
+
+
+def cancel_pending_codex_turn_result(bridge_dir: Path) -> None:
+    """Remove an injection marker after an RPC fails to return a turn id."""
+    with _bridge_state_lock(bridge_dir):
+        with contextlib.suppress(OSError):
+            _pending_codex_turn_result_path(bridge_dir).unlink()
+
+
+def _consume_pending_codex_turn_result_unlocked(bridge_dir: Path) -> bool:
+    path = _pending_codex_turn_result_path(bridge_dir)
+    try:
+        mode = path.lstat().st_mode
+        if not stat.S_ISREG(mode):
+            return False
+        path.unlink()
+    except OSError:
+        return False
+    return True
+
+
 def _write_codex_turn_result_unlocked(
     bridge_dir: Path,
     result: CodexNativeTurnResult,
@@ -1091,9 +1132,13 @@ def begin_codex_turn_result(bridge_dir: Path, turn_id: str) -> bool:
     with _bridge_state_lock(bridge_dir):
         existing = _read_codex_turn_result_unlocked(bridge_dir, turn_id)
         if existing is not None and existing.terminal:
+            _consume_pending_codex_turn_result_unlocked(bridge_dir)
             return True
         state = read_bridge_state(bridge_dir)
         if state is None:
+            return False
+        pending = _consume_pending_codex_turn_result_unlocked(bridge_dir)
+        if existing is None and not pending and state.active_turn_id != turn_id:
             return False
         _write_bridge_state_unlocked(
             bridge_dir,
@@ -1123,13 +1168,8 @@ def write_codex_turn_result(
     if not turn_id:
         return False
     with _bridge_state_lock(bridge_dir):
-        state = read_bridge_state(bridge_dir)
         existing = _read_codex_turn_result_unlocked(bridge_dir, turn_id)
-        if (
-            response is not None
-            and existing is None
-            and (state is None or state.active_turn_id != turn_id)
-        ):
+        if existing is None and not _consume_pending_codex_turn_result_unlocked(bridge_dir):
             return False
         _write_codex_turn_result_unlocked(
             bridge_dir,
@@ -1145,8 +1185,6 @@ def write_codex_turn_result(
 def complete_codex_turn_result(
     bridge_dir: Path,
     turn_id: str,
-    *,
-    create_if_missing: bool = False,
 ) -> bool:
     """Mark an initialized result terminal without recreating consumed state."""
     if not turn_id:
@@ -1154,7 +1192,7 @@ def complete_codex_turn_result(
     with _bridge_state_lock(bridge_dir):
         existing = _read_codex_turn_result_unlocked(bridge_dir, turn_id)
         if existing is None:
-            if not create_if_missing:
+            if not _consume_pending_codex_turn_result_unlocked(bridge_dir):
                 return False
             existing = CodexNativeTurnResult(
                 turn_id=turn_id,

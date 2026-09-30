@@ -23,6 +23,7 @@ from omnigent.harnesses.codex_native.bridge import (
     CodexNativeBridgeState,
     begin_codex_turn_result,
     complete_codex_turn_result,
+    prepare_codex_turn_result,
     read_bridge_state,
     read_codex_config_effort,
     read_codex_config_model,
@@ -405,11 +406,33 @@ async def test_terminal_before_start_response_does_not_reactivate_turn(
             cwd=str(tmp_path),
         ),
     )
+    prepare_codex_turn_result(tmp_path)
 
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(lambda _request: httpx.Response(200)),
         base_url="http://omnigent.test",
     ) as forwarder_client:
+        await codex_forwarder._handle_event(
+            forwarder_client,
+            session_id="conv_fast",
+            bridge_dir=tmp_path,
+            event={
+                "method": "turn/started",
+                "params": {
+                    "threadId": "thread_fast",
+                    "turn": {
+                        "id": "turn_fast",
+                        "status": "inProgress",
+                        "items": [],
+                    },
+                },
+            },
+            usage_coalescer=codex_forwarder._SessionUsageCoalescer(
+                forwarder_client, "conv_fast"
+            ),
+            elicitation_tracker=codex_forwarder._CodexElicitationTaskTracker(),
+            expected_thread_id="thread_fast",
+        )
         await codex_forwarder._handle_event(
             forwarder_client,
             session_id="conv_fast",
