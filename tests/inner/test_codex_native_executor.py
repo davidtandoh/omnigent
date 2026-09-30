@@ -440,11 +440,11 @@ async def test_standalone_error_completes_pending_turn_result(
 
 
 @pytest.mark.asyncio
-async def test_failed_resume_completes_pending_turn_result(
+async def test_resume_completes_non_latest_terminal_turn_result(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A failed turn recovered from resume releases the waiting executor."""
+    """Resume releases terminal turn A when a later turn B remains active."""
     monkeypatch.setattr(codex_native_executor, "_TURN_COMPLETED_DRAIN_SECONDS", 0.01)
     monkeypatch.setattr(codex_native_executor, "_BRIDGE_STATE_FAST_POLL_SECONDS", 0.005)
     write_bridge_state(
@@ -482,7 +482,12 @@ async def test_failed_resume_completes_pending_turn_result(
                                 "status": "failed",
                                 "error": {"message": "resume recovered failure"},
                                 "items": [],
-                            }
+                            },
+                            {
+                                "id": "turn_later",
+                                "status": "inProgress",
+                                "items": [],
+                            },
                         ],
                     }
                 }
@@ -492,6 +497,7 @@ async def test_failed_resume_completes_pending_turn_result(
             ),
             elicitation_tracker=codex_forwarder._CodexElicitationTaskTracker(),
             forwarder_state=codex_forwarder._CodexForwarderState(),
+            replay_from_turn_id="turn_resume_error",
         )
 
     assert await response_waiter is None

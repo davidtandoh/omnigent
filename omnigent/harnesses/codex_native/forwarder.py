@@ -2802,14 +2802,25 @@ async def _replay_resume_response(
                     expected_thread_id=thread_id,
                     forwarder_state=forwarder_state,
                 )
-    await _post_resume_terminal_status(
-        client,
-        session_id=session_id,
-        bridge_dir=bridge_dir,
-        turn_result_bridge_dir=turn_result_bridge_dir,
-        thread_id=thread_id,
-        turns=turns,
-    )
+    try:
+        await _post_resume_terminal_status(
+            client,
+            session_id=session_id,
+            bridge_dir=bridge_dir,
+            thread_id=thread_id,
+            turns=turns,
+        )
+    finally:
+        if turn_result_bridge_dir is not None:
+            for turn in replay_turns:
+                if not isinstance(turn, dict):
+                    continue
+                turn_id = _turn_id_from_payload(turn)
+                if (
+                    turn_id is not None
+                    and _omnigent_status_from_resume_turn(turn) is not None
+                ):
+                    complete_codex_turn_result(turn_result_bridge_dir, turn_id)
 
 
 def _resume_turns_from(turns: list[object], replay_from_turn_id: str | None) -> list[object]:
@@ -2831,7 +2842,6 @@ async def _post_resume_terminal_status(
     *,
     session_id: str,
     bridge_dir: Path,
-    turn_result_bridge_dir: Path | None,
     thread_id: str | None,
     turns: list[object],
 ) -> None:
@@ -2848,8 +2858,6 @@ async def _post_resume_terminal_status(
     :param client: HTTP client for Omnigent event posts.
     :param session_id: Omnigent conversation id, e.g. ``"conv_abc123"``.
     :param bridge_dir: Native Codex bridge directory.
-    :param turn_result_bridge_dir: Parent bridge directory that owns native
-        turn results, or ``None`` when no executor awaits this replay.
     :param thread_id: Codex thread id from the resume payload, e.g.
         ``"thread_123"``.
     :param turns: Raw Codex resume turn list.
@@ -2858,11 +2866,7 @@ async def _post_resume_terminal_status(
     if thread_id is None:
         return
     edge = _resume_terminal_status_edge_for_latest_turn(bridge_dir, thread_id, turns)
-    try:
-        await _post_turn_status_edge(client, session_id, edge)
-    finally:
-        if edge is not None and edge.turn_id is not None and turn_result_bridge_dir is not None:
-            complete_codex_turn_result(turn_result_bridge_dir, edge.turn_id)
+    await _post_turn_status_edge(client, session_id, edge)
 
 
 def _resume_terminal_status_edge_for_latest_turn(
