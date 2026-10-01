@@ -36,6 +36,7 @@ from omnigent.harnesses.codex_native.bridge import (
     DeveloperInstructionsReadState,
     clear_active_turn_id_if_matches,
     codex_home_for_bridge_dir,
+    complete_codex_turn_result,
     pending_mcp_servers,
     read_bridge_state,
     read_codex_config_developer_instructions_state,
@@ -47,6 +48,7 @@ from omnigent.harnesses.codex_native.bridge import (
     update_mcp_server_startup,
     update_thread_id,
     write_bridge_state,
+    write_codex_turn_result,
 )
 from omnigent.harnesses.codex_native.elicitation import (
     codex_elicitation_id,
@@ -2668,6 +2670,7 @@ async def _subscribe_until_ready_inner(
             ap_client,
             session_id=session_id,
             bridge_dir=bridge_dir,
+            turn_result_bridge_dir=bridge_dir,
             response=response,
             usage_coalescer=usage_coalescer,
             elicitation_tracker=elicitation_tracker,
@@ -2730,6 +2733,7 @@ async def _replay_resume_response(
     *,
     session_id: str,
     bridge_dir: Path,
+    turn_result_bridge_dir: Path | None = None,
     response: CodexMessage,
     usage_coalescer: _SessionUsageCoalescer,
     elicitation_tracker: _CodexElicitationTaskTracker,
@@ -2746,6 +2750,8 @@ async def _replay_resume_response(
     :param client: HTTP client for Omnigent event posts.
     :param session_id: Omnigent conversation id.
     :param bridge_dir: Native Codex bridge directory.
+    :param turn_result_bridge_dir: Parent bridge directory that owns native
+        turn results, or ``None`` for child replay.
     :param response: Codex ``thread/resume`` response envelope.
     :param usage_coalescer: Token-usage coalescer for replayed
         app-server events.
@@ -2796,13 +2802,22 @@ async def _replay_resume_response(
                     expected_thread_id=thread_id,
                     forwarder_state=forwarder_state,
                 )
-    await _post_resume_terminal_status(
-        client,
-        session_id=session_id,
-        bridge_dir=bridge_dir,
-        thread_id=thread_id,
-        turns=turns,
-    )
+    try:
+        await _post_resume_terminal_status(
+            client,
+            session_id=session_id,
+            bridge_dir=bridge_dir,
+            thread_id=thread_id,
+            turns=turns,
+        )
+    finally:
+        if turn_result_bridge_dir is not None:
+            for turn in replay_turns:
+                if not isinstance(turn, dict):
+                    continue
+                turn_id = _turn_id_from_payload(turn)
+                if turn_id is not None and _omnigent_status_from_resume_turn(turn) is not None:
+                    complete_codex_turn_result(turn_result_bridge_dir, turn_id)
 
 
 def _resume_turns_from(turns: list[object], replay_from_turn_id: str | None) -> list[object]:
@@ -3090,6 +3105,7 @@ async def _handle_event(
         client,
         session_id=route_session_id,
         bridge_dir=bridge_dir if not is_child else Path(),
+        turn_result_bridge_dir=bridge_dir if not is_child else None,
         method=method,
         params=params,
         usage_coalescer=(child_coalescer if child_coalescer is not None else usage_coalescer),
@@ -3118,7 +3134,7 @@ async def _handle_event(
             params=params,
             delta_coalescer=delta_coalescer if not is_child else None,
             forwarder_state=forwarder_state,
-            bridge_dir=bridge_dir,
+            bridge_dir=bridge_dir if not is_child else None,
         )
 
 
@@ -3516,6 +3532,7 @@ async def _maybe_handle_turn_event(
     *,
     session_id: str,
     bridge_dir: Path,
+    turn_result_bridge_dir: Path | None = None,
     method: str,
     params: _JsonObject,
     usage_coalescer: _SessionUsageCoalescer,
@@ -3530,6 +3547,8 @@ async def _maybe_handle_turn_event(
     :param client: HTTP client for Omnigent event posts.
     :param session_id: Omnigent conversation id, e.g. ``"conv_abc123"``.
     :param bridge_dir: Native Codex bridge directory.
+    :param turn_result_bridge_dir: Parent bridge directory that owns native
+        turn results, or ``None`` for child threads.
     :param method: Codex method value, e.g. ``"turn/started"``.
     :param params: Codex notification params.
     :param usage_coalescer: Token-usage coalescer.
@@ -3546,34 +3565,40 @@ async def _maybe_handle_turn_event(
                 _turn_id_from_payload(params),
             )
             return True
-        async with _conversation_item_delivery_scope(session_id):
-            if delta_coalescer is not None:
-                await delta_coalescer.flush()
-            error = _terminal_error_from_notification(params)
-            if error is None:
-                _logger.warning("Codex forwarder ignored malformed error notification")
-                return True
-            turn_id = _turn_id_from_payload(params)
-            if forwarder_state is not None and turn_id is not None:
-                if turn_id in forwarder_state.surfaced_terminal_error_turns:
-                    _logger.info(
-                        "Codex forwarder ignored duplicate terminal error: turn_id=%s",
-                        turn_id,
-                    )
+        terminal_turn_id: str | None = None
+        try:
+            async with _conversation_item_delivery_scope(session_id):
+                if delta_coalescer is not None:
+                    await delta_coalescer.flush()
+                error = _terminal_error_from_notification(params)
+                if error is None:
+                    _logger.warning("Codex forwarder ignored malformed error notification")
                     return True
-                forwarder_state.surfaced_terminal_error_turns.add(turn_id)
-                clear_active_turn_id_if_matches(bridge_dir, turn_id)
-            await _post_turn_status_edge(
-                client,
-                session_id,
-                _CodexTurnStatusEdge(
-                    status="failed",
-                    turn_id=turn_id,
-                    source="error",
-                    error=error,
-                ),
-            )
-            await usage_coalescer.flush()
+                turn_id = _turn_id_from_payload(params)
+                if forwarder_state is not None and turn_id is not None:
+                    if turn_id in forwarder_state.surfaced_terminal_error_turns:
+                        _logger.info(
+                            "Codex forwarder ignored duplicate terminal error: turn_id=%s",
+                            turn_id,
+                        )
+                        return True
+                    forwarder_state.surfaced_terminal_error_turns.add(turn_id)
+                    clear_active_turn_id_if_matches(bridge_dir, turn_id)
+                terminal_turn_id = turn_id
+                await _post_turn_status_edge(
+                    client,
+                    session_id,
+                    _CodexTurnStatusEdge(
+                        status="failed",
+                        turn_id=turn_id,
+                        source="error",
+                        error=error,
+                    ),
+                )
+                await usage_coalescer.flush()
+        finally:
+            if terminal_turn_id is not None and turn_result_bridge_dir is not None:
+                complete_codex_turn_result(turn_result_bridge_dir, terminal_turn_id)
         return True
     if method == "turn/started":
         async with _conversation_item_delivery_scope(session_id):
@@ -3611,6 +3636,7 @@ async def _maybe_handle_turn_event(
             client,
             session_id=session_id,
             bridge_dir=bridge_dir,
+            turn_result_bridge_dir=turn_result_bridge_dir,
             method=method,
             params=params,
             usage_coalescer=usage_coalescer,
@@ -3788,6 +3814,7 @@ async def _handle_terminal_turn_boundary(
     *,
     session_id: str,
     bridge_dir: Path,
+    turn_result_bridge_dir: Path | None = None,
     method: str,
     params: _JsonObject,
     usage_coalescer: _SessionUsageCoalescer,
@@ -3802,6 +3829,7 @@ async def _handle_terminal_turn_boundary(
             client,
             session_id=session_id,
             bridge_dir=bridge_dir,
+            turn_result_bridge_dir=turn_result_bridge_dir,
             method=method,
             params=params,
             usage_coalescer=usage_coalescer,
@@ -3817,6 +3845,7 @@ async def _handle_terminal_turn_boundary_inner(
     *,
     session_id: str,
     bridge_dir: Path,
+    turn_result_bridge_dir: Path | None,
     method: str,
     params: _JsonObject,
     usage_coalescer: _SessionUsageCoalescer,
@@ -3831,6 +3860,8 @@ async def _handle_terminal_turn_boundary_inner(
     :param client: HTTP client for Omnigent event posts.
     :param session_id: Omnigent conversation id, e.g. ``"conv_abc123"``.
     :param bridge_dir: Native Codex bridge directory.
+    :param turn_result_bridge_dir: Parent bridge directory that owns native
+        turn results, or ``None`` for child threads.
     :param method: Codex method, e.g. ``"turn/completed"``.
     :param params: Codex notification params.
     :param usage_coalescer: Coalescer holding latest token usage.
@@ -3851,53 +3882,68 @@ async def _handle_terminal_turn_boundary_inner(
         params,
         forwarder_state=forwarder_state,
     )
-    if delta_coalescer is not None:
-        await delta_coalescer.flush()
-    # Safety net: if a compaction was reported in progress but Codex never
-    # emitted a completion signal we recognize (e.g. a protocol-spelling
-    # drift), force the spinner closed at the turn boundary so it can't hang.
-    if forwarder_state is not None and forwarder_state.compaction_status_posted == "in_progress":
-        await _post_compaction_status(
-            client, session_id, "completed", forwarder_state=forwarder_state
-        )
-    await _maybe_persist_interrupted_partial_text(
-        client,
-        session_id=session_id,
-        method=method,
-        params=params,
-        forwarder_state=forwarder_state,
-    )
-    await _flush_turn_diff(
-        client,
-        session_id=session_id,
-        params=params,
-        forwarder_state=forwarder_state,
-    )
-    handled = terminal.handled
-    if terminal.edge is not None:
-        await _post_turn_status_edge(client, session_id, terminal.edge)
-    if handled:
-        await elicitation_tracker.resolve_by_terminal_turn_event(
+    terminal_turn_id = _terminal_turn_id_from_params(params)
+    try:
+        if delta_coalescer is not None:
+            await delta_coalescer.flush()
+        # Safety net: if a compaction was reported in progress but Codex never
+        # emitted a completion signal we recognize (e.g. a protocol-spelling
+        # drift), force the spinner closed at the turn boundary so it can't hang.
+        if (
+            forwarder_state is not None
+            and forwarder_state.compaction_status_posted == "in_progress"
+        ):
+            await _post_compaction_status(
+                client, session_id, "completed", forwarder_state=forwarder_state
+            )
+        await _maybe_persist_interrupted_partial_text(
             client,
             session_id=session_id,
-            params=params,
-        )
-    if (
-        handled
-        and method == "turn/completed"
-        and codex_client is not None
-        and forwarder_state is not None
-    ):
-        await _maybe_handle_plan_implementation_prompt(
-            client,
-            codex_client,
-            session_id=session_id,
-            bridge_dir=bridge_dir,
+            method=method,
             params=params,
             forwarder_state=forwarder_state,
         )
-    if handled:
-        await usage_coalescer.flush()
+        await _flush_turn_diff(
+            client,
+            session_id=session_id,
+            params=params,
+            forwarder_state=forwarder_state,
+        )
+        handled = terminal.handled
+        if terminal.edge is not None:
+            await _post_turn_status_edge(client, session_id, terminal.edge)
+        if handled:
+            await elicitation_tracker.resolve_by_terminal_turn_event(
+                client,
+                session_id=session_id,
+                params=params,
+            )
+        if (
+            handled
+            and method == "turn/completed"
+            and codex_client is not None
+            and forwarder_state is not None
+        ):
+            await _maybe_handle_plan_implementation_prompt(
+                client,
+                codex_client,
+                session_id=session_id,
+                bridge_dir=bridge_dir,
+                params=params,
+                forwarder_state=forwarder_state,
+            )
+        if handled:
+            await usage_coalescer.flush()
+    finally:
+        if (
+            terminal.handled
+            and terminal_turn_id is not None
+            and turn_result_bridge_dir is not None
+        ):
+            complete_codex_turn_result(
+                turn_result_bridge_dir,
+                terminal_turn_id,
+            )
 
 
 def _handle_usage_update(
@@ -5000,6 +5046,23 @@ def _claim_completed_item(
     return item_key
 
 
+def _record_final_turn_response(
+    bridge_dir: Path | None,
+    params: _JsonObject,
+    item: _JsonObject,
+) -> bool:
+    """Publish a final or legacy unphased Codex assistant item to the bridge."""
+    if bridge_dir is None or item.get("type") != "agentMessage":
+        return False
+    if item.get("phase") not in {None, "final_answer"}:
+        return False
+    turn_id = _turn_id_from_payload(params)
+    text = item.get("text")
+    if turn_id is None or not isinstance(text, str):
+        return False
+    return write_codex_turn_result(bridge_dir, turn_id, text)
+
+
 async def _handle_completed_item(
     client: httpx.AsyncClient,
     session_id: str,
@@ -5044,6 +5107,7 @@ async def _handle_completed_item_inner(
         return
     item_type = item.get("type")
     turn_id = _turn_id_from_payload(params)
+    _record_final_turn_response(bridge_dir, params, item)
     if item_type in {"agentMessage", "plan"} and forwarder_state is not None and turn_id:
         item_id = item.get("id")
         forwarder_state.discard_partial_text_item(

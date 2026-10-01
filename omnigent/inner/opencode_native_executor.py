@@ -5,9 +5,9 @@ runner owns the ``opencode serve`` process + SSE forwarder, and this
 executor injects the latest web turn over the
 :class:`omnigent.harnesses.opencode_native.http_transport.OpenCodeHttpTransport` using the
 loopback URL + auth secret published in the bridge state. Output is
-streamed back by the runner-side forwarder, so ``run_turn`` only admits the
-prompt and yields ``TurnComplete`` — the same injection/completion split as
-codex-native.
+streamed back by the runner-side forwarder, so ``run_turn`` admits the prompt
+and yields ``TurnComplete(response=None)``. Unlike codex-native, OpenCode does
+not correlate the final assistant response back to that terminal event.
 """
 
 from __future__ import annotations

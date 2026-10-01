@@ -58,6 +58,9 @@ _STARTUP_TIMEOUT_MAX_BYTES = 256
 # events), read by the executor's first-turn gate and the runner's
 # Stop handler.
 _MCP_STARTUP_FILE = "mcp_startup.json"
+_TURN_RESULTS_DIR = "turn_results"
+_PENDING_TURN_RESULT_FILE = "pending.json"
+_TURN_RESULT_MAX_BYTES = 1024 * 1024
 
 # Startup states mirrored from Codex's ``McpServerStartupState`` enum.
 MCP_STARTUP_STARTING = "starting"
@@ -152,6 +155,15 @@ class CodexNativeBridgeState:
     codex_home: str
     active_turn_id: str | None = None
     cwd: str | None = None
+
+
+@dataclass(frozen=True)
+class CodexNativeTurnResult:
+    """Final assistant response observed by the native event forwarder."""
+
+    turn_id: str
+    response: str | None
+    terminal: bool
 
 
 def bridge_dir_for_bridge_id(bridge_id: str) -> Path:
@@ -965,6 +977,235 @@ def clear_bridge_state(bridge_dir: Path) -> None:
                 (bridge_dir / name).unlink()
             except FileNotFoundError:
                 continue
+        _clear_codex_turn_results_unlocked(bridge_dir)
+
+
+def _codex_turn_result_path(bridge_dir: Path, turn_id: str) -> Path:
+    """Return the fixed-width result path for one Codex turn."""
+    digest = hashlib.sha256(turn_id.encode("utf-8")).hexdigest()
+    return bridge_dir / _TURN_RESULTS_DIR / f"{digest}.json"
+
+
+def _pending_codex_turn_result_path(bridge_dir: Path) -> Path:
+    return bridge_dir / _TURN_RESULTS_DIR / _PENDING_TURN_RESULT_FILE
+
+
+def _clear_codex_turn_results_unlocked(bridge_dir: Path) -> None:
+    """Remove ephemeral per-turn results from an owned bridge directory."""
+    results_dir = bridge_dir / _TURN_RESULTS_DIR
+    try:
+        mode = results_dir.lstat().st_mode
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(mode):
+        with contextlib.suppress(OSError):
+            results_dir.unlink()
+        return
+    try:
+        entries = list(results_dir.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        with contextlib.suppress(OSError):
+            entry.unlink()
+    with contextlib.suppress(OSError):
+        results_dir.rmdir()
+
+
+def _read_codex_turn_result_unlocked(
+    bridge_dir: Path,
+    turn_id: str,
+) -> CodexNativeTurnResult | None:
+    """Read and validate the bounded native turn-result file."""
+    path = _codex_turn_result_path(bridge_dir, turn_id)
+    try:
+        mode = path.lstat().st_mode
+        if not stat.S_ISREG(mode):
+            return None
+        with path.open("rb") as handle:
+            payload = handle.read(_TURN_RESULT_MAX_BYTES + 1)
+    except OSError:
+        return None
+    if len(payload) > _TURN_RESULT_MAX_BYTES:
+        return None
+    try:
+        raw = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, ValueError, RecursionError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    stored_turn_id = raw.get("turn_id")
+    response = raw.get("response")
+    terminal = raw.get("terminal")
+    if stored_turn_id != turn_id:
+        return None
+    if response is not None and not isinstance(response, str):
+        return None
+    if not isinstance(terminal, bool):
+        return None
+    return CodexNativeTurnResult(turn_id=turn_id, response=response, terminal=terminal)
+
+
+def read_codex_turn_result(bridge_dir: Path, turn_id: str) -> CodexNativeTurnResult | None:
+    """Return the bounded final response recorded for one Codex turn."""
+    if not turn_id:
+        return None
+    return _read_codex_turn_result_unlocked(bridge_dir, turn_id)
+
+
+def remove_codex_turn_result(bridge_dir: Path, turn_id: str) -> None:
+    """Remove one consumed native turn result."""
+    if not turn_id:
+        return
+    with _bridge_state_lock(bridge_dir), contextlib.suppress(OSError):
+        _codex_turn_result_path(bridge_dir, turn_id).unlink()
+
+
+def prepare_codex_turn_result(bridge_dir: Path) -> None:
+    """Record that one serialized executor injection awaits a turn id."""
+    with _bridge_state_lock(bridge_dir):
+        results_dir = bridge_dir / _TURN_RESULTS_DIR
+        results_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path = _pending_codex_turn_result_path(bridge_dir)
+        fd, tmp_name = tempfile.mkstemp(prefix="pending_turn_result.", dir=str(results_dir))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump({"pending": True}, handle, sort_keys=True)
+                handle.write("\n")
+            os.replace(tmp_name, path)
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
+
+
+def cancel_pending_codex_turn_result(bridge_dir: Path) -> None:
+    """Remove an injection marker after an RPC fails to return a turn id."""
+    with _bridge_state_lock(bridge_dir), contextlib.suppress(OSError):
+        _pending_codex_turn_result_path(bridge_dir).unlink()
+
+
+def _consume_pending_codex_turn_result_unlocked(bridge_dir: Path) -> bool:
+    path = _pending_codex_turn_result_path(bridge_dir)
+    try:
+        mode = path.lstat().st_mode
+        if not stat.S_ISREG(mode):
+            return False
+        path.unlink()
+    except OSError:
+        return False
+    return True
+
+
+def _write_codex_turn_result_unlocked(
+    bridge_dir: Path,
+    result: CodexNativeTurnResult,
+) -> None:
+    """Write one per-turn result atomically while the bridge lock is held."""
+    results_dir = bridge_dir / _TURN_RESULTS_DIR
+    results_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = _codex_turn_result_path(bridge_dir, result.turn_id)
+    fd, tmp_name = tempfile.mkstemp(prefix="turn_result.", dir=str(results_dir))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "response": result.response,
+                    "terminal": result.terminal,
+                    "turn_id": result.turn_id,
+                },
+                handle,
+                sort_keys=True,
+            )
+            handle.write("\n")
+        os.replace(tmp_name, path)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+
+
+def begin_codex_turn_result(bridge_dir: Path, turn_id: str) -> bool:
+    """Activate one injected turn and create its pending result atomically."""
+    if not turn_id:
+        return False
+    with _bridge_state_lock(bridge_dir):
+        existing = _read_codex_turn_result_unlocked(bridge_dir, turn_id)
+        if existing is not None and existing.terminal:
+            _consume_pending_codex_turn_result_unlocked(bridge_dir)
+            return True
+        state = read_bridge_state(bridge_dir)
+        if state is None:
+            return False
+        pending = _consume_pending_codex_turn_result_unlocked(bridge_dir)
+        if existing is None and not pending and state.active_turn_id != turn_id:
+            return False
+        _write_bridge_state_unlocked(
+            bridge_dir,
+            CodexNativeBridgeState(
+                session_id=state.session_id,
+                socket_path=state.socket_path,
+                thread_id=state.thread_id,
+                codex_home=state.codex_home,
+                active_turn_id=turn_id,
+                cwd=state.cwd,
+            ),
+        )
+        if existing is None:
+            _write_codex_turn_result_unlocked(
+                bridge_dir,
+                CodexNativeTurnResult(turn_id=turn_id, response=None, terminal=False),
+            )
+    return True
+
+
+def write_codex_turn_result(
+    bridge_dir: Path,
+    turn_id: str,
+    response: str | None,
+) -> bool:
+    """Publish one correlated native final response atomically."""
+    if not turn_id:
+        return False
+    with _bridge_state_lock(bridge_dir):
+        existing = _read_codex_turn_result_unlocked(bridge_dir, turn_id)
+        if existing is None and not _consume_pending_codex_turn_result_unlocked(bridge_dir):
+            return False
+        _write_codex_turn_result_unlocked(
+            bridge_dir,
+            CodexNativeTurnResult(
+                turn_id=turn_id,
+                response=response,
+                terminal=existing.terminal if existing is not None else False,
+            ),
+        )
+    return True
+
+
+def complete_codex_turn_result(
+    bridge_dir: Path,
+    turn_id: str,
+) -> bool:
+    """Mark an initialized result terminal without recreating consumed state."""
+    if not turn_id:
+        return False
+    with _bridge_state_lock(bridge_dir):
+        existing = _read_codex_turn_result_unlocked(bridge_dir, turn_id)
+        if existing is None:
+            if not _consume_pending_codex_turn_result_unlocked(bridge_dir):
+                return False
+            existing = CodexNativeTurnResult(
+                turn_id=turn_id,
+                response=None,
+                terminal=False,
+            )
+        _write_codex_turn_result_unlocked(
+            bridge_dir,
+            CodexNativeTurnResult(
+                turn_id=turn_id,
+                response=existing.response,
+                terminal=True,
+            ),
+        )
+    return True
 
 
 def write_bridge_startup_error(bridge_dir: Path, message: str) -> None:

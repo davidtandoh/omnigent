@@ -47,8 +47,10 @@ from websockets.asyncio.server import Server, ServerConnection
 from omnigent.harnesses.codex_native.bridge import (
     CODEX_NATIVE_REQUEST_SESSION_ID_ENV_VAR,
     CodexNativeBridgeState,
+    complete_codex_turn_result,
     read_bridge_state,
     write_bridge_state,
+    write_codex_turn_result,
 )
 from omnigent.inner.codex_native_executor import CodexNativeExecutor
 from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
@@ -205,7 +207,16 @@ async def test_abnormal_exit_interrupt_tolerates_codex_moving_past_recorded_turn
 
         with caplog.at_level(logging.INFO, logger=_ADAPTER_LOGGER):
             # Web message 1: the real turn/start records turn_1 in bridge state.
-            await adapter.run_turn(_request("hello"), _ctx("resp_1"))
+            first_turn = asyncio.create_task(adapter.run_turn(_request("hello"), _ctx("resp_1")))
+            async with asyncio.timeout(5):
+                while True:
+                    state = read_bridge_state(tmp_path)
+                    if state is not None and state.active_turn_id == "turn_1":
+                        break
+                    await asyncio.sleep(0.01)
+            assert write_codex_turn_result(tmp_path, "turn_1", "hello response")
+            assert complete_codex_turn_result(tmp_path, "turn_1")
+            await first_turn
             state = read_bridge_state(tmp_path)
             assert state is not None and state.active_turn_id == "turn_1", (
                 f"first web turn must record the started turn; bridge={state!r}"

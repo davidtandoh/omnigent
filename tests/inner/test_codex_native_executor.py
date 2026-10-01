@@ -9,22 +9,38 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
+from opentelemetry import trace as otel_trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 import omnigent.inner.codex_native_executor as codex_native_executor
+from omnigent.harnesses.codex_native import forwarder as codex_forwarder
 from omnigent.harnesses.codex_native.app_server import CodexAppServerResponseError
 from omnigent.harnesses.codex_native.bridge import (
     CodexNativeBridgeState,
+    begin_codex_turn_result,
+    complete_codex_turn_result,
+    prepare_codex_turn_result,
     read_bridge_state,
     read_codex_config_effort,
     read_codex_config_model,
+    read_codex_turn_result,
+    update_active_turn_id,
     write_bridge_startup_error,
     write_bridge_startup_timeout,
     write_bridge_state,
+    write_codex_turn_result,
 )
 from omnigent.inner.codex_native_executor import CodexNativeExecutor
 from omnigent.inner.executor import ExecutorConfig, ExecutorError, TurnComplete
 from omnigent.inner.native_attachments import attachment_cache_dir
+from omnigent.inner.tracing import disable_tracing, enable_tracing, is_tracing_enabled
+from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
+from omnigent.runtime.harnesses._scaffold import TurnContext
+from omnigent.server.schemas import CreateResponseRequest
 
 # A 1x1 transparent PNG, base64-encoded — a real decodable image small
 # enough to embed, used to prove image blocks are materialized to disk
@@ -76,6 +92,7 @@ class _FakeCodexNativeClient:
         self.client_name = client_name
         self.connected = False
         self.closed = False
+        self.turn_id: str | None = None
         type(self).created.append((socket_path, ws_url, client_name))
 
     async def connect(self) -> None:
@@ -93,6 +110,19 @@ class _FakeCodexNativeClient:
         :returns: None.
         """
         self.closed = True
+        turn_id = self.turn_id
+        if turn_id is None:
+            turn_id = next(
+                (
+                    params.get("expectedTurnId")
+                    for method, params in reversed(type(self).requests)
+                    if method == "turn/steer" and isinstance(params.get("expectedTurnId"), str)
+                ),
+                None,
+            )
+        if turn_id is not None and self.socket_path is not None:
+            write_codex_turn_result(self.socket_path.parent, turn_id, "final response")
+            complete_codex_turn_result(self.socket_path.parent, turn_id)
 
     async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """
@@ -106,21 +136,20 @@ class _FakeCodexNativeClient:
         if method == "turn/start":
             turn_id = f"turn_{type(self).next_turn}"
             type(self).next_turn += 1
+            self.turn_id = turn_id
             return {"result": {"turn": {"id": turn_id}}}
         if method == "turn/steer":
+            self.turn_id = "turn_steered"
             return {"result": {"turnId": "turn_steered"}}
         return {"result": {}}
 
     async def iter_events(self) -> Any:
         """
-        Fail if the executor waits on Codex terminal notifications.
+        Fail if the executor subscribes on its injection connection.
 
-        The native executor is only an injection bridge. The
-        separate forwarder owns Codex status and transcript events.
-
-        :returns: Async iterator that raises on first consumption.
+        The native forwarder owns Codex's event subscription.
         """
-        raise AssertionError("native executor must not wait for Codex turn events")
+        raise AssertionError("native executor must not consume Codex events directly")
         yield {}
 
 
@@ -151,17 +180,12 @@ def _collect_turn_events(executor: CodexNativeExecutor, text: str) -> list[Any]:
     return asyncio.run(run())
 
 
-def test_web_started_codex_turn_returns_without_waiting_for_terminal_event(
+def test_web_started_codex_turn_returns_final_assistant_response(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """
-    A web-started Codex turn returns after app-server accepts it.
-
-    The terminal forwarder mirrors Codex completion/status events.
-    Waiting for those events inside the harness turn can leave the
-    runner permanently active after the first web message, so later
-    web messages never reach the local Codex TUI as new dispatches.
+    A web-started Codex turn returns the forwarder's final-answer result.
     """
     _FakeCodexNativeClient.requests = []
     _FakeCodexNativeClient.created = []
@@ -189,6 +213,7 @@ def test_web_started_codex_turn_returns_without_waiting_for_terminal_event(
     state = read_bridge_state(tmp_path)
 
     assert [type(event) for event in events] == [TurnComplete]
+    assert events[0].response == "final response"
     assert state is not None
     assert state.active_turn_id == "turn_1"
     assert _FakeCodexNativeClient.requests == [
@@ -201,6 +226,463 @@ def test_web_started_codex_turn_returns_without_waiting_for_terminal_event(
             },
         )
     ]
+
+
+def test_trailing_final_response_survives_new_active_turn(tmp_path: Path) -> None:
+    """Turn A retains its trailing final answer after turn B starts."""
+    write_bridge_state(
+        tmp_path,
+        CodexNativeBridgeState(
+            session_id="conv_race",
+            socket_path=str(tmp_path / "app-server.sock"),
+            thread_id="thread_race",
+            codex_home=str(tmp_path / "codex-home"),
+            active_turn_id="turn_a",
+            cwd=str(tmp_path),
+        ),
+    )
+
+    assert begin_codex_turn_result(tmp_path, "turn_a")
+    assert complete_codex_turn_result(tmp_path, "turn_a")
+    update_active_turn_id(tmp_path, "turn_b")
+    assert write_codex_turn_result(tmp_path, "turn_a", "TURN_A_FINAL")
+
+    response = asyncio.run(codex_native_executor._await_final_response(tmp_path, "turn_a"))
+
+    assert response == "TURN_A_FINAL"
+
+
+@pytest.mark.asyncio
+async def test_final_first_result_cleanup_tracks_terminal_and_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Final-first results are removed after a terminal edge or bounded fallback."""
+    monkeypatch.setattr(codex_native_executor, "_TURN_COMPLETED_DRAIN_SECONDS", 0.01)
+    write_bridge_state(
+        tmp_path,
+        CodexNativeBridgeState(
+            session_id="conv_lifecycle",
+            socket_path=str(tmp_path / "app-server.sock"),
+            thread_id="thread_lifecycle",
+            codex_home=str(tmp_path / "codex-home"),
+            active_turn_id="turn_terminal",
+            cwd=str(tmp_path),
+        ),
+    )
+
+    assert begin_codex_turn_result(tmp_path, "turn_terminal")
+    assert write_codex_turn_result(tmp_path, "turn_terminal", "TERMINAL_FINAL")
+    terminal_waiter = asyncio.create_task(
+        codex_native_executor._await_final_response(tmp_path, "turn_terminal")
+    )
+    await asyncio.sleep(0)
+    assert not terminal_waiter.done()
+    assert complete_codex_turn_result(tmp_path, "turn_terminal")
+    assert await terminal_waiter == "TERMINAL_FINAL"
+    assert read_codex_turn_result(tmp_path, "turn_terminal") is None
+
+    update_active_turn_id(tmp_path, "turn_fallback")
+    assert begin_codex_turn_result(tmp_path, "turn_fallback")
+    assert write_codex_turn_result(tmp_path, "turn_fallback", "FALLBACK_FINAL")
+    assert (
+        await codex_native_executor._await_final_response(tmp_path, "turn_fallback")
+        == "FALLBACK_FINAL"
+    )
+    assert not complete_codex_turn_result(tmp_path, "turn_fallback")
+    assert read_codex_turn_result(tmp_path, "turn_fallback") is None
+
+
+@pytest.mark.asyncio
+async def test_slow_terminal_handling_preserves_trailing_final_response(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A delayed terminal post cannot expire the following final-answer item."""
+    monkeypatch.setattr(codex_native_executor, "_TURN_COMPLETED_DRAIN_SECONDS", 0.01)
+    monkeypatch.setattr(codex_native_executor, "_BRIDGE_STATE_FAST_POLL_SECONDS", 0.005)
+    write_bridge_state(
+        tmp_path,
+        CodexNativeBridgeState(
+            session_id="conv_slow_terminal",
+            socket_path=str(tmp_path / "app-server.sock"),
+            thread_id="thread_slow_terminal",
+            codex_home=str(tmp_path / "codex-home"),
+            active_turn_id="turn_slow_terminal",
+            cwd=str(tmp_path),
+        ),
+    )
+    assert begin_codex_turn_result(tmp_path, "turn_slow_terminal")
+
+    terminal_post_started = asyncio.Event()
+    release_terminal_post = asyncio.Event()
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        terminal_post_started.set()
+        await release_terminal_post.wait()
+        return httpx.Response(200)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://omnigent.test",
+    ) as forwarder_client:
+        usage_coalescer = codex_forwarder._SessionUsageCoalescer(
+            forwarder_client,
+            "conv_slow_terminal",
+        )
+        elicitation_tracker = codex_forwarder._CodexElicitationTaskTracker()
+        response_waiter = asyncio.create_task(
+            codex_native_executor._await_final_response(tmp_path, "turn_slow_terminal")
+        )
+        terminal_handler = asyncio.create_task(
+            codex_forwarder._handle_event(
+                forwarder_client,
+                session_id="conv_slow_terminal",
+                bridge_dir=tmp_path,
+                event={
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "thread_slow_terminal",
+                        "turnId": "turn_slow_terminal",
+                        "turn": {
+                            "id": "turn_slow_terminal",
+                            "status": "completed",
+                            "items": [],
+                        },
+                    },
+                },
+                usage_coalescer=usage_coalescer,
+                elicitation_tracker=elicitation_tracker,
+                expected_thread_id="thread_slow_terminal",
+            )
+        )
+        await asyncio.wait_for(terminal_post_started.wait(), timeout=1)
+        await asyncio.sleep(0.03)
+        assert not response_waiter.done()
+
+        release_terminal_post.set()
+        await terminal_handler
+        await codex_forwarder._handle_event(
+            forwarder_client,
+            session_id="conv_slow_terminal",
+            bridge_dir=tmp_path,
+            event={
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread_slow_terminal",
+                    "turnId": "turn_slow_terminal",
+                    "item": {
+                        "id": "final_answer",
+                        "type": "agentMessage",
+                        "phase": "final_answer",
+                        "text": "TRAILING_FINAL",
+                    },
+                },
+            },
+            usage_coalescer=usage_coalescer,
+            elicitation_tracker=elicitation_tracker,
+            expected_thread_id="thread_slow_terminal",
+        )
+
+    assert await response_waiter == "TRAILING_FINAL"
+
+
+@pytest.mark.asyncio
+async def test_terminal_before_start_response_does_not_reactivate_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An early terminal edge survives later handling of the start response."""
+    monkeypatch.setattr(codex_native_executor, "_TURN_COMPLETED_DRAIN_SECONDS", 0.01)
+    monkeypatch.setattr(codex_native_executor, "_BRIDGE_STATE_FAST_POLL_SECONDS", 0.005)
+    write_bridge_state(
+        tmp_path,
+        CodexNativeBridgeState(
+            session_id="conv_fast",
+            socket_path=str(tmp_path / "app-server.sock"),
+            thread_id="thread_fast",
+            codex_home=str(tmp_path / "codex-home"),
+            active_turn_id=None,
+            cwd=str(tmp_path),
+        ),
+    )
+    prepare_codex_turn_result(tmp_path)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200)),
+        base_url="http://omnigent.test",
+    ) as forwarder_client:
+        await codex_forwarder._handle_event(
+            forwarder_client,
+            session_id="conv_fast",
+            bridge_dir=tmp_path,
+            event={
+                "method": "turn/started",
+                "params": {
+                    "threadId": "thread_fast",
+                    "turn": {
+                        "id": "turn_fast",
+                        "status": "inProgress",
+                        "items": [],
+                    },
+                },
+            },
+            usage_coalescer=codex_forwarder._SessionUsageCoalescer(forwarder_client, "conv_fast"),
+            elicitation_tracker=codex_forwarder._CodexElicitationTaskTracker(),
+            expected_thread_id="thread_fast",
+        )
+        await codex_forwarder._handle_event(
+            forwarder_client,
+            session_id="conv_fast",
+            bridge_dir=tmp_path,
+            event={
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread_fast",
+                    "turnId": "turn_fast",
+                    "turn": {
+                        "id": "turn_fast",
+                        "status": "completed",
+                        "items": [],
+                    },
+                },
+            },
+            usage_coalescer=codex_forwarder._SessionUsageCoalescer(forwarder_client, "conv_fast"),
+            elicitation_tracker=codex_forwarder._CodexElicitationTaskTracker(),
+            expected_thread_id="thread_fast",
+        )
+
+    assert begin_codex_turn_result(tmp_path, "turn_fast")
+    state = read_bridge_state(tmp_path)
+    assert state is not None
+    assert state.active_turn_id is None
+    assert await codex_native_executor._await_final_response(tmp_path, "turn_fast") is None
+
+
+@pytest.mark.asyncio
+async def test_standalone_error_completes_pending_turn_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A standalone terminal error releases the waiting executor."""
+    monkeypatch.setattr(codex_native_executor, "_TURN_COMPLETED_DRAIN_SECONDS", 0.01)
+    monkeypatch.setattr(codex_native_executor, "_BRIDGE_STATE_FAST_POLL_SECONDS", 0.005)
+    write_bridge_state(
+        tmp_path,
+        CodexNativeBridgeState(
+            session_id="conv_error",
+            socket_path=str(tmp_path / "app-server.sock"),
+            thread_id="thread_error",
+            codex_home=str(tmp_path / "codex-home"),
+            active_turn_id="turn_error",
+            cwd=str(tmp_path),
+        ),
+    )
+    assert begin_codex_turn_result(tmp_path, "turn_error")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200)),
+        base_url="http://omnigent.test",
+    ) as forwarder_client:
+        response_waiter = asyncio.create_task(
+            codex_native_executor._await_final_response(tmp_path, "turn_error")
+        )
+        await codex_forwarder._handle_event(
+            forwarder_client,
+            session_id="conv_error",
+            bridge_dir=tmp_path,
+            event={
+                "method": "error",
+                "params": {
+                    "threadId": "thread_error",
+                    "turnId": "turn_error",
+                    "willRetry": False,
+                    "error": {"message": "model stream failed"},
+                },
+            },
+            usage_coalescer=codex_forwarder._SessionUsageCoalescer(forwarder_client, "conv_error"),
+            elicitation_tracker=codex_forwarder._CodexElicitationTaskTracker(),
+            expected_thread_id="thread_error",
+            forwarder_state=codex_forwarder._CodexForwarderState(),
+        )
+
+    assert await response_waiter is None
+    assert read_codex_turn_result(tmp_path, "turn_error") is None
+
+
+@pytest.mark.asyncio
+async def test_resume_completes_non_latest_terminal_turn_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Resume releases terminal turn A when a later turn B remains active."""
+    monkeypatch.setattr(codex_native_executor, "_TURN_COMPLETED_DRAIN_SECONDS", 0.01)
+    monkeypatch.setattr(codex_native_executor, "_BRIDGE_STATE_FAST_POLL_SECONDS", 0.005)
+    write_bridge_state(
+        tmp_path,
+        CodexNativeBridgeState(
+            session_id="conv_resume_error",
+            socket_path=str(tmp_path / "app-server.sock"),
+            thread_id="thread_resume_error",
+            codex_home=str(tmp_path / "codex-home"),
+            active_turn_id="turn_resume_error",
+            cwd=str(tmp_path),
+        ),
+    )
+    assert begin_codex_turn_result(tmp_path, "turn_resume_error")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200)),
+        base_url="http://omnigent.test",
+    ) as forwarder_client:
+        response_waiter = asyncio.create_task(
+            codex_native_executor._await_final_response(tmp_path, "turn_resume_error")
+        )
+        await codex_forwarder._replay_resume_response(
+            forwarder_client,
+            session_id="conv_resume_error",
+            bridge_dir=tmp_path,
+            turn_result_bridge_dir=tmp_path,
+            response={
+                "result": {
+                    "thread": {
+                        "id": "thread_resume_error",
+                        "turns": [
+                            {
+                                "id": "turn_resume_error",
+                                "status": "failed",
+                                "error": {"message": "resume recovered failure"},
+                                "items": [],
+                            },
+                            {
+                                "id": "turn_later",
+                                "status": "inProgress",
+                                "items": [],
+                            },
+                        ],
+                    }
+                }
+            },
+            usage_coalescer=codex_forwarder._SessionUsageCoalescer(
+                forwarder_client, "conv_resume_error"
+            ),
+            elicitation_tracker=codex_forwarder._CodexElicitationTaskTracker(),
+            forwarder_state=codex_forwarder._CodexForwarderState(),
+            replay_from_turn_id="turn_resume_error",
+        )
+
+    assert await response_waiter is None
+    assert read_codex_turn_result(tmp_path, "turn_resume_error") is None
+
+
+@pytest.mark.asyncio
+async def test_native_final_answer_reaches_agent_span_not_commentary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The Codex final-answer item becomes the agent span output value."""
+
+    class _PhasedCodexClient(_FakeCodexNativeClient):
+        async def close(self) -> None:
+            assert self.turn_id is not None
+            assert self.socket_path is not None
+            transport = httpx.MockTransport(lambda _request: httpx.Response(200))
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://omnigent.test",
+            ) as forwarder_client:
+                usage_coalescer = codex_forwarder._SessionUsageCoalescer(
+                    forwarder_client,
+                    "conv_trace",
+                )
+                elicitation_tracker = codex_forwarder._CodexElicitationTaskTracker()
+                for phase, text in (
+                    ("commentary", "COMMENTARY_MUST_NOT_REACH_SPAN"),
+                    (None, "CODEX_FINAL_SPAN_SENTINEL"),
+                ):
+                    item = {
+                        "id": phase or "legacy_final",
+                        "type": "agentMessage",
+                        "text": text,
+                    }
+                    if phase is not None:
+                        item["phase"] = phase
+                    await codex_forwarder._handle_event(
+                        forwarder_client,
+                        session_id="conv_trace",
+                        bridge_dir=self.socket_path.parent,
+                        event={
+                            "method": "item/completed",
+                            "params": {
+                                "turnId": self.turn_id,
+                                "item": item,
+                            },
+                        },
+                        usage_coalescer=usage_coalescer,
+                        elicitation_tracker=elicitation_tracker,
+                    )
+            complete_codex_turn_result(self.socket_path.parent, self.turn_id)
+            self.closed = True
+
+    _PhasedCodexClient.requests = []
+    _PhasedCodexClient.created = []
+    _PhasedCodexClient.next_turn = 1
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.app_server.CodexAppServerClient",
+        _PhasedCodexClient,
+    )
+    monkeypatch.setattr("omnigent.runtime.telemetry._capture_content", True)
+    write_bridge_state(
+        tmp_path,
+        CodexNativeBridgeState(
+            session_id="conv_trace",
+            socket_path=str(tmp_path / "app-server.sock"),
+            thread_id="thread_trace",
+            codex_home=str(tmp_path / "codex-home"),
+            active_turn_id=None,
+            cwd=str(tmp_path),
+        ),
+    )
+
+    previous_provider = otel_trace._TRACER_PROVIDER  # type: ignore[attr-defined]
+    previous_done = otel_trace._TRACER_PROVIDER_SET_ONCE._done  # type: ignore[attr-defined]
+    tracing_was_enabled = is_tracing_enabled()
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    otel_trace._TRACER_PROVIDER = provider  # type: ignore[attr-defined]
+    otel_trace._TRACER_PROVIDER_SET_ONCE._done = True  # type: ignore[attr-defined]
+    enable_tracing()
+    try:
+        adapter = ExecutorAdapter(
+            executor_factory=lambda: CodexNativeExecutor(bridge_dir=tmp_path),
+            session_key="conv_trace",
+            harness_label="Codex",
+        )
+        ctx = TurnContext(
+            response_id="resp_0123456789abcdef0123456789abcdef",
+            event_queue=asyncio.Queue(),
+            cancelled=asyncio.Event(),
+            session_id="conv_trace",
+        )
+        await adapter.run_turn(
+            CreateResponseRequest(model="codex", input="Return the sentinel"),
+            ctx,
+        )
+
+        agent_spans = [
+            span for span in exporter.get_finished_spans() if span.name.startswith("agent:")
+        ]
+        assert len(agent_spans) == 1
+        attributes = dict(agent_spans[0].attributes or {})
+        assert attributes["output.value"] == "CODEX_FINAL_SPAN_SENTINEL"
+        assert "COMMENTARY_MUST_NOT_REACH_SPAN" not in attributes.values()
+    finally:
+        provider.shutdown()
+        otel_trace._TRACER_PROVIDER = previous_provider  # type: ignore[attr-defined]
+        otel_trace._TRACER_PROVIDER_SET_ONCE._done = previous_done  # type: ignore[attr-defined]
+        if not tracing_was_enabled:
+            disable_tracing()
 
 
 def test_goal_command_sets_goal_before_starting_objective_turn(
@@ -1142,14 +1624,17 @@ async def test_concurrent_steering_during_turn_start_is_not_dropped(
         ) -> None:
             """Accept the real client's call shapes; state lives in closure."""
             del socket_path, ws_url, client_name
+            self.turn_id: str | None = None
 
         async def connect(self) -> None:
             """No-op connect."""
             return
 
         async def close(self) -> None:
-            """No-op close."""
-            return
+            """Publish the terminal result that the real forwarder owns."""
+            if self.turn_id is not None:
+                write_codex_turn_result(tmp_path, self.turn_id, "final response")
+                complete_codex_turn_result(tmp_path, self.turn_id)
 
         async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
             """Record the request; block inside ``turn/start`` until released."""
@@ -1157,8 +1642,10 @@ async def test_concurrent_steering_during_turn_start_is_not_dropped(
             if method == "turn/start":
                 start_entered.set()
                 await release.wait()
+                self.turn_id = "turn_1"
                 return {"result": {"turn": {"id": "turn_1"}}}
             if method == "turn/steer":
+                self.turn_id = "turn_steered"
                 return {"result": {"turnId": "turn_steered"}}
             return {"result": {}}
 
