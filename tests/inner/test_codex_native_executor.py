@@ -1624,14 +1624,17 @@ async def test_concurrent_steering_during_turn_start_is_not_dropped(
         ) -> None:
             """Accept the real client's call shapes; state lives in closure."""
             del socket_path, ws_url, client_name
+            self.turn_id: str | None = None
 
         async def connect(self) -> None:
             """No-op connect."""
             return
 
         async def close(self) -> None:
-            """No-op close."""
-            return
+            """Publish the terminal result that the real forwarder owns."""
+            if self.turn_id is not None:
+                write_codex_turn_result(tmp_path, self.turn_id, "final response")
+                complete_codex_turn_result(tmp_path, self.turn_id)
 
         async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
             """Record the request; block inside ``turn/start`` until released."""
@@ -1639,8 +1642,10 @@ async def test_concurrent_steering_during_turn_start_is_not_dropped(
             if method == "turn/start":
                 start_entered.set()
                 await release.wait()
+                self.turn_id = "turn_1"
                 return {"result": {"turn": {"id": "turn_1"}}}
             if method == "turn/steer":
+                self.turn_id = "turn_steered"
                 return {"result": {"turnId": "turn_steered"}}
             return {"result": {}}
 
