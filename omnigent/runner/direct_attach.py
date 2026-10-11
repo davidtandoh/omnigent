@@ -46,6 +46,7 @@ from fastapi import FastAPI, Query, WebSocket
 from starlette import status
 
 from omnigent.debug_logging import runner_primary_session_id
+from omnigent.server.ws_origin import origin_from_scope
 
 _logger = logging.getLogger(__name__)
 
@@ -132,7 +133,10 @@ def _handshake_authorized(
         token_ok = False
     if not token_ok:
         return False
-    origin = websocket.headers.get("origin")
+    try:
+        origin = origin_from_scope(websocket.scope)
+    except ValueError:
+        return False
     if origin is None:
         # Non-browser client (no Origin header); the token is the gate.
         return True

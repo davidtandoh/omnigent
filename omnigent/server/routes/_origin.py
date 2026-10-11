@@ -29,7 +29,7 @@ WebSocket share exactly one trust boundary:
   unless an explicit allowlist is configured.
 
 Like the content-type guard, this is a FastAPI dependency (attached via
-``dependencies=[Depends(...)]``) that inspects only :attr:`Request.headers`
+``dependencies=[Depends(...)]``) that inspects only the request's scope headers
 and never reads the body, so the handler's own multipart / JSON parsing is
 unaffected.
 """
@@ -39,7 +39,7 @@ from __future__ import annotations
 from fastapi import HTTPException, Request
 
 from omnigent.server.auth import local_single_user_enabled
-from omnigent.server.ws_origin import origin_allowed, parse_allowed_origins
+from omnigent.server.ws_origin import origin_allowed, origin_from_scope, parse_allowed_origins
 
 
 def require_trusted_origin(request: Request) -> None:
@@ -66,7 +66,10 @@ def require_trusted_origin(request: Request) -> None:
     :raises HTTPException: ``403`` when the ``Origin`` header is present but
         not trusted for the current auth mode.
     """
-    origin = request.headers.get("origin")
+    try:
+        origin = origin_from_scope(request.scope)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail="Forbidden: multiple Origin headers") from exc
     # TEMPORARY fail-open on a missing Origin: ``origin_allowed`` permits
     # ``None`` so an absent header passes. This is a backward-compat measure
     # for clients not yet sending an Origin and is intended to be closed

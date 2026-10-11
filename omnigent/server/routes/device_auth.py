@@ -71,6 +71,7 @@ from omnigent.server.routes._oauth import (
 )
 from omnigent.server.routes._oauth import oauth_error as _oauth_error
 from omnigent.server.routes._origin import require_trusted_origin
+from omnigent.server.ws_origin import origin_from_scope
 
 _logger = logging.getLogger(__name__)
 
@@ -271,9 +272,9 @@ def _require_browser_origin(request: Request) -> None:
 
     :raises HTTPException: 403 when ``Origin`` is absent or untrusted.
     """
-    if not request.headers.get("origin"):
-        raise HTTPException(status_code=403, detail="missing Origin")
     require_trusted_origin(request)
+    if not origin_from_scope(request.scope):
+        raise HTTPException(status_code=403, detail="missing Origin")
 
 
 # ── Abuse controls for the public authorize endpoint ─────────────────

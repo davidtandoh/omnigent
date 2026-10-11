@@ -14,16 +14,25 @@ Three layers, each catching a distinct breakage:
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import socket
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 from starlette.websockets import WebSocketDisconnect
+from uvicorn import Config
+from uvicorn.server import ServerState
 
 from omnigent.process_logging import _log_once_seen
+from omnigent.runner.direct_attach import _handshake_authorized
 from omnigent.runner.identity import OMNIGENT_INTERNAL_WS_ORIGIN
+from omnigent.server.routes._origin import require_trusted_origin
+from omnigent.server.routes.device_auth import _require_browser_origin
 from omnigent.server.ws_origin import (
     FORBIDDEN_ORIGIN_CLOSE_CODE,
     WebSocketOriginMiddleware,
@@ -634,6 +643,151 @@ async def test_middleware_admits_loopback_origin(monkeypatch: pytest.MonkeyPatch
 
     assert downstream.called is True  # admitted → route handled the handshake
     assert sent == [{"type": "websocket.accept"}]
+
+
+@pytest.mark.parametrize("header_name", [b"origin", b"Origin", b"oRiGiN"])
+@pytest.mark.parametrize(
+    "origin,allowed",
+    [
+        ("https://omnigent.example.com", True),
+        ("https://unrelated.invalid", False),
+        ("https://omnigent.example.com.evil.invalid", False),
+        ("http://omnigent.example.com", False),
+        ("https://omnigent.example.com:8443", False),
+        ("null", False),
+        ("http://localhost:5173", True),
+    ],
+)
+async def test_origin_guards_ignore_header_name_case(
+    monkeypatch: pytest.MonkeyPatch, header_name: bytes, origin: str, allowed: bool
+) -> None:
+    """All Origin guards agree even when a transport preserves header casing."""
+    monkeypatch.setenv(_LOCAL_ENV, "1")
+    named_origin = "https://omnigent.example.com"
+    monkeypatch.setenv(_ALLOWLIST_ENV, named_origin)
+    headers = [(header_name, origin.encode("latin-1"))]
+    await _assert_origin_guards(headers, named_origin, allowed)
+
+
+@pytest.mark.parametrize("local_mode", ["0", "1"])
+@pytest.mark.parametrize(
+    "origins",
+    [
+        ("http://localhost", "https://unrelated.invalid"),
+        ("https://unrelated.invalid", "http://localhost"),
+        ("http://localhost", "http://localhost"),
+    ],
+)
+async def test_origin_guards_reject_duplicate_headers(
+    monkeypatch: pytest.MonkeyPatch, local_mode: str, origins: tuple[str, str]
+) -> None:
+    """Repeated Origin fields cannot select an allowed first or last value."""
+    monkeypatch.setenv(_LOCAL_ENV, local_mode)
+    headers = [
+        (name, value.encode("latin-1"))
+        for name, value in zip((b"origin", b"Origin"), origins, strict=True)
+    ]
+    await _assert_origin_guards(headers, "http://localhost", False)
+
+
+async def _assert_origin_guards(
+    headers: list[tuple[bytes, bytes]], named_origin: str, allowed: bool
+) -> None:
+    """Check admission at each guard without normalizing the raw scope headers."""
+    downstream = _RecordingASGIApp()
+    scope = {"type": "websocket", "headers": headers, "query_string": b"token=test-token"}
+    sent = await _drive_middleware(WebSocketOriginMiddleware(downstream), scope)
+    assert downstream.called is allowed
+    if allowed:
+        assert sent == [{"type": "websocket.accept"}]
+    else:
+        assert sent == [
+            {
+                "type": "websocket.close",
+                "code": FORBIDDEN_ORIGIN_CLOSE_CODE,
+                "reason": "forbidden origin",
+            }
+        ]
+
+    request = Request({"type": "http", "method": "POST", "headers": headers})
+    for guard in (require_trusted_origin, _require_browser_origin):
+        if allowed:
+            assert guard(request) is None
+        else:
+            with pytest.raises(HTTPException) as exc_info:
+                guard(request)
+            assert exc_info.value.status_code == 403
+
+    assert (
+        _handshake_authorized(
+            WebSocket(scope, AsyncMock(), AsyncMock()),
+            token="test-token",
+            allowed_origins=frozenset({named_origin}),
+        )
+        is allowed
+    )
+
+
+@pytest.mark.parametrize("header_name", ["origin", "Origin", "oRiGiN"])
+@pytest.mark.parametrize("allowed", [False, True])
+async def test_wire_upgrade_origin_casing(
+    monkeypatch: pytest.MonkeyPatch, header_name: str, allowed: bool
+) -> None:
+    """Real Upgrade bytes retain the same admission verdict through Uvicorn."""
+    monkeypatch.setenv(_LOCAL_ENV, "1")
+    named_origin = "https://omnigent.example.com"
+    monkeypatch.setenv(_ALLOWLIST_ENV, named_origin)
+    origin = named_origin if allowed else "https://unrelated.invalid"
+    downstream = _RecordingASGIApp()
+    config = Config(
+        WebSocketOriginMiddleware(downstream),
+        lifespan="off",
+        access_log=False,
+        log_config=None,
+        proxy_headers=False,
+        ws_ping_interval=None,
+        ws_per_message_deflate=False,
+    )
+    config.load()
+    state = ServerState()
+    loop = asyncio.get_running_loop()
+    # A connected socket pair exercises the protocol without a listening server.
+    client, server = socket.socketpair()
+    client.setblocking(False)
+    server.setblocking(False)
+    transport = None
+    try:
+        transport, _ = await loop.create_connection(
+            lambda: config.ws_protocol_class(config, state, {}), sock=server
+        )
+        request = (
+            "GET /ws HTTP/1.1\r\n"
+            "Host: omnigent.example.com\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+            "Sec-WebSocket-Version: 13\r\n"
+            f"{header_name}: {origin}\r\n\r\n"
+        )
+        await asyncio.wait_for(loop.sock_sendall(client, request.encode("ascii")), timeout=3)
+        response = b""
+        async with asyncio.timeout(3):
+            while b"\r\n\r\n" not in response:
+                chunk = await loop.sock_recv(client, 4096)
+                assert chunk, "connection closed before handshake response"
+                response += chunk
+                assert len(response) <= 8192, "handshake response exceeded header bound"
+        assert int(response.split(b" ", 2)[1]) == (101 if allowed else 403)
+        assert downstream.called is allowed
+    finally:
+        client.close()
+        if transport is not None:
+            transport.close()
+        else:
+            server.close()
+        await asyncio.sleep(0)
+        if state.tasks:
+            await asyncio.wait_for(asyncio.gather(*tuple(state.tasks)), timeout=3)
 
 
 async def test_middleware_ignores_non_websocket_scope() -> None:
