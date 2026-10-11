@@ -568,7 +568,9 @@ def test_fixed_local_port_waits_for_pending_daemon(
     with (
         patch.object(cli, "_terminate_host_unit") as terminate,
         patch.object(
-            cli, "local_server_url_if_healthy", side_effect=[None, f"http://127.0.0.1:{ready_port}"]
+            cli,
+            "local_server_url_if_healthy",
+            side_effect=[None, f"http://127.0.0.1:{ready_port}"],
         ) as health,
     ):
         if ready_port == 18767:

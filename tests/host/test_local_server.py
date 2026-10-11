@@ -1829,7 +1829,9 @@ def test_fixed_local_port_bind_race_fails_without_fallback(
             side_effect=FileNotFoundError("lsof") if ownership == "missing" else None,
         ),
         patch.object(local_server, "_assert_server_port_bindable"),
-        patch.object(httpx, "get", return_value=httpx.Response(200, json={"status": "ok"})) as health,
+        patch.object(
+            httpx, "get", return_value=httpx.Response(200, json={"status": "ok"})
+        ) as health,
         patch.object(local_server, "_terminate_pid") as terminate,
         patch.object(local_server, "_find_free_local_port") as fallback,
         patch.object(local_server, "_write_local_server_record") as publish,
