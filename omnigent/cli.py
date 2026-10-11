@@ -81,6 +81,7 @@ from omnigent.host.daemon_lifecycle import write_daemon_record as _write_daemon_
 from omnigent.host.local_server import (
     _DEFAULT_LOCAL_PORT,
     LocalServerStartupError,
+    _assert_server_port_bindable,
     _pid_alive,
     consume_failed_server_log_tail,
     ensure_local_omnigent_server,
@@ -4116,35 +4117,6 @@ def _adopt_cli_runner_process(proc: subprocess.Popen[bytes]) -> None:
     if proc.poll() is None:
         with contextlib.suppress(ProcessLookupError):
             proc.send_signal(RUNNER_ADOPT_SIGNAL)
-
-
-def _assert_server_port_bindable(host: str, port: int) -> None:
-    """
-    Fail before app startup when the requested TCP listener cannot bind.
-
-    Mirrors uvicorn's TCP bind shape closely enough for CLI preflight:
-    IPv6 is selected when the host contains ``":"``, and
-    ``SO_REUSEADDR`` is set before bind. This is intentionally a bind
-    probe, not a connect probe, so a failed client connection to the
-    port does not make us report the port as occupied.
-
-    :param host: Interface to bind, e.g. ``"127.0.0.1"``.
-    :param port: TCP port to bind, e.g. ``6767``.
-    :returns: None.
-    :raises click.ClickException: If the host/port cannot be bound.
-    """
-    import socket
-
-    family = socket.AF_INET6 if ":" in host else socket.AF_INET
-    with socket.socket(family=family, type=socket.SOCK_STREAM) as probe:
-        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            probe.bind((host, port))
-        except OSError as exc:
-            reason = exc.strerror or str(exc)
-            raise click.ClickException(
-                f"Cannot start server on {host}:{port}: port is unavailable ({reason})."
-            ) from exc
 
 
 @cli.group("server", invoke_without_command=True)

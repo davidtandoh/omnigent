@@ -63,6 +63,7 @@ _ENV_TO_CLEAR = (
     "CLAUDE_CODE",
     "CODEX",
     "OMNIGENT_DATA_DIR",
+    "OMNIGENT_LOCAL_SERVER_PORT",
     "OMNIGENT_CONFIG_HOME",
     "OMNIGENT_AUTH_ENABLED",
     # An ambient issuer would select oidc once auth is (accidentally) enabled.
@@ -556,3 +557,20 @@ def test_explicit_port_servers_run_side_by_side(
     assert not _pidfile_path(home).exists(), (
         "an explicit-port server wrote the canonical pidfile — it must stay dedicated"
     )
+
+
+def test_local_server_uses_fixed_environment_port(procs: _Procs, tmp_path: Path) -> None:
+    """The local-server owner binds and publishes the configured backend port."""
+    home = tmp_path / "home"
+    home.mkdir()
+    env = _isolated_env(home)
+    port = _find_free_port()
+    env["OMNIGENT_LOCAL_SERVER_PORT"] = str(port)
+    procs.track_pidfile(_pidfile_path(home))
+    procs.track_server_home(home)
+    log = tmp_path / "host.log"
+    host = procs.spawn(["host"], env=env, cwd=home, log=log)
+    pid, actual_port = _wait_for_pidfile_server(home, host, log)
+    assert actual_port == port
+    assert _pid_alive(pid)
+    assert _health_ok(port)

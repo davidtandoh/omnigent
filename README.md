@@ -398,6 +398,22 @@ Open the server URL it prints, hit **New Chat**, pick your machine, and go.
 Check status with `omnigent server status`; stop everything with
 `omnigent stop`.
 
+To keep the daemon-owned local backend on a fixed loopback port, set
+`OMNIGENT_LOCAL_SERVER_PORT` in the environment that launches `omnigent start`:
+
+```bash
+OMNIGENT_LOCAL_SERVER_PORT=18767 omnigent start
+```
+
+The value must be an integer from 1 through 65535. An empty, malformed, or
+out-of-range value fails startup. If the port is unavailable, startup fails
+instead of selecting another port. Without this variable, the local server
+prefers port 6767 and falls back to an available port as before. This setting
+also applies to other commands that start the daemon-owned local server;
+`omnigent server --port` remains the explicit foreground-server setting.
+For a managed service, persist the variable in its service environment and
+restart the service so the daemon receives it after every login or restart.
+
 To suppress the automatic browser tab, use `omni host --no-open` or set
 `OMNIGENT_HOST_NO_OPEN=1` in your shell. Both also apply to `omni host
 --background` and `omni start`. Sign-in may still open a browser; use

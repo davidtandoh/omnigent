@@ -605,13 +605,23 @@ def ensure_local_omnigent_server() -> LocalServerStartup:
         server is ours.
     :raises click.ClickException: If the server does not become healthy
         within the startup timeout, or if port contention persists after
-        a free-port respawn.
+        a free-port respawn, or if an explicitly configured port is invalid
+        or unavailable.
     """
+    raw_port = os.environ.get("OMNIGENT_LOCAL_SERVER_PORT")
+    fixed_port = None
+    if raw_port is not None:
+        try:
+            fixed_port = click.IntRange(1, 65535).convert(raw_port, None, None)
+        except click.BadParameter as exc:
+            raise click.ClickException(f"Invalid OMNIGENT_LOCAL_SERVER_PORT: {exc}") from exc
     desired_sig = server_config_signature()
     desired_base_path = _resolve_effective_base_path()
     reused = local_server_url_if_healthy()
     if reused is not None:
-        if _read_local_server_sig() == desired_sig:
+        if _read_local_server_sig() == desired_sig and (
+            fixed_port is None or reused == f"http://127.0.0.1:{fixed_port}"
+        ):
             return LocalServerStartup(
                 url=reused, spawned=False, log_path=_read_local_server_log_path()
             )
@@ -624,8 +634,10 @@ def ensure_local_omnigent_server() -> LocalServerStartup:
     # Prefer the stable :6767 so the daemon-spawned server lands on the
     # same URL as a manual `omnigent server` (and reuse via the pidfile
     # keeps them from ever both running); fall back to a free port if
-    # taken.
-    port = pick_local_port()
+    # taken unless the operator requires an exact port.
+    if fixed_port is not None:
+        _assert_server_port_bindable("127.0.0.1", fixed_port)
+    port = fixed_port if fixed_port is not None else pick_local_port()
     retried = False
     while True:
         spawned = _spawn_local_server(port, desired_base_path)
@@ -665,6 +677,12 @@ def ensure_local_omnigent_server() -> LocalServerStartup:
         # natural EADDRINUSE exit, then respawn once on an OS-assigned
         # free port, which concurrent spawners never prefer.
         _await_doomed_child_exit(spawned.proc)
+        if fixed_port is not None:
+            _record_server_startup_failure(spawned.log_path)
+            raise LocalServerStartupError(
+                f"OMNIGENT_LOCAL_SERVER_PORT={port} is unavailable: "
+                f"owned by pid {foreign_owner}. Server log: {spawned.log_path}"
+            )
         if retried:
             _record_server_startup_failure(spawned.log_path)
             raise LocalServerStartupError(
@@ -867,6 +885,35 @@ def _find_free_local_port() -> int:
 _DEFAULT_LOCAL_PORT = 6767
 
 
+def _assert_server_port_bindable(host: str, port: int) -> None:
+    """
+    Fail before app startup when the requested TCP listener cannot bind.
+
+    Mirrors uvicorn's TCP bind shape closely enough for CLI preflight:
+    IPv6 is selected when the host contains ``":"``, and
+    ``SO_REUSEADDR`` is set before bind. This is intentionally a bind
+    probe, not a connect probe, so a failed client connection to the
+    port does not make us report the port as occupied.
+
+    :param host: Interface to bind, e.g. ``"127.0.0.1"``.
+    :param port: TCP port to bind, e.g. ``6767``.
+    :returns: None.
+    :raises click.ClickException: If the host/port cannot be bound.
+    """
+    import socket
+
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    with socket.socket(family=family, type=socket.SOCK_STREAM) as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind((host, port))
+        except OSError as exc:
+            reason = exc.strerror or str(exc)
+            raise click.ClickException(
+                f"Cannot start server on {host}:{port}: port is unavailable ({reason})."
+            ) from exc
+
+
 def pick_local_port(preferred: int = _DEFAULT_LOCAL_PORT) -> int:
     """Return ``preferred`` if it's bindable on loopback, else a free port.
 
@@ -881,19 +928,11 @@ def pick_local_port(preferred: int = _DEFAULT_LOCAL_PORT) -> int:
     :param preferred: The port to try first, e.g. ``6767``.
     :returns: ``preferred`` if free, otherwise an OS-assigned free port.
     """
-    import socket
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        # SO_REUSEADDR mirrors what uvicorn sets when it binds.  Without
-        # it, a fast server restart sees EADDRINUSE on macOS/BSD because
-        # recently closed connections are still in TIME_WAIT even though
-        # the listening socket is gone and uvicorn could successfully bind.
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            s.bind(("127.0.0.1", preferred))
-        except OSError:
-            return _find_free_local_port()
-        return preferred
+    try:
+        _assert_server_port_bindable("127.0.0.1", preferred)
+    except click.ClickException:
+        return _find_free_local_port()
+    return preferred
 
 
 def _pid_listening_on_port(port: int) -> int | None:
