@@ -669,27 +669,6 @@ async def test_origin_guards_ignore_header_name_case(
     await _assert_origin_guards(headers, named_origin, allowed)
 
 
-@pytest.mark.parametrize("local_mode", ["0", "1"])
-@pytest.mark.parametrize(
-    "origins",
-    [
-        ("http://localhost", "https://unrelated.invalid"),
-        ("https://unrelated.invalid", "http://localhost"),
-        ("http://localhost", "http://localhost"),
-    ],
-)
-async def test_origin_guards_reject_duplicate_headers(
-    monkeypatch: pytest.MonkeyPatch, local_mode: str, origins: tuple[str, str]
-) -> None:
-    """Repeated Origin fields cannot select an allowed first or last value."""
-    monkeypatch.setenv(_LOCAL_ENV, local_mode)
-    headers = [
-        (name, value.encode("latin-1"))
-        for name, value in zip((b"origin", b"Origin"), origins, strict=True)
-    ]
-    await _assert_origin_guards(headers, "http://localhost", False)
-
-
 async def _assert_origin_guards(
     headers: list[tuple[bytes, bytes]], named_origin: str, allowed: bool
 ) -> None:

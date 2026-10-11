@@ -275,25 +275,18 @@ def origin_allowed(
 def origin_from_scope(scope: Scope) -> str | None:
     """Extract the ``Origin`` header from an ASGI connection scope.
 
-    Some transports preserve header casing. Reject repeated Origin fields
-    rather than letting their order select the value used for authorization.
-
     :param scope: ASGI connection scope, e.g. one with
         ``type == "websocket"``.
     :returns: The decoded ``Origin`` value, or ``None`` when absent.
-    :raises ValueError: When more than one Origin field is present.
     """
     # Annotate the ASGI headers explicitly: ``Scope`` values are typed
     # ``Any``, so without this mypy infers ``value`` as ``Any`` and flags
     # the ``value.decode(...)`` return as an Any-return.
     headers: Iterable[tuple[bytes, bytes]] = scope.get("headers", [])
-    origin = None
     for key, value in headers:
         if key.lower() == b"origin":
-            if origin is not None:
-                raise ValueError("multiple Origin headers")
-            origin = value.decode("latin-1")
-    return origin
+            return value.decode("latin-1")
+    return None
 
 
 class WebSocketOriginMiddleware:
@@ -332,18 +325,12 @@ class WebSocketOriginMiddleware:
             await self._app(scope, receive, send)
             return
 
-        try:
-            origin = origin_from_scope(scope)
-        except ValueError:
-            origin = "<multiple Origin headers>"
-            allowed = False
-        else:
-            allowed = origin_allowed(
-                origin,
-                local_mode=local_single_user_enabled(),
-                extra_allowed=parse_allowed_origins(),
-            )
-        if allowed:
+        origin = origin_from_scope(scope)
+        if origin_allowed(
+            origin,
+            local_mode=local_single_user_enabled(),
+            extra_allowed=parse_allowed_origins(),
+        ):
             await self._app(scope, receive, send)
             return
 

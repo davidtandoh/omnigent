@@ -272,9 +272,9 @@ def _require_browser_origin(request: Request) -> None:
 
     :raises HTTPException: 403 when ``Origin`` is absent or untrusted.
     """
-    require_trusted_origin(request)
     if not origin_from_scope(request.scope):
         raise HTTPException(status_code=403, detail="missing Origin")
+    require_trusted_origin(request)
 
 
 # ── Abuse controls for the public authorize endpoint ─────────────────

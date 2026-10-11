@@ -133,10 +133,7 @@ def _handshake_authorized(
         token_ok = False
     if not token_ok:
         return False
-    try:
-        origin = origin_from_scope(websocket.scope)
-    except ValueError:
-        return False
+    origin = origin_from_scope(websocket.scope)
     if origin is None:
         # Non-browser client (no Origin header); the token is the gate.
         return True

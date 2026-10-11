@@ -66,10 +66,7 @@ def require_trusted_origin(request: Request) -> None:
     :raises HTTPException: ``403`` when the ``Origin`` header is present but
         not trusted for the current auth mode.
     """
-    try:
-        origin = origin_from_scope(request.scope)
-    except ValueError as exc:
-        raise HTTPException(status_code=403, detail="Forbidden: multiple Origin headers") from exc
+    origin = origin_from_scope(request.scope)
     # TEMPORARY fail-open on a missing Origin: ``origin_allowed`` permits
     # ``None`` so an absent header passes. This is a backward-compat measure
     # for clients not yet sending an Origin and is intended to be closed
