@@ -3899,8 +3899,9 @@ def _discover_local_server_url(
 
     :param timeout: Max seconds to wait, e.g. ``60.0``.
     :returns: The loopback server URL, e.g. ``"http://127.0.0.1:8123"``.
-    :raises LocalServerStartupError: If the daemon exits first, or the server
-        does not come up within the timeout.
+    :raises LocalServerStartupError: If the daemon exits first, the server
+        does not come up within the timeout, or its URL does not match the
+        requested fixed port.
     """
     import time
 

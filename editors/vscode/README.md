@@ -1,8 +1,9 @@
 # Omnigent for VS Code
 
 A minimal VS Code extension that opens your **running local Omnigent server** inside
-the editor — an editor-beside pane that iframes the same UI you see at
-`http://127.0.0.1:6767`. It is a thin client of the local server's existing HTTP API
+the editor — an editor-beside pane that iframes the same UI you see at the
+[local server URL](../../README.md#fixed-local-backend-port). It is a thin client
+of the local server's existing HTTP API
 (`server/API.md`); there is nothing new to run on the server side.
 
 This is the first, deliberately small donation (tracking

@@ -597,8 +597,9 @@ class LocalServerStartup:
 def ensure_local_omnigent_server() -> LocalServerStartup:
     """Ensure a persistent background local Omnigent server is running.
 
-    Reuses a healthy server recorded in the pidfile; otherwise spawns a
-    detached ``omnigent server`` on a free loopback port, backed by the
+    Reuses a healthy recorded server when its config signature and any
+    requested fixed port match; otherwise replaces it with a detached
+    ``omnigent server`` on loopback, backed by the
     persistent ``~/.omnigent`` data store so conversations survive across
     invocations (designs/RUN_OMNIGENT_SESSION_RESUMPTION.md). The server runs
     accounts mode (the default) so the daemon and CLI
@@ -616,7 +617,7 @@ def ensure_local_omnigent_server() -> LocalServerStartup:
     :raises click.ClickException: If the server does not become healthy
         within the startup timeout, or if port contention persists after
         a free-port respawn, or if an explicitly configured port is invalid
-        or unavailable.
+        or unavailable, or fixed-port listener ownership cannot be confirmed.
     """
     fixed_port = configured_local_server_port()
     desired_sig = server_config_signature()
@@ -629,10 +630,8 @@ def ensure_local_omnigent_server() -> LocalServerStartup:
             return LocalServerStartup(
                 url=reused, spawned=False, log_path=_read_local_server_log_path()
             )
-        # Config drift: the running server was spawned under a different
-        # auth source and cannot be reconfigured in place (auth
-        # mode, cookie secret, etc. are baked at boot). Stop it and spawn
-        # a fresh one below so the invocation's intent takes effect.
+        # Server configuration and the listener are fixed at boot.
+        # Replace the server when either differs from this invocation.
         stop_local_omnigent_server()
 
     # Prefer the stable :6767 so the daemon-spawned server lands on the
@@ -662,12 +661,9 @@ def ensure_local_omnigent_server() -> LocalServerStartup:
         if owner is None or owner == spawned.proc.pid:
             if startup_error is not None:
                 raise startup_error
-            # Advertise the server ONLY now that it is healthy AND provably
-            # ours. Writing the record any earlier publishes a port we may
-            # abandon: concurrent discoverers (the CLI's daemon-wait loop
-            # polls local_server_url_if_healthy every 0.2s) would adopt the
-            # contended port while a foreign server answers its /health,
-            # then lose it when that server's owner stops it.
+            # Publish only after health and ownership checks to avoid adoption
+            # of a contended port. Unknown ownership is allowed only when no
+            # fixed port was requested.
             _write_local_server_record(
                 spawned.proc.pid,
                 port,
@@ -926,10 +922,9 @@ def pick_local_port(preferred: int = _DEFAULT_LOCAL_PORT) -> int:
 def _pid_listening_on_port(port: int) -> int | None:
     """Return the PID listening on loopback *port*, via ``lsof``.
 
-    Used to find an untracked local server (one whose pidfile was lost) so
-    the off-switch can stop it. Cross-platform across macOS + Linux where
-    ``lsof`` is present; returns ``None`` when ``lsof`` is missing, errors,
-    or nothing is listening — the caller then degrades to a manual hint.
+    Used by startup ownership checks and untracked-server cleanup.
+    Returns ``None`` when ``lsof`` cannot identify a listener; callers
+    decide whether unknown ownership permits their operation.
 
     :param port: Loopback TCP port, e.g. ``6767``.
     :returns: The first listening PID, or ``None``.
