@@ -259,8 +259,9 @@ Add `--yes` to the standalone script to perform the previewed CLI cleanup.
 ### 2. Start your first agent
 
 `omnigent` picks a model with you and starts a session in your terminal. It
-also launches a local web UI at `http://localhost:6767` that shows the same
-session in the browser, or on a phone on your network (step 4). The
+also launches a local web UI at the [local server URL](#fixed-local-backend-port)
+that shows the same session in the browser, or on a phone on your network
+(step 4). The
 [desktop app](https://omnigent.ai/docs/interact/desktop) wraps that same UI
 in a native window and adds OS notifications (with a configurable sound) and a dock badge —
 [download it for macOS](https://omnigent.ai/download/mac).
@@ -398,6 +399,34 @@ Open the server URL it prints, hit **New Chat**, pick your machine, and go.
 Check status with `omnigent server status`; stop everything with
 `omnigent stop`.
 
+<a id="fixed-local-backend-port"></a>
+
+To keep the daemon-owned local backend on a fixed loopback port, set
+`OMNIGENT_LOCAL_SERVER_PORT` in the environment that launches `omnigent start`:
+
+```bash
+OMNIGENT_LOCAL_SERVER_PORT=18767 omnigent start
+```
+
+The value must be an integer from 1 through 65535. An empty, malformed, or
+out-of-range value fails startup. If the port is unavailable, startup fails
+instead of selecting another port. A newly started server also requires
+`lsof` on the launching process's `PATH` to confirm that the child owns the
+listener. Missing or inconclusive ownership evidence fails startup and stops
+the child; a healthy response alone is insufficient.
+
+A compatible running daemon can be reused. A background daemon with a known
+configuration on a different port is restarted. If an incompatible daemon
+is in the foreground, has no recorded configuration, or wins a concurrent
+startup, the command fails and asks you to stop that daemon first.
+
+Without this variable, the local server prefers port 6767 and falls back to
+an available port as before. This setting also applies to other commands
+that start the daemon-owned local server;
+`omnigent server --port` remains the explicit foreground-server setting.
+For a managed service, persist the variable in its service environment and
+restart the service so the daemon receives it after every login or restart.
+
 To suppress the automatic browser tab, use `omni host --no-open` or set
 `OMNIGENT_HOST_NO_OPEN=1` in your shell. Both also apply to `omni host
 --background` and `omni start`. Sign-in may still open a browser; use
@@ -523,8 +552,8 @@ turns it on for you** (`OMNIGENT_AUTH_ENABLED` defaults to `1` there).
 
 #### Invite your teammates
 
-Open the web UI (`http://localhost:6767` locally, or your host's URL) and
-sign in as `admin`; first run prints the password and saves it locally. Then
+Open the web UI at the [local server URL](#fixed-local-backend-port) or your
+host's URL and sign in as `admin`; first run prints the password and saves it locally. Then
 open **Admin → Members → Invite** to create a single-use invite link, no
 email server needed. Send it over; your teammate opens it, sets a password,
 and they're in. Signup is invite-only.

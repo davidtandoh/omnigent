@@ -18,11 +18,12 @@ across PyPI releases. Three pieces ship together:
   `omnigent-ui-sdk`) to PyPI via `.github/workflows/release-omnigent.yml`.
   **No GitHub Releases are cut**, so the source of truth for "latest version"
   is the PyPI JSON API: `https://pypi.org/pypi/omnigent/json` → `info.version`.
-- The local server is a detached process on `:6767`, tracked by
+- The local server is a detached process, tracked by
   `~/.omnigent/local_server.pid` plus a config-signature sidecar
-  (`local_server.sig`). `ensure_local_omnigent_server()` reuses a healthy
-  server **iff its recorded signature matches**; otherwise it stops it and
-  respawns. All durable state lives in sqlite (`~/.omnigent/chat.db`), not in
+  (`local_server.sig`). `ensure_local_omnigent_server()` owns server reuse
+  and replacement; see its docstring for the reuse contract and the
+  [README](../README.md#fixed-local-backend-port) for port configuration.
+  All durable state lives in sqlite (`~/.omnigent/chat.db`), not in
   process memory — which is what makes cycling a server safe.
 - PR #172 removed an earlier startup check that nagged on *install age* (it
   fired even when you were already on the latest version) and did a synchronous

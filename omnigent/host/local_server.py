@@ -161,6 +161,16 @@ def _resolve_effective_base_path() -> str:
     return _read_local_server_base_path()
 
 
+def configured_local_server_port() -> int | None:
+    raw_port = os.environ.get("OMNIGENT_LOCAL_SERVER_PORT")
+    if raw_port is not None:
+        try:
+            return click.IntRange(1, 65535).convert(raw_port, None, None)
+        except click.BadParameter as exc:
+            raise click.ClickException(f"Invalid OMNIGENT_LOCAL_SERVER_PORT: {exc}") from exc
+    return None
+
+
 def server_config_signature(*, include_features: bool = True) -> str:
     """
     Compute a signature of the server-affecting config for one invocation.
@@ -587,8 +597,9 @@ class LocalServerStartup:
 def ensure_local_omnigent_server() -> LocalServerStartup:
     """Ensure a persistent background local Omnigent server is running.
 
-    Reuses a healthy server recorded in the pidfile; otherwise spawns a
-    detached ``omnigent server`` on a free loopback port, backed by the
+    Reuses a healthy recorded server when its config signature and any
+    requested fixed port match; otherwise replaces it with a detached
+    ``omnigent server`` on loopback, backed by the
     persistent ``~/.omnigent`` data store so conversations survive across
     invocations (designs/RUN_OMNIGENT_SESSION_RESUMPTION.md). The server runs
     accounts mode (the default) so the daemon and CLI
@@ -605,27 +616,31 @@ def ensure_local_omnigent_server() -> LocalServerStartup:
         server is ours.
     :raises click.ClickException: If the server does not become healthy
         within the startup timeout, or if port contention persists after
-        a free-port respawn.
+        a free-port respawn, or if an explicitly configured port is invalid
+        or unavailable, or fixed-port listener ownership cannot be confirmed.
     """
+    fixed_port = configured_local_server_port()
     desired_sig = server_config_signature()
     desired_base_path = _resolve_effective_base_path()
     reused = local_server_url_if_healthy()
     if reused is not None:
-        if _read_local_server_sig() == desired_sig:
+        if _read_local_server_sig() == desired_sig and (
+            fixed_port is None or reused == f"http://127.0.0.1:{fixed_port}"
+        ):
             return LocalServerStartup(
                 url=reused, spawned=False, log_path=_read_local_server_log_path()
             )
-        # Config drift: the running server was spawned under a different
-        # auth source and cannot be reconfigured in place (auth
-        # mode, cookie secret, etc. are baked at boot). Stop it and spawn
-        # a fresh one below so the invocation's intent takes effect.
+        # Server configuration and the listener are fixed at boot.
+        # Replace the server when either differs from this invocation.
         stop_local_omnigent_server()
 
     # Prefer the stable :6767 so the daemon-spawned server lands on the
     # same URL as a manual `omnigent server` (and reuse via the pidfile
     # keeps them from ever both running); fall back to a free port if
-    # taken.
-    port = pick_local_port()
+    # taken unless the operator requires an exact port.
+    if fixed_port is not None:
+        _assert_server_port_bindable("127.0.0.1", fixed_port)
+    port = fixed_port if fixed_port is not None else pick_local_port()
     retried = False
     while True:
         spawned = _spawn_local_server(port, desired_base_path)
@@ -634,16 +649,21 @@ def ensure_local_omnigent_server() -> LocalServerStartup:
             _wait_for_local_omnigent_server(spawned.base_url, spawned.proc, spawned.log_path)
         except click.ClickException as exc:
             startup_error = exc
-        foreign_owner = _foreign_port_owner(port, spawned.proc.pid)
-        if foreign_owner is None:
+        owner = _pid_listening_on_port(port)
+        if fixed_port is not None and owner != spawned.proc.pid:
+            _await_doomed_child_exit(spawned.proc)
+            _record_server_startup_failure(spawned.log_path)
+            raise LocalServerStartupError(
+                f"OMNIGENT_LOCAL_SERVER_PORT={port} is unavailable: "
+                f"listener ownership by pid {spawned.proc.pid} could not be confirmed "
+                f"(observed owner: {owner}). Server log: {spawned.log_path}"
+            )
+        if owner is None or owner == spawned.proc.pid:
             if startup_error is not None:
                 raise startup_error
-            # Advertise the server ONLY now that it is healthy AND provably
-            # ours. Writing the record any earlier publishes a port we may
-            # abandon: concurrent discoverers (the CLI's daemon-wait loop
-            # polls local_server_url_if_healthy every 0.2s) would adopt the
-            # contended port while a foreign server answers its /health,
-            # then lose it when that server's owner stops it.
+            # Publish only after health and ownership checks to avoid adoption
+            # of a contended port. Unknown ownership is allowed only when no
+            # fixed port was requested.
             _write_local_server_record(
                 spawned.proc.pid,
                 port,
@@ -669,7 +689,7 @@ def ensure_local_omnigent_server() -> LocalServerStartup:
             _record_server_startup_failure(spawned.log_path)
             raise LocalServerStartupError(
                 f"Local server port contention persists: port {port} is owned by "
-                f"pid {foreign_owner} even after a free-port respawn. "
+                f"pid {owner} even after a free-port respawn. "
                 f"Server log: {spawned.log_path}"
             )
         retried = True
@@ -712,24 +732,6 @@ def _await_doomed_child_exit(proc: subprocess.Popen[bytes]) -> None:
             return
         time.sleep(_STOP_POLL_INTERVAL_S)
     _terminate_pid(proc.pid)
-
-
-def _foreign_port_owner(port: int, own_pid: int) -> int | None:
-    """Return the pid of a foreign process listening on *port*, if any.
-
-    Best-effort via ``lsof`` (:func:`_pid_listening_on_port`): when ``lsof``
-    is missing or reports nothing, ownership cannot be disproven and the
-    caller proceeds, matching the pre-existing degraded behavior of
-    :func:`stop_untracked_local_server`.
-
-    :param port: Loopback TCP port the child was asked to bind, e.g. ``6767``.
-    :param own_pid: Our spawned child's pid.
-    :returns: The listening pid when it is NOT *own_pid*, else ``None``.
-    """
-    owner = _pid_listening_on_port(port)
-    if owner is None or owner == own_pid:
-        return None
-    return owner
 
 
 def _spawn_local_server(port: int, base_path: str) -> _SpawnedLocalServer:
@@ -867,6 +869,35 @@ def _find_free_local_port() -> int:
 _DEFAULT_LOCAL_PORT = 6767
 
 
+def _assert_server_port_bindable(host: str, port: int) -> None:
+    """
+    Fail before app startup when the requested TCP listener cannot bind.
+
+    Mirrors uvicorn's TCP bind shape closely enough for CLI preflight:
+    IPv6 is selected when the host contains ``":"``, and
+    ``SO_REUSEADDR`` is set before bind. This is intentionally a bind
+    probe, not a connect probe, so a failed client connection to the
+    port does not make us report the port as occupied.
+
+    :param host: Interface to bind, e.g. ``"127.0.0.1"``.
+    :param port: TCP port to bind, e.g. ``6767``.
+    :returns: None.
+    :raises click.ClickException: If the host/port cannot be bound.
+    """
+    import socket
+
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    with socket.socket(family=family, type=socket.SOCK_STREAM) as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind((host, port))
+        except OSError as exc:
+            reason = exc.strerror or str(exc)
+            raise click.ClickException(
+                f"Cannot start server on {host}:{port}: port is unavailable ({reason})."
+            ) from exc
+
+
 def pick_local_port(preferred: int = _DEFAULT_LOCAL_PORT) -> int:
     """Return ``preferred`` if it's bindable on loopback, else a free port.
 
@@ -881,28 +912,19 @@ def pick_local_port(preferred: int = _DEFAULT_LOCAL_PORT) -> int:
     :param preferred: The port to try first, e.g. ``6767``.
     :returns: ``preferred`` if free, otherwise an OS-assigned free port.
     """
-    import socket
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        # SO_REUSEADDR mirrors what uvicorn sets when it binds.  Without
-        # it, a fast server restart sees EADDRINUSE on macOS/BSD because
-        # recently closed connections are still in TIME_WAIT even though
-        # the listening socket is gone and uvicorn could successfully bind.
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            s.bind(("127.0.0.1", preferred))
-        except OSError:
-            return _find_free_local_port()
-        return preferred
+    try:
+        _assert_server_port_bindable("127.0.0.1", preferred)
+    except click.ClickException:
+        return _find_free_local_port()
+    return preferred
 
 
 def _pid_listening_on_port(port: int) -> int | None:
     """Return the PID listening on loopback *port*, via ``lsof``.
 
-    Used to find an untracked local server (one whose pidfile was lost) so
-    the off-switch can stop it. Cross-platform across macOS + Linux where
-    ``lsof`` is present; returns ``None`` when ``lsof`` is missing, errors,
-    or nothing is listening — the caller then degrades to a manual hint.
+    Used by startup ownership checks and untracked-server cleanup.
+    Returns ``None`` when ``lsof`` cannot identify a listener; callers
+    decide whether unknown ownership permits their operation.
 
     :param port: Loopback TCP port, e.g. ``6767``.
     :returns: The first listening PID, or ``None``.

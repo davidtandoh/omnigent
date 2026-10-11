@@ -81,7 +81,9 @@ from omnigent.host.daemon_lifecycle import write_daemon_record as _write_daemon_
 from omnigent.host.local_server import (
     _DEFAULT_LOCAL_PORT,
     LocalServerStartupError,
+    _assert_server_port_bindable,
     _pid_alive,
+    configured_local_server_port,
     consume_failed_server_log_tail,
     ensure_local_omnigent_server,
     local_server_status,
@@ -3112,6 +3114,7 @@ def _reuse_existing_daemon_record(target: str) -> _DaemonReuseDecision:
     :param target: Normalized daemon target, e.g. ``"local"``.
     :returns: A :class:`_DaemonReuseDecision`.
     """
+    fixed_port = configured_local_server_port() if target == _LOCAL_DAEMON_MARKER else None
     existing = _find_daemon_record(target)
     if existing is None:
         return _DaemonReuseDecision(reuse=False, config_changed=False)
@@ -3119,7 +3122,21 @@ def _reuse_existing_daemon_record(target: str) -> _DaemonReuseDecision:
         _delete_daemon_record(existing)
         return _DaemonReuseDecision(reuse=False, config_changed=False)
 
+    resolved_url = existing.resolved_server_url
+    if fixed_port is not None and resolved_url is None:
+        resolved_url = _discover_local_server_url()
+
     background = existing.log_path is not None
+    if fixed_port is not None and resolved_url != f"http://127.0.0.1:{fixed_port}":
+        if not background or existing.config_sig is None:
+            raise click.ClickException(
+                f"OMNIGENT_LOCAL_SERVER_PORT={fixed_port} cannot reuse the existing "
+                f"local daemon at {resolved_url}. "
+                "Stop the existing daemon before starting with the requested port."
+            )
+        _terminate_host_unit(existing, reason="config changed (local server port)")
+        return _DaemonReuseDecision(reuse=False, config_changed=True)
+
     if background and _daemon_host_identity_changed(existing):
         _terminate_host_unit(existing, reason="host identity changed")
         return _DaemonReuseDecision(reuse=False, config_changed=False)
@@ -3544,6 +3561,8 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
             f"See {spawned.log_path}."
         )
     if claimed.pid != spawned.pid:
+        if target == _LOCAL_DAEMON_MARKER and configured_local_server_port() is not None:
+            _discover_local_server_url()
         action = "started_concurrently_during_launch"
     elif process_was_running:
         action = "restarted_during_launch"
@@ -3880,15 +3899,23 @@ def _discover_local_server_url(
 
     :param timeout: Max seconds to wait, e.g. ``60.0``.
     :returns: The loopback server URL, e.g. ``"http://127.0.0.1:8123"``.
-    :raises LocalServerStartupError: If the daemon exits first, or the server
-        does not come up within the timeout.
+    :raises LocalServerStartupError: If the daemon exits first, the server
+        does not come up within the timeout, or its URL does not match the
+        requested fixed port.
     """
     import time
 
+    fixed_port = configured_local_server_port()
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         url = local_server_url_if_healthy()
         if url is not None:
+            if fixed_port is not None and url != f"http://127.0.0.1:{fixed_port}":
+                raise LocalServerStartupError(
+                    f"OMNIGENT_LOCAL_SERVER_PORT={fixed_port} cannot use the discovered "
+                    f"local server at {url}. Stop the existing daemon before starting "
+                    "with the requested port."
+                )
             return url
         if not _host_daemon_alive():
             # The server crashed in the daemon's subprocess; surface its
@@ -4116,35 +4143,6 @@ def _adopt_cli_runner_process(proc: subprocess.Popen[bytes]) -> None:
     if proc.poll() is None:
         with contextlib.suppress(ProcessLookupError):
             proc.send_signal(RUNNER_ADOPT_SIGNAL)
-
-
-def _assert_server_port_bindable(host: str, port: int) -> None:
-    """
-    Fail before app startup when the requested TCP listener cannot bind.
-
-    Mirrors uvicorn's TCP bind shape closely enough for CLI preflight:
-    IPv6 is selected when the host contains ``":"``, and
-    ``SO_REUSEADDR`` is set before bind. This is intentionally a bind
-    probe, not a connect probe, so a failed client connection to the
-    port does not make us report the port as occupied.
-
-    :param host: Interface to bind, e.g. ``"127.0.0.1"``.
-    :param port: TCP port to bind, e.g. ``6767``.
-    :returns: None.
-    :raises click.ClickException: If the host/port cannot be bound.
-    """
-    import socket
-
-    family = socket.AF_INET6 if ":" in host else socket.AF_INET
-    with socket.socket(family=family, type=socket.SOCK_STREAM) as probe:
-        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            probe.bind((host, port))
-        except OSError as exc:
-            reason = exc.strerror or str(exc)
-            raise click.ClickException(
-                f"Cannot start server on {host}:{port}: port is unavailable ({reason})."
-            ) from exc
 
 
 @cli.group("server", invoke_without_command=True)
