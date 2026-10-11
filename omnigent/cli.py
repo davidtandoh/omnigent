@@ -83,6 +83,7 @@ from omnigent.host.local_server import (
     LocalServerStartupError,
     _assert_server_port_bindable,
     _pid_alive,
+    configured_local_server_port,
     consume_failed_server_log_tail,
     ensure_local_omnigent_server,
     local_server_status,
@@ -3113,6 +3114,7 @@ def _reuse_existing_daemon_record(target: str) -> _DaemonReuseDecision:
     :param target: Normalized daemon target, e.g. ``"local"``.
     :returns: A :class:`_DaemonReuseDecision`.
     """
+    fixed_port = configured_local_server_port() if target == _LOCAL_DAEMON_MARKER else None
     existing = _find_daemon_record(target)
     if existing is None:
         return _DaemonReuseDecision(reuse=False, config_changed=False)
@@ -3121,6 +3123,16 @@ def _reuse_existing_daemon_record(target: str) -> _DaemonReuseDecision:
         return _DaemonReuseDecision(reuse=False, config_changed=False)
 
     background = existing.log_path is not None
+    if fixed_port is not None and existing.resolved_server_url != f"http://127.0.0.1:{fixed_port}":
+        if not background or existing.config_sig is None:
+            raise click.ClickException(
+                f"OMNIGENT_LOCAL_SERVER_PORT={fixed_port} cannot reuse the existing "
+                f"local daemon at {existing.resolved_server_url or '<unknown URL>'}. "
+                "Stop the existing daemon before starting with the requested port."
+            )
+        _terminate_host_unit(existing, reason="config changed (local server port)")
+        return _DaemonReuseDecision(reuse=False, config_changed=True)
+
     if background and _daemon_host_identity_changed(existing):
         _terminate_host_unit(existing, reason="host identity changed")
         return _DaemonReuseDecision(reuse=False, config_changed=False)

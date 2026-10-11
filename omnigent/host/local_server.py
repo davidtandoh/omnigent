@@ -161,6 +161,16 @@ def _resolve_effective_base_path() -> str:
     return _read_local_server_base_path()
 
 
+def configured_local_server_port() -> int | None:
+    raw_port = os.environ.get("OMNIGENT_LOCAL_SERVER_PORT")
+    if raw_port is not None:
+        try:
+            return click.IntRange(1, 65535).convert(raw_port, None, None)
+        except click.BadParameter as exc:
+            raise click.ClickException(f"Invalid OMNIGENT_LOCAL_SERVER_PORT: {exc}") from exc
+    return None
+
+
 def server_config_signature(*, include_features: bool = True) -> str:
     """
     Compute a signature of the server-affecting config for one invocation.
@@ -608,13 +618,7 @@ def ensure_local_omnigent_server() -> LocalServerStartup:
         a free-port respawn, or if an explicitly configured port is invalid
         or unavailable.
     """
-    raw_port = os.environ.get("OMNIGENT_LOCAL_SERVER_PORT")
-    fixed_port = None
-    if raw_port is not None:
-        try:
-            fixed_port = click.IntRange(1, 65535).convert(raw_port, None, None)
-        except click.BadParameter as exc:
-            raise click.ClickException(f"Invalid OMNIGENT_LOCAL_SERVER_PORT: {exc}") from exc
+    fixed_port = configured_local_server_port()
     desired_sig = server_config_signature()
     desired_base_path = _resolve_effective_base_path()
     reused = local_server_url_if_healthy()
@@ -646,8 +650,16 @@ def ensure_local_omnigent_server() -> LocalServerStartup:
             _wait_for_local_omnigent_server(spawned.base_url, spawned.proc, spawned.log_path)
         except click.ClickException as exc:
             startup_error = exc
-        foreign_owner = _foreign_port_owner(port, spawned.proc.pid)
-        if foreign_owner is None:
+        owner = _pid_listening_on_port(port)
+        if fixed_port is not None and owner != spawned.proc.pid:
+            _await_doomed_child_exit(spawned.proc)
+            _record_server_startup_failure(spawned.log_path)
+            raise LocalServerStartupError(
+                f"OMNIGENT_LOCAL_SERVER_PORT={port} is unavailable: "
+                f"listener ownership by pid {spawned.proc.pid} could not be confirmed "
+                f"(observed owner: {owner}). Server log: {spawned.log_path}"
+            )
+        if owner is None or owner == spawned.proc.pid:
             if startup_error is not None:
                 raise startup_error
             # Advertise the server ONLY now that it is healthy AND provably
@@ -677,17 +689,11 @@ def ensure_local_omnigent_server() -> LocalServerStartup:
         # natural EADDRINUSE exit, then respawn once on an OS-assigned
         # free port, which concurrent spawners never prefer.
         _await_doomed_child_exit(spawned.proc)
-        if fixed_port is not None:
-            _record_server_startup_failure(spawned.log_path)
-            raise LocalServerStartupError(
-                f"OMNIGENT_LOCAL_SERVER_PORT={port} is unavailable: "
-                f"owned by pid {foreign_owner}. Server log: {spawned.log_path}"
-            )
         if retried:
             _record_server_startup_failure(spawned.log_path)
             raise LocalServerStartupError(
                 f"Local server port contention persists: port {port} is owned by "
-                f"pid {foreign_owner} even after a free-port respawn. "
+                f"pid {owner} even after a free-port respawn. "
                 f"Server log: {spawned.log_path}"
             )
         retried = True
@@ -730,24 +736,6 @@ def _await_doomed_child_exit(proc: subprocess.Popen[bytes]) -> None:
             return
         time.sleep(_STOP_POLL_INTERVAL_S)
     _terminate_pid(proc.pid)
-
-
-def _foreign_port_owner(port: int, own_pid: int) -> int | None:
-    """Return the pid of a foreign process listening on *port*, if any.
-
-    Best-effort via ``lsof`` (:func:`_pid_listening_on_port`): when ``lsof``
-    is missing or reports nothing, ownership cannot be disproven and the
-    caller proceeds, matching the pre-existing degraded behavior of
-    :func:`stop_untracked_local_server`.
-
-    :param port: Loopback TCP port the child was asked to bind, e.g. ``6767``.
-    :param own_pid: Our spawned child's pid.
-    :returns: The listening pid when it is NOT *own_pid*, else ``None``.
-    """
-    owner = _pid_listening_on_port(port)
-    if owner is None or owner == own_pid:
-        return None
-    return owner
 
 
 def _spawn_local_server(port: int, base_path: str) -> _SpawnedLocalServer:

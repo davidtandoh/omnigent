@@ -1810,18 +1810,36 @@ def test_fixed_local_port_occupied_fails_without_spawn_or_fallback(
     assert not (tmp_path / "local_server.pid").exists()
 
 
+@pytest.mark.parametrize("ownership", ["foreign", "missing", "inconclusive"])
 def test_fixed_local_port_bind_race_fails_without_fallback(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ownership: str
 ) -> None:
+    wait_for_server = local_server._wait_for_local_omnigent_server
     _patch_spawn_env(monkeypatch, tmp_path)
     monkeypatch.setenv("OMNIGENT_LOCAL_SERVER_PORT", "18767")
-    monkeypatch.setattr(local_server.subprocess, "Popen", _proc_cls_with_pids([9001]))
-    monkeypatch.setattr(local_server, "_pid_listening_on_port", lambda port: 4242)
+    monkeypatch.setattr(local_server.subprocess, "Popen", _proc_cls_with_pids([9001], [None]))
+    monkeypatch.setattr(local_server, "_wait_for_local_omnigent_server", wait_for_server)
+    monkeypatch.setattr(local_server, "_DOOMED_CHILD_EXIT_GRACE_S", 0)
+    result = subprocess.CompletedProcess([], 0, stdout="4242\n" if ownership == "foreign" else "")
     with (
+        patch.object(
+            local_server.subprocess,
+            "run",
+            return_value=result,
+            side_effect=FileNotFoundError("lsof") if ownership == "missing" else None,
+        ),
         patch.object(local_server, "_assert_server_port_bindable"),
+        patch.object(httpx, "get", return_value=httpx.Response(200, json={"status": "ok"})) as health,
+        patch.object(local_server, "_terminate_pid") as terminate,
         patch.object(local_server, "_find_free_local_port") as fallback,
+        patch.object(local_server, "_write_local_server_record") as publish,
+        patch.object(local_server, "_record_server_startup_failure") as failure,
         pytest.raises(click.ClickException, match="OMNIGENT_LOCAL_SERVER_PORT=18767"),
     ):
         local_server.ensure_local_omnigent_server()
+    health.assert_called_once()
+    terminate.assert_called_once_with(9001)
+    failure.assert_called_once()
+    publish.assert_not_called()
     fallback.assert_not_called()
     assert not (tmp_path / "local_server.pid").exists()

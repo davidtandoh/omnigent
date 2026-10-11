@@ -469,14 +469,19 @@ def test_ensure_host_daemon_local_daemon_serves_requested_url_is_noop(
     assert "args" not in captured  # reused, not respawned
 
 
+@pytest.mark.parametrize("fixed_port", [None, "8123"])
 def test_ensure_host_daemon_reuses_healthy_background_daemon(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fixed_port: str | None
 ) -> None:
     """A live background daemon with matching config + online host is reused.
 
     The healthy fast path: PID alive, config signature matches this
     invocation, and the host reports online — no teardown, no respawn.
     """
+    if fixed_port is None:
+        monkeypatch.delenv("OMNIGENT_LOCAL_SERVER_PORT", raising=False)
+    else:
+        monkeypatch.setenv("OMNIGENT_LOCAL_SERVER_PORT", fixed_port)
     captured: dict[str, object] = {}
     _patch_daemon_spawn(monkeypatch, tmp_path, captured)
     sig = cli.server_config_signature()
@@ -505,6 +510,95 @@ def test_ensure_host_daemon_reuses_healthy_background_daemon(
 
     assert "args" not in captured  # reused, not respawned
     assert torn_down == []  # healthy daemon not torn down
+
+
+@pytest.mark.parametrize("original_port", [None, "18767"])
+def test_fixed_local_port_restarts_incompatible_background_daemon(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    original_port: str | None,
+) -> None:
+    captured: dict[str, object] = {}
+    _patch_daemon_spawn(monkeypatch, tmp_path, captured)
+    if original_port is None:
+        monkeypatch.delenv("OMNIGENT_LOCAL_SERVER_PORT", raising=False)
+    else:
+        monkeypatch.setenv("OMNIGENT_LOCAL_SERVER_PORT", original_port)
+    _write_daemon_registry_record(
+        tmp_path,
+        pid=4242,
+        target="local",
+        mode="local",
+        server_url=None,
+        log_path=str(tmp_path / "daemon.log"),
+        config_sig=cli.server_config_signature(),
+        resolved_server_url="http://127.0.0.1:6767",
+    )
+    monkeypatch.setenv("OMNIGENT_LOCAL_SERVER_PORT", "18767")
+    monkeypatch.setattr(cli, "_pid_is_recorded_daemon", lambda record: True)
+    monkeypatch.setattr(cli, "_pid_alive", lambda pid: True)
+    with patch.object(cli, "_terminate_host_unit") as terminate:
+        assert _ensure_host_daemon(None) is True
+    terminate.assert_called_once()
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env["OMNIGENT_LOCAL_SERVER_PORT"] == "18767"
+
+
+@pytest.mark.parametrize("background, stamped", [(False, True), (False, False), (True, False)])
+def test_fixed_local_port_rejects_incompatible_unmanaged_daemon(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, background: bool, stamped: bool
+) -> None:
+    captured: dict[str, object] = {}
+    _patch_daemon_spawn(monkeypatch, tmp_path, captured)
+    monkeypatch.setenv("OMNIGENT_LOCAL_SERVER_PORT", "18767")
+    _write_daemon_registry_record(
+        tmp_path,
+        pid=4242,
+        target="local",
+        mode="local",
+        server_url=None,
+        log_path=str(tmp_path / "daemon.log") if background else None,
+        config_sig=cli.server_config_signature() if stamped else None,
+        resolved_server_url="http://127.0.0.1:6767",
+    )
+    monkeypatch.setattr(cli, "_pid_is_recorded_daemon", lambda record: True)
+    monkeypatch.setattr(cli, "_pid_alive", lambda pid: True)
+    with patch.object(cli, "_terminate_host_unit") as terminate:
+        with pytest.raises(click.ClickException, match="OMNIGENT_LOCAL_SERVER_PORT=18767"):
+            _ensure_host_daemon(None)
+    terminate.assert_not_called()
+    assert "args" not in captured
+    record = cli._find_daemon_record("local")
+    assert record is not None and record.pid == 4242
+
+
+@pytest.mark.parametrize("value", ["", "abc", "0", "65536"])
+def test_fixed_local_port_validates_before_healthy_daemon_reuse(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, value: str
+) -> None:
+    captured: dict[str, object] = {}
+    _patch_daemon_spawn(monkeypatch, tmp_path, captured)
+    monkeypatch.delenv("OMNIGENT_LOCAL_SERVER_PORT", raising=False)
+    _write_daemon_registry_record(
+        tmp_path,
+        pid=4242,
+        target="local",
+        mode="local",
+        server_url=None,
+        log_path=str(tmp_path / "daemon.log"),
+        config_sig=cli.server_config_signature(),
+        resolved_server_url="http://127.0.0.1:6767",
+    )
+    monkeypatch.setattr(cli, "_pid_is_recorded_daemon", lambda record: True)
+    monkeypatch.setattr(cli, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(cli, "_daemon_host_online", lambda record, **kw: True)
+    monkeypatch.setenv("OMNIGENT_LOCAL_SERVER_PORT", value)
+    with patch.object(cli, "_terminate_host_unit") as terminate:
+        with pytest.raises(click.ClickException, match="OMNIGENT_LOCAL_SERVER_PORT"):
+            _ensure_host_daemon(None)
+    terminate.assert_not_called()
+    assert "args" not in captured
 
 
 def test_ensure_host_daemon_respawns_on_host_identity_change(
