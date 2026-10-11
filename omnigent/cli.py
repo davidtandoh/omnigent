@@ -3122,12 +3122,16 @@ def _reuse_existing_daemon_record(target: str) -> _DaemonReuseDecision:
         _delete_daemon_record(existing)
         return _DaemonReuseDecision(reuse=False, config_changed=False)
 
+    resolved_url = existing.resolved_server_url
+    if fixed_port is not None and resolved_url is None:
+        resolved_url = _discover_local_server_url()
+
     background = existing.log_path is not None
-    if fixed_port is not None and existing.resolved_server_url != f"http://127.0.0.1:{fixed_port}":
+    if fixed_port is not None and resolved_url != f"http://127.0.0.1:{fixed_port}":
         if not background or existing.config_sig is None:
             raise click.ClickException(
                 f"OMNIGENT_LOCAL_SERVER_PORT={fixed_port} cannot reuse the existing "
-                f"local daemon at {existing.resolved_server_url or '<unknown URL>'}. "
+                f"local daemon at {resolved_url}. "
                 "Stop the existing daemon before starting with the requested port."
             )
         _terminate_host_unit(existing, reason="config changed (local server port)")
@@ -3557,6 +3561,8 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
             f"See {spawned.log_path}."
         )
     if claimed.pid != spawned.pid:
+        if target == _LOCAL_DAEMON_MARKER and configured_local_server_port() is not None:
+            _discover_local_server_url()
         action = "started_concurrently_during_launch"
     elif process_was_running:
         action = "restarted_during_launch"
@@ -3898,10 +3904,17 @@ def _discover_local_server_url(
     """
     import time
 
+    fixed_port = configured_local_server_port()
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         url = local_server_url_if_healthy()
         if url is not None:
+            if fixed_port is not None and url != f"http://127.0.0.1:{fixed_port}":
+                raise LocalServerStartupError(
+                    f"OMNIGENT_LOCAL_SERVER_PORT={fixed_port} cannot use the discovered "
+                    f"local server at {url}. Stop the existing daemon before starting "
+                    "with the requested port."
+                )
             return url
         if not _host_daemon_alive():
             # The server crashed in the daemon's subprocess; surface its
