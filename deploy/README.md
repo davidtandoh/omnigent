@@ -422,12 +422,12 @@ overrides this auto-selection.
 
 ### Browser origin allowlist
 
-Independent of the auth mode above, the server also checks the browser
-`Origin` header on WebSocket handshakes and file-upload POSTs — the only
-signal that tells the user's own web UI apart from some other page open in
-the same browser. Set `OMNIGENT_WS_ALLOWED_ORIGINS` (comma-separated) to
-trust origins beyond the server's own host, e.g. when the web UI is reached
-through a proxy, tunnel, or a domain the server doesn't know about itself.
+The server checks the browser `Origin` header on WebSocket handshakes and
+file-upload POSTs. Header-name casing does not affect these checks.
+Set `OMNIGENT_WS_ALLOWED_ORIGINS` (comma-separated) to trust a proxy or
+tunnel's browser origin in local mode, or to restrict browser origins in
+authenticated modes. The server's own non-loopback host is not
+automatically trusted in local mode.
 
 An entry's host may start with `*.` to trust every subdomain of a domain in
 one entry, instead of listing each hostname individually — useful when many

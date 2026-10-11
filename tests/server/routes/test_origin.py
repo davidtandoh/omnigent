@@ -24,7 +24,7 @@ dependency wires that policy into an HTTP route:
 - an allowed verdict returns ``None`` (request proceeds);
 - a denied verdict raises ``HTTPException`` with status ``403``.
 
-The dependency only reads ``request.headers``, so each case is driven by a
+The dependency only reads the request's scope headers, so each case is driven by a
 real :class:`starlette.requests.Request` built from a minimal ASGI scope
 carrying just the ``Origin`` header under test — no body or transport.
 """

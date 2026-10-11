@@ -11,6 +11,8 @@ from a hostile cross-origin page.
 
 This module provides:
 
+- :func:`origin_from_scope` — case-insensitive extraction shared by the
+  server's HTTP and WebSocket guards and the runner's direct-attach guard;
 - :func:`origin_allowed` — the pure, protocol-neutral policy function
   deciding whether a connection's ``Origin`` is acceptable for the
   current mode (shared by the WebSocket middleware here and the HTTP
@@ -60,6 +62,7 @@ __all__ = [
     "OMNIGENT_INTERNAL_WS_ORIGIN",
     "WebSocketOriginMiddleware",
     "origin_allowed",
+    "origin_from_scope",
     "origin_hostname_is_loopback",
     "parse_allowed_origins",
 ]
@@ -269,11 +272,8 @@ def origin_allowed(
     return not extra_allowed
 
 
-def _origin_from_scope(scope: Scope) -> str | None:
+def origin_from_scope(scope: Scope) -> str | None:
     """Extract the ``Origin`` header from an ASGI connection scope.
-
-    ASGI lowercases header names, so a byte-string match on ``b"origin"``
-    is sufficient.
 
     :param scope: ASGI connection scope, e.g. one with
         ``type == "websocket"``.
@@ -284,7 +284,7 @@ def _origin_from_scope(scope: Scope) -> str | None:
     # the ``value.decode(...)`` return as an Any-return.
     headers: Iterable[tuple[bytes, bytes]] = scope.get("headers", [])
     for key, value in headers:
-        if key == b"origin":
+        if key.lower() == b"origin":
             return value.decode("latin-1")
     return None
 
@@ -325,7 +325,7 @@ class WebSocketOriginMiddleware:
             await self._app(scope, receive, send)
             return
 
-        origin = _origin_from_scope(scope)
+        origin = origin_from_scope(scope)
         if origin_allowed(
             origin,
             local_mode=local_single_user_enabled(),

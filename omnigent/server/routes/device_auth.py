@@ -71,6 +71,7 @@ from omnigent.server.routes._oauth import (
 )
 from omnigent.server.routes._oauth import oauth_error as _oauth_error
 from omnigent.server.routes._origin import require_trusted_origin
+from omnigent.server.ws_origin import origin_from_scope
 
 _logger = logging.getLogger(__name__)
 
@@ -271,7 +272,7 @@ def _require_browser_origin(request: Request) -> None:
 
     :raises HTTPException: 403 when ``Origin`` is absent or untrusted.
     """
-    if not request.headers.get("origin"):
+    if not origin_from_scope(request.scope):
         raise HTTPException(status_code=403, detail="missing Origin")
     require_trusted_origin(request)
 
@@ -428,7 +429,7 @@ def create_oauth_token_router(
             device_grant_store.purge_expired(
                 int(now_wall), max_lifetime_seconds=_grant_max_lifetime
             )
-        except Exception:  # noqa: BLE001 — housekeeping must never fail a refresh
+        except Exception:  # Housekeeping must never fail a refresh.
             _logger.debug("oauth/token: opportunistic grant purge failed", exc_info=True)
 
     def _issue_access_token(grant_id: str, user_id: str, client_id: str) -> str:
