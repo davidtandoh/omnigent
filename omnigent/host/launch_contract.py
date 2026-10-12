@@ -133,7 +133,7 @@ def launch_contract(endpoint: str, *, probe: bool = True) -> dict[str, object]:
         "harnesses": [
             {
                 "id": agent.harness,
-                "command": agent.wrapper_label,
+                "command": agent.key,
                 "capabilities": capabilities[agent.harness].as_dict()
                 if agent.harness in capabilities
                 else {},

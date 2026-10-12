@@ -78,3 +78,12 @@ def test_cli_emits_canonical_receipt_and_does_not_start_services(
     receipt = json.loads(result.output)
     assert receipt["availability"] == "ready"
     assert result.output == json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n"
+
+
+def test_harness_commands_are_executable_cli_commands() -> None:
+    receipt = launch_contract("http://127.0.0.1:8123", probe=False)
+    rows = {row["id"]: row for row in receipt["harnesses"]}
+    assert rows["codex-native"]["command"] == "codex"
+    assert rows["claude-native"]["command"] == "claude"
+    for row in rows.values():
+        assert row["command"] in cli.commands
