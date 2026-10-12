@@ -4769,6 +4769,31 @@ def server(
             clear_local_server_record()
 
 
+@cli.group("runtime")
+def runtime_commands() -> None:
+    """Inspect the runtime without starting or stopping services."""
+
+
+@runtime_commands.command("launch-contract")
+@click.option("--server", required=True, help="Exact endpoint to verify.")
+@click.option("--json", "json_output", is_flag=True, required=True, help="Emit canonical JSON.")
+def runtime_launch_contract(server: str, json_output: bool) -> None:
+    """Publish the executable, generation, environment and harness contract."""
+    from omnigent.host.launch_contract import LaunchContractError, launch_contract
+    from omnigent.native.state_files import canonical_json
+
+    if not json_output:
+        raise click.UsageError("--json is required")
+    try:
+        receipt = launch_contract(server)
+    except LaunchContractError as exc:
+        click.echo(
+            canonical_json({"schema_version": 1, "error": {"category": exc.category}}), nl=False
+        )
+        raise click.exceptions.Exit(1) from exc
+    click.echo(canonical_json(receipt), nl=False)
+
+
 def _stop_local_server_and_daemon(*, force: bool) -> bool:
     """Stop the background Omnigent server and the local host daemon that owns it.
 

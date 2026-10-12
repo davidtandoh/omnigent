@@ -23,7 +23,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +32,7 @@ import psutil  # type: ignore[import-untyped]
 
 from omnigent.config import global_config_path
 from omnigent.inner import _proc
+from omnigent.native.state_files import write_regular_file
 from omnigent.process_logging import (
     PROCESS_LOG_FILE_ENV_VAR,
     child_logging_popen_kwargs,
@@ -412,26 +412,7 @@ def _atomic_write(path: Path, text: str) -> None:
     :param path: Destination file, e.g. ``~/.omnigent/local_server.pid``.
     :param text: Full file contents to write.
     """
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
-    try:
-        fh = os.fdopen(fd, "w", encoding="utf-8")
-    except BaseException:
-        # fdopen didn't take ownership of the fd — close it ourselves. (Once
-        # fdopen succeeds, the `with` below owns and closes it; closing here
-        # too would risk a double-close of a reused fd in this multithreaded
-        # process.)
-        os.close(fd)
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_name)
-        raise
-    try:
-        with fh:
-            fh.write(text)
-        os.replace(tmp_name, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_name)
-        raise
+    write_regular_file(path, text)
 
 
 def _read_local_server_sig() -> str | None:
