@@ -535,3 +535,102 @@ def test_collapsing_the_rail_sticks_across_reload_and_new_sessions(
     page.get_by_role("button", name="Expand right panel").click()
     expect(page.get_by_role("complementary", name="Workspace")).to_be_visible()
     assert _stored_default(page) == "open", "reopening the rail did not record the open state"
+
+
+@pytest.mark.parametrize("saved_size", [None, 11, 18])
+def test_mobile_typography_and_settings_header_render(
+    page: Page, appearance_url: str, saved_size: int | None
+) -> None:
+    page.set_viewport_size({"width": 390, "height": 844})
+    if saved_size is not None:
+        page.add_init_script(f"localStorage.setItem('omnigent:ui-font-size', '{saved_size}')")
+    _open_appearance(page, appearance_url)
+    size = saved_size if saved_size is not None else 14
+    expect(page.get_by_test_id("ui-font-size-input")).to_have_value(str(size))
+    expect(page.locator("body")).to_have_css("font-size", f"{size}px")
+    sizes = page.evaluate("""() => {
+        const sample = document.createElement('div');
+        document.body.append(sample);
+        const sizes = ['text-sm', 'text-ui', 'text-base', 'text-lg', 'text-xl', 'text-2xl']
+            .map(className => {
+                sample.className = className;
+                return parseFloat(getComputedStyle(sample).fontSize);
+            });
+        sample.remove();
+        return sizes;
+    }""")
+    assert sizes == pytest.approx([size * factor for factor in (0.9, 1, 1, 1.125, 1.25, 1.5)])
+    title = page.get_by_role("heading", name="Appearance", exact=True)
+    expect(title).to_have_css("position", "fixed")
+    expect(title).to_have_css("text-align", "center")
+    bounds = title.bounding_box()
+    assert bounds is not None
+    assert bounds["x"] + bounds["width"] / 2 == pytest.approx(195)
+    assert bounds["y"] == 0
+    header_bounds = page.locator(".settings-mobile-header").bounding_box()
+    assert header_bounds is not None
+    assert bounds["height"] == header_bounds["height"]
+    fade = page.locator(".settings-mobile-header").evaluate("""header => {
+        const style = getComputedStyle(header, '::before');
+        return {height: style.height, background: style.backgroundImage};
+    }""")
+    assert fade["height"] == "80px"
+    assert fade["background"].startswith("linear-gradient(")
+    assert "48px" in fade["background"] and "80px" in fade["background"]
+
+
+@pytest.mark.parametrize("zoom", [1, 1.5])
+def test_mac_shell_clearance_renders_with_zoom(
+    page: Page, appearance_url: str, zoom: float
+) -> None:
+    page.set_viewport_size({"width": 1280, "height": 900})
+    _open_appearance(page, appearance_url)
+    geometry = page.evaluate(
+        """zoom => {
+        const root = document.documentElement;
+        root.setAttribute('data-electron-mac', 'true');
+        root.style.setProperty('--omnigent-electron-zoom', String(zoom));
+        const sample = document.createElement('div');
+        sample.className = 'app-shell';
+        sample.innerHTML = `
+            <div class="electron-drag-strip"></div>
+            <div class="conversations-sidebar"><div class="sidebar-header-row"></div></div>
+            <div class="conversations-sidebar is-peek" style="position:fixed">
+                <div class="sidebar-header-row"></div>
+            </div>
+            <div class="settings-sidebar-header"></div>
+            <aside aria-label="Workspace" data-maximized="true">
+                <div class="workspace-tab-strip"></div>
+            </aside>`;
+        document.body.append(sample);
+        const style = selector => getComputedStyle(sample.querySelector(selector));
+        const strip = sample.querySelector('.electron-drag-strip').getBoundingClientRect();
+        const result = {
+            strip: {x: strip.x, y: strip.y, width: strip.width, height: strip.height},
+            region: style('.electron-drag-strip').getPropertyValue('-webkit-app-region'),
+            rowHeight: parseFloat(style('.sidebar-header-row').height),
+            peekTop: parseFloat(style('.is-peek').top),
+            peekRow: style('.is-peek .sidebar-header-row').display,
+            settingsTop: parseFloat(style('.settings-sidebar-header').paddingTop),
+            closedPadding: parseFloat(style('.workspace-tab-strip').paddingLeft),
+        };
+        sample.setAttribute('data-sidebar-open', 'true');
+        result.openPadding = parseFloat(style('.workspace-tab-strip').paddingLeft);
+        root.removeAttribute('data-electron-mac');
+        result.browserRegion = style('.electron-drag-strip').getPropertyValue('-webkit-app-region');
+        sample.remove();
+        root.style.removeProperty('--omnigent-electron-zoom');
+        return result;
+    }""",
+        zoom,
+    )
+    height = 48 / zoom
+    assert geometry["strip"] == pytest.approx({"x": 0, "y": 0, "width": 1280, "height": height})
+    assert geometry["region"] == "drag"
+    assert geometry["browserRegion"] == "none"
+    assert geometry["rowHeight"] == pytest.approx(height)
+    assert geometry["peekTop"] == pytest.approx(height + 8)
+    assert geometry["peekRow"] == "none"
+    assert geometry["settingsTop"] == pytest.approx(height + 8)
+    assert geometry["closedPadding"] == pytest.approx(88 / zoom + 80, abs=0.01)
+    assert geometry["openPadding"] == 0

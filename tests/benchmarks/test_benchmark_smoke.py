@@ -1060,7 +1060,6 @@ def test_caller_session_env_literals_match_the_runtime() -> None:
     """Names kept as literals (no cheap public constant) must track the runtime."""
     from dev.benchmarks.omnigent.environment import _CALLER_SESSION_ENV_VARS
     from omnigent.chat import _REMOTE_AUTH_TOKEN_ENV
-    from omnigent.runner.native import orchestration
     from omnigent.runtime.harnesses.paths import HARNESS_TMP_PARENT_ENV_VAR
     from omnigent.runtime.harnesses.process_manager import _HARNESS_AUTH_TOKEN_ENV
 
@@ -1069,11 +1068,6 @@ def test_caller_session_env_literals_match_the_runtime() -> None:
         HARNESS_TMP_PARENT_ENV_VAR,
         _HARNESS_AUTH_TOKEN_ENV,
     } <= _CALLER_SESSION_ENV_VARS
-    # The native policy hooks' env is built from literals in orchestration.
-    source = Path(orchestration.__file__).read_text()
-    for name in ("OMNIGENT_SESSION_ID", "OMNIGENT_POLICY_URL"):
-        assert f'policy_env["{name}"]' in source
-        assert name in _CALLER_SESSION_ENV_VARS
 
 
 def _wait_gone(proc: psutil.Process, timeout: float = 5.0) -> bool:

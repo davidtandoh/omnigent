@@ -6,14 +6,17 @@ Nothing here reaches the network or runs a real ``az``. Every test replaces
 
 from __future__ import annotations
 
-import ast
 import base64
 import json
+import os
 import subprocess
+import sys
+import textwrap
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from subprocess import run as run_isolated
 from typing import Any
 
 import httpx
@@ -909,24 +912,49 @@ def test_token_value_is_left_out_of_repr() -> None:
     assert "secret-token" not in repr(TOKEN)
 
 
-def test_module_imports_nothing_from_the_provider_layer() -> None:
-    tree = ast.parse(Path(azure_devops_client.__file__).read_text(encoding="utf-8"))
-    imported: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imported.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imported.add(node.module)
-            imported.update(f"{node.module}.{alias.name}" for alias in node.names)
+def test_client_works_without_the_provider_layer(tmp_path: Path) -> None:
+    result = run_isolated(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+            import importlib.abc
+            import sys
 
-    forbidden = ("omnigent.git_providers", "omnigent.runner.github_resource", "web")
-    offenders = {
-        name
-        for name in imported
-        for prefix in forbidden
-        if name == prefix or name.startswith(f"{prefix}.")
-    }
-    assert not offenders
+            class BlockProviders(importlib.abc.MetaPathFinder):
+                def find_spec(self, fullname, path=None, target=None):
+                    for prefix in (
+                        "omnigent.git_providers", "omnigent.runner.github_resource", "web"
+                    ):
+                        if fullname == prefix or fullname.startswith(prefix + "."):
+                            raise ImportError("provider unavailable: " + fullname)
+
+            sys.meta_path.insert(0, BlockProviders())
+            import httpx
+            from omnigent.runner.azure_devops_client import AzureDevOpsClient, AzureToken
+
+            requests = []
+            def respond(request):
+                requests.append(request)
+                return httpx.Response(200, json={"pullRequestId": 42})
+
+            with AzureDevOpsClient(
+                "contoso", AzureToken("test-token", "pat", None),
+                transport=httpx.MockTransport(respond),
+            ) as client:
+                assert client.get_pull_request("Proj", "repo", 42) == {"pullRequestId": 42}
+            assert len(requests) == 1
+            assert requests[0].url.host == "dev.azure.com"
+        """),
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        env={"PATH": os.defpath, "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 # ---------------------------------------------------------------------------

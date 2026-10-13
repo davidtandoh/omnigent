@@ -14,8 +14,10 @@ from omnigent.harnesses.codex_egress import detect_certificate_failure
 from omnigent.harnesses.codex_native import forwarder as fwd
 from omnigent.harnesses.codex_native.bridge import (
     CodexNativeBridgeState,
+    begin_codex_turn_result,
     read_bridge_state,
     read_certificate_failure,
+    read_codex_turn_result,
     record_certificate_failure,
     write_bridge_state,
 )
@@ -670,8 +672,11 @@ def _record_launcher_certificate_failure(bridge_dir: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("interrupt_fails", [False, True])
 async def test_handle_event_fails_retrying_turn_on_launcher_certificate_failure(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interrupt_fails: bool,
 ) -> None:
     """A reconnect loop behind a launcher-reported certificate failure fails the turn.
 
@@ -683,6 +688,14 @@ async def test_handle_event_fails_retrying_turn_on_launcher_certificate_failure(
     client = _RecordingClient()
     codex_client = _InterruptRecordingCodexClient()
     _seed_active_turn(tmp_path, "turn_123")
+    assert begin_codex_turn_result(tmp_path, "turn_123")
+    if interrupt_fails:
+
+        async def fail_interrupt(method: str, params: dict) -> dict:
+            codex_client.requests.append((method, params))
+            raise RuntimeError("app-server unavailable")
+
+        monkeypatch.setattr(codex_client, "request", fail_interrupt)
     _record_launcher_certificate_failure(tmp_path)
     forwarder_state = fwd._CodexForwarderState(
         parent_session_id="conv_x",
@@ -721,6 +734,8 @@ async def test_handle_event_fails_retrying_turn_on_launcher_certificate_failure(
     assert "run dbcert" in output
     state = read_bridge_state(tmp_path)
     assert state is not None and state.active_turn_id is None
+    result = read_codex_turn_result(tmp_path, "turn_123")
+    assert result is not None and result.terminal
 
     await fwd._handle_event(
         client,  # type: ignore[arg-type]
@@ -748,6 +763,34 @@ async def test_handle_event_fails_retrying_turn_on_launcher_certificate_failure(
         if body["type"] == "external_session_status"
     ]
     assert status_posts == ["failed"]
+
+
+@pytest.mark.asyncio
+async def test_certificate_failure_completes_result_when_delivery_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _RecordingClient()
+    _seed_active_turn(tmp_path, "turn_123")
+    assert begin_codex_turn_result(tmp_path, "turn_123")
+    _record_launcher_certificate_failure(tmp_path)
+
+    async def fail_delivery(*args, **kwargs):
+        raise RuntimeError("delivery unavailable")
+
+    monkeypatch.setattr(fwd, "_post_turn_status_edge", fail_delivery)
+    with pytest.raises(RuntimeError, match="delivery unavailable"):
+        await fwd._handle_event(
+            client,  # type: ignore[arg-type]
+            session_id="conv_x",
+            bridge_dir=tmp_path,
+            event={"method": "error", "params": _connection_retry_params()},
+            usage_coalescer=fwd._SessionUsageCoalescer(client, "conv_x"),  # type: ignore[arg-type]
+            elicitation_tracker=fwd._CodexElicitationTaskTracker(),
+            expected_thread_id="thread_123",
+            forwarder_state=fwd._CodexForwarderState(parent_session_id="conv_x"),
+        )
+    result = read_codex_turn_result(tmp_path, "turn_123")
+    assert result is not None and result.terminal
 
 
 @pytest.mark.asyncio

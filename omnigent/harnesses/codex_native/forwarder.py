@@ -3561,6 +3561,7 @@ async def _maybe_fail_turn_on_certificate_failure(
     *,
     session_id: str,
     bridge_dir: Path,
+    turn_result_bridge_dir: Path | None,
     params: _JsonObject,
     usage_coalescer: _SessionUsageCoalescer,
     delta_coalescer: _OutputTextDeltaCoalescer | None,
@@ -3619,26 +3620,30 @@ async def _maybe_fail_turn_on_certificate_failure(
         failure.evidence,
     )
     model = forwarder_state.model
-    async with _conversation_item_delivery_scope(session_id):
-        if delta_coalescer is not None:
-            await delta_coalescer.flush()
-        await _post_turn_status_edge(
-            client,
-            session_id,
-            _CodexTurnStatusEdge(
-                status="failed",
-                turn_id=turn_id,
-                source="error:certificate",
-                error=_CodexTerminalError(
-                    message=(
-                        f"{certificate_failure_message(failure, model=model)}\n\n"
-                        f"{CERTIFICATE_REMEDIATION}"
+    try:
+        async with _conversation_item_delivery_scope(session_id):
+            if delta_coalescer is not None:
+                await delta_coalescer.flush()
+            await _post_turn_status_edge(
+                client,
+                session_id,
+                _CodexTurnStatusEdge(
+                    status="failed",
+                    turn_id=turn_id,
+                    source="error:certificate",
+                    error=_CodexTerminalError(
+                        message=(
+                            f"{certificate_failure_message(failure, model=model)}\n\n"
+                            f"{CERTIFICATE_REMEDIATION}"
+                        ),
+                        kind=_CODEX_ERROR_KIND_GENERIC,
                     ),
-                    kind=_CODEX_ERROR_KIND_GENERIC,
                 ),
-            ),
-        )
-        await usage_coalescer.flush()
+            )
+            await usage_coalescer.flush()
+    finally:
+        if turn_result_bridge_dir is not None:
+            complete_codex_turn_result(turn_result_bridge_dir, turn_id)
     return True
 
 
@@ -3683,6 +3688,7 @@ async def _maybe_handle_turn_event(
                 client,
                 session_id=session_id,
                 bridge_dir=bridge_dir,
+                turn_result_bridge_dir=turn_result_bridge_dir,
                 params=params,
                 usage_coalescer=usage_coalescer,
                 delta_coalescer=delta_coalescer,

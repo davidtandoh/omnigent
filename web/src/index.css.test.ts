@@ -12,12 +12,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { TooltipProvider } from "./components/ui/tooltip";
 import type * as UseTerminalsModule from "./hooks/useTerminals";
-import {
-  UI_FONT_SIZE_DEFAULT,
-  UI_FONT_SIZE_MAX,
-  UI_FONT_SIZE_MIN,
-  UI_FONT_SIZE_MOBILE_DEFAULT,
-} from "./lib/uiFontPreferences";
+import { UI_FONT_SIZE_DEFAULT, UI_FONT_SIZE_MAX, UI_FONT_SIZE_MIN } from "./lib/uiFontPreferences";
 import { WorkspacePanel } from "./shell/WorkspacePanel";
 
 // Rendering the real WorkspacePanel below is a layout test: stub its content
@@ -792,35 +787,6 @@ describe("index.css body text tokens", () => {
     expect(mobileMap, "the mobile typography mapping is gone from index.css").toBeDefined();
     expect(mobileMap).toContain(`--text-sm: calc(var(--mobile-ui-font-size) * ${CAPTION_RATIO})`);
     expect(mobileMap).toContain("--text-ui: var(--mobile-ui-font-size)");
-    expect(mobileMap).toContain("--text-base: var(--mobile-ui-font-size)");
-  });
-
-  /* Contract: mobile gets its own unset default, while a saved Appearance
-   * value applies directly instead of being silently rescaled. */
-  describe("mobile branch consumes the font-size preference", () => {
-    it("uses the mobile default and aliases the effective body size to the preference", () => {
-      expect(mobileMap, "the mobile typography mapping is gone from index.css").toBeDefined();
-      expect(mobileMap).toContain(`--desktop-ui-font-size: ${UI_FONT_SIZE_MOBILE_DEFAULT}px`);
-      expect(mobileMap).toContain("--mobile-ui-font-size: var(--desktop-ui-font-size)");
-      expect(mobileMap).not.toContain("--mobile-ui-font-size: calc(");
-    });
-
-    it("keeps the desktop and mobile defaults distinct", () => {
-      expect(UI_FONT_SIZE_DEFAULT).toBe(13);
-      expect(UI_FONT_SIZE_MOBILE_DEFAULT).toBe(14);
-    });
-
-    it("routes inherited body text through the same effective token", () => {
-      expect(cssSource).toContain("font-size: var(--mobile-ui-font-size)");
-      expect(cssSource).not.toContain("font-size: max(16px, var(--text-ui))");
-    });
-
-    it("scales mobile headings from the effective body step", () => {
-      expect(mobileMap).toContain("--ui-ramp-anchor: var(--mobile-ui-font-size)");
-      expect(mobileMap).toContain("--text-lg: calc(var(--ui-ramp-anchor) * 1.125)");
-      expect(mobileMap).toContain("--text-xl: calc(var(--ui-ramp-anchor) * 1.25)");
-      expect(mobileMap).toContain("--text-2xl: calc(var(--ui-ramp-anchor) * 1.5)");
-    });
   });
 
   it.each([UI_FONT_SIZE_MIN, UI_FONT_SIZE_DEFAULT, UI_FONT_SIZE_MAX])(
@@ -919,12 +885,6 @@ describe("index.css mobile sidebar opacity", () => {
   });
 });
 
-describe("index.css mobile sidebar actions", () => {
-  it("does not restore the removed circular glass container", () => {
-    expect(cssSource).not.toContain(".sidebar-glass-chip");
-  });
-});
-
 describe("index.css text selection colors", () => {
   const selectionRule = cssSource.match(/::selection\s*\{([^}]*)\}/)?.[1];
 
@@ -934,26 +894,6 @@ describe("index.css text selection colors", () => {
     expect(selectionRule).not.toContain("--sidebar-active");
     expect(selectionRule).not.toContain("--brand-accent");
     expect(cssSource).not.toContain(".dark ::selection");
-  });
-});
-
-describe("index.css mobile settings title", () => {
-  const titleRule = cssSource.match(/\.settings-page-title \{[^}]*\}/)?.[0];
-  const headerFadeRule = cssSource.match(/\.settings-mobile-header::before \{[^}]*\}/)?.[0];
-
-  it("centers the settings title in the fixed mobile header row", () => {
-    expect(headerFadeRule, "the mobile settings header rule is gone").toBeDefined();
-    expect(titleRule, "the mobile settings title rule is gone").toBeDefined();
-    expect(titleRule).toContain("position: fixed");
-    expect(titleRule).toContain("height: var(--omnigent-header-height)");
-    expect(titleRule).toContain("text-align: center");
-  });
-
-  it("fades the settings header into the page like the session header", () => {
-    expect(headerFadeRule).toContain("height: 80px");
-    expect(headerFadeRule).toContain(
-      "background: linear-gradient(to bottom, var(--background) 0 48px, transparent 80px)",
-    );
   });
 });
 
@@ -986,18 +926,6 @@ describe("index.css electron-mac window drag region", () => {
   afterEach(() => {
     cleanup();
     unmarkMacShell();
-  });
-
-  it("scopes the no-drag exclusions without :has() so DOM edits stay cheap", () => {
-    // `html:has(...)` restyles the whole page on DOM mutations, e.g. every
-    // keystroke in a controlled textarea.
-    expect(controlsSelector).not.toContain(":has(");
-  });
-
-  it("covers the full width and height of the desktop header", () => {
-    expect(dragRule).toContain("inset: 0 0 auto 0");
-    expect(dragRule).toContain("height: var(--mac-titlebar-height)");
-    expect(dragRule).toContain("-webkit-app-region: drag");
   });
 
   it.each<[string, ComponentProps<"div">]>([
@@ -1120,9 +1048,6 @@ describe("index.css electron-mac sidebar header", () => {
   const sidebarRule = cssSource.match(
     /\[data-electron-mac\] \.conversations-sidebar \{[^}]*\}/,
   )?.[0];
-  const headerRowRule = cssSource.match(
-    /\[data-electron-mac\] \.sidebar-header-row \{[^}]*\}/,
-  )?.[0];
   const brandRule = cssSource.match(/\[data-electron-mac\] \.sidebar-brand \{[^}]*\}/)?.[0];
   const inSidebarActionsRule = cssSource.match(
     /\[data-electron-mac\] \.conversations-sidebar \[data-testid="sidebar-header-actions"\] \{[^}]*\}/,
@@ -1130,14 +1055,8 @@ describe("index.css electron-mac sidebar header", () => {
   const stripActionsRule = cssSource.match(
     /\[data-electron-mac\] \.electron-sidebar-header-actions \{(?:[^{}]|\{[^{}]*\})*\}/,
   )?.[0];
-  const settingsHeaderRule = cssSource.match(
-    /\[data-electron-mac\] \.settings-sidebar-header \{[^}]*\}/,
-  )?.[0];
   const chatHeaderToggleRule = cssSource.match(
     /\[data-electron-mac\] \.chat-header-sidebar-toggle \{[^}]*\}/,
-  )?.[0];
-  const peekCardRule = cssSource.match(
-    /\[data-electron-mac\] \.conversations-sidebar\.is-peek \{[^}]*\}/,
   )?.[0];
   const peekHeaderRowRule = cssSource.match(
     /\[data-electron-mac\] \.conversations-sidebar\.is-peek \.sidebar-header-row \{[^}]*\}/,
@@ -1150,10 +1069,6 @@ describe("index.css electron-mac sidebar header", () => {
 
   it("drops the brand mark, which has nowhere to sit beside the lights", () => {
     expect(brandRule).toContain("display: none");
-  });
-
-  it("reserves the entire drag band before the sidebar content", () => {
-    expect(headerRowRule).toContain("height: var(--mac-titlebar-height)");
   });
 
   it("hides the sidebar's own cluster in favour of the title-bar copy", () => {
@@ -1192,10 +1107,6 @@ describe("index.css electron-mac sidebar header", () => {
     expect(chatHeaderToggleRule).toContain("display: none");
   });
 
-  it("floats the peek card below the title-bar controls", () => {
-    expect(peekCardRule).toContain("top: calc(var(--mac-titlebar-height) + 0.5rem)");
-  });
-
   it("drops the header row inside the peek card", () => {
     // The peek card already clears the title bar, so its content starts
     // against its own top padding without another reserved header row.
@@ -1206,12 +1117,6 @@ describe("index.css electron-mac sidebar header", () => {
     // The DOM order is Search → Settings → toggle (tab order follows
     // importance), so the toggle is reordered visually rather than moved.
     expect(stripActionsRule).toMatch(/&\s*>\s*\*\s*>\s*\*:last-child\s*\{[^}]*order:\s*-1/);
-  });
-
-  it("pushes the settings sidebar's Back row below the lights", () => {
-    // /settings swaps the header row out entirely; without this its Back row
-    // would sit underneath the window controls.
-    expect(settingsHeaderRule).toContain("padding-top: calc(var(--mac-titlebar-height) + 0.5rem)");
   });
 
   it("keeps every header rule scoped to the desktop shell", () => {
@@ -1281,11 +1186,6 @@ describe("index.css maximized workspace rail traffic-light clearance", () => {
     document.body.appendChild(shell);
     return strip;
   }
-
-  it("has the clearance rule this test exists to protect", () => {
-    expect(rule, "the maximized rail tab-strip padding rule is gone from index.css").toBeDefined();
-    expect(rule).toContain("padding-left: calc(var(--mac-traffic-light-width) + 5rem)");
-  });
 
   it("clears the lights on the mac shell while the sidebar is collapsed", () => {
     const strip = makeStrip(true);

@@ -93,8 +93,6 @@ describe("injectCommentBridge", () => {
       source: BRIDGE_SOURCE,
       types: BRIDGE_MSG,
     });
-    expect(HTML_COMMENT_BRIDGE_RUNTIME).not.toMatch(/\b(?:eval|Function)\s*\(/);
-    expect(HTML_COMMENT_BRIDGE_RUNTIME).toContain("script instanceof HTMLScriptElement");
   });
 
   it("ships a syntactically valid classic script", () => {

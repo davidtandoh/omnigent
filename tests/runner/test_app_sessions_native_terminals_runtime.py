@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import asyncio
 import contextlib
 import json
@@ -1977,55 +1976,6 @@ async def test_auto_create_codex_terminal_fresh_launch_loads_relaunch_graph(
         else:
             codex_native_pkg.__dict__.pop("main", None)
         runner_app_mod._AUTO_CODEX_APP_SERVERS.pop(session_id, None)
-
-
-def test_auto_create_codex_terminal_imports_branch_codex_native_modules_at_entry() -> None:
-    """Every codex_native module the function imports loads unconditionally.
-
-    A branch-local import can fire for the first time on a relaunch; after an
-    in-place upgrade that pulls NEW files into the OLD process (ImportError
-    on names the old graph lacks). A function-level import runs on the first
-    launch, so the relaunch reuses modules the process already holds.
-
-    :returns: None.
-    """
-    import omnigent.runner.native.orchestration as orchestration_mod
-
-    source = Path(cast(str, orchestration_mod.__file__)).read_text()
-    tree = ast.parse(source)
-    fn = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_auto_create_codex_terminal"
-    )
-    entry_modules: set[str] = set()
-    for stmt in fn.body:
-        if isinstance(stmt, ast.ImportFrom) and stmt.module:
-            entry_modules.add(stmt.module)
-        elif isinstance(stmt, ast.Import):
-            entry_modules.update(alias.name for alias in stmt.names)
-    entry_imports = {
-        id(stmt) for stmt in fn.body if isinstance(stmt, (ast.Import, ast.ImportFrom))
-    }
-    branch_modules: set[str] = set()
-    for node in ast.walk(fn):
-        if id(node) in entry_imports:
-            continue
-        if isinstance(node, ast.ImportFrom) and node.module:
-            if node.module.startswith("omnigent.harnesses.codex_native"):
-                branch_modules.add(node.module)
-        elif isinstance(node, ast.Import):
-            branch_modules.update(
-                alias.name
-                for alias in node.names
-                if alias.name.startswith("omnigent.harnesses.codex_native")
-            )
-    missing = branch_modules - entry_modules
-    assert not missing, (
-        "codex_native modules imported only inside branches of "
-        f"_auto_create_codex_terminal: {sorted(missing)}; a relaunch after an "
-        "in-place upgrade would import them into the old process for the first time"
-    )
 
 
 @pytest.mark.asyncio

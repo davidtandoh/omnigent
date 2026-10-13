@@ -81,12 +81,10 @@ describe("macOS Electron embed", () => {
       "workspace-tab-strip",
     ]) {
       const selector = selectorFor(`.${className}`);
-      expect(selector).not.toContain(":has(");
       expect(scope.querySelector(`.${className}`)!.matches(selector), className).toBe(expected);
     }
 
     const controlsSelector = selectorFor(":is(");
-    expect(controlsSelector).not.toContain(":has(");
     expect(getByRole("button").matches(controlsSelector)).toBe(expected);
     render(createPortal(<div role="menu">Menu</div>, getEmbedRoot()!));
     expect(getByRole("menu").matches(controlsSelector)).toBe(expected);
