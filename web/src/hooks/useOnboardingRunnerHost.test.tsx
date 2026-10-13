@@ -40,11 +40,19 @@ describe("useOnboardingRunnerHost", () => {
 
   it("resolves 'local' to this machine's host once it's online", async () => {
     bridge.takeOnboardingRunner.mockResolvedValue("local");
+    let resolveIdentity!: (identity: { cliInstalled: boolean; hostId: string }) => void;
+    bridge.getHostIdentity.mockReturnValue(
+      new Promise((resolve) => {
+        resolveIdentity = resolve;
+      }),
+    );
     const { result, rerender } = renderHook(({ hosts }) => useOnboardingRunnerHost(hosts), {
       initialProps: { hosts: [host("laptop", "offline"), host("box")] },
     });
     await waitFor(() => expect(bridge.takeOnboardingRunner).toHaveBeenCalled());
     expect(result.current).toMatchObject({ pending: true, hostId: null });
+    await act(async () => resolveIdentity({ cliInstalled: true, hostId: "laptop" }));
+    expect(result.current).toEqual({ pending: true, hostId: null });
     rerender({ hosts: [host("laptop"), host("box")] });
     expect(result.current).toEqual({ pending: false, hostId: "laptop" });
   });
