@@ -2441,6 +2441,7 @@ def _tool_use_ids_in_transcript(
     transcript_path: Path,
     *,
     include_sidechains: bool,
+    own_spawn_tool_use_id: str | None,
 ) -> set[str]:
     """Return assistant tool-use ids from a Claude transcript.
 
@@ -2450,6 +2451,8 @@ def _tool_use_ids_in_transcript(
     :param transcript_path: Claude JSONL transcript to inspect.
     :param include_sidechains: Whether records mirrored from child agents
         belong to this transcript owner.
+    :param own_spawn_tool_use_id: Spawn record ending the inherited history,
+        or ``None`` for the root transcript.
     :returns: Tool-use ids owned by this transcript.
     """
     try:
@@ -2475,6 +2478,7 @@ def _tool_use_ids_in_transcript(
         content = message.get("content")
         if not isinstance(content, list):
             continue
+        record_tool_use_ids: set[str] = set()
         for block in content:
             if not isinstance(block, dict) or block.get("type") != "tool_use":
                 continue
@@ -2485,7 +2489,11 @@ def _tool_use_ids_in_transcript(
                 continue
             tool_use_id = block.get("id")
             if isinstance(tool_use_id, str) and tool_use_id:
-                tool_use_ids.add(tool_use_id)
+                record_tool_use_ids.add(tool_use_id)
+        if own_spawn_tool_use_id in record_tool_use_ids:
+            tool_use_ids.clear()
+        else:
+            tool_use_ids.update(record_tool_use_ids)
     return tool_use_ids
 
 
@@ -2493,9 +2501,7 @@ def _subagent_own_spawn_tool_use_id(agent_jsonl_path: Path) -> str | None:
     """Return the spawn tool-use id that created the sub-agent owning
     *agent_jsonl_path*, read from its sibling ``agent-<id>.meta.json``.
 
-    Used by :func:`_subagent_parents_by_tool_use` to drop a sub-agent's own
-    spawn id from the ownership its transcript contributes. Returns ``None``
-    when the meta is missing or malformed, which leaves correlation unchanged.
+    Returns ``None`` when the meta is missing or malformed.
     """
     meta_path = agent_jsonl_path.with_name(
         agent_jsonl_path.name.removesuffix(".jsonl") + ".meta.json"
@@ -2524,23 +2530,14 @@ def _subagent_parents_by_tool_use(
         for path in sorted(subagents_dir.glob("agent-*.jsonl"))
     )
     for path, owner_id in transcript_owners:
-        # A ``fork`` sub-agent starts from a copy of the parent conversation,
-        # which includes the Agent/Task record that spawned the fork itself.
-        # Counting that inherited copy would make the fork an owner of its own
-        # spawn id — self-parenting it, or colliding with the real issuer so
-        # the id is dropped as ambiguous below. Either way the fork never
-        # resolves to a parent and is never registered as a child row. An agent
-        # is never its own parent, so skip only its own spawn id; ids it
-        # genuinely issued for its children still count.
         own_spawn_tool_use_id = (
             _subagent_own_spawn_tool_use_id(path) if owner_id is not None else None
         )
         for tool_use_id in _tool_use_ids_in_transcript(
             path,
             include_sidechains=owner_id is not None,
+            own_spawn_tool_use_id=own_spawn_tool_use_id,
         ):
-            if tool_use_id == own_spawn_tool_use_id:
-                continue
             if tool_use_id in owners and owners[tool_use_id] != owner_id:
                 ambiguous.add(tool_use_id)
             else:

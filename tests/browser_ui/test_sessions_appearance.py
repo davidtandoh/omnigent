@@ -592,9 +592,20 @@ def test_mac_shell_clearance_renders_with_zoom(
         root.style.setProperty('--omnigent-electron-zoom', String(zoom));
         const sample = document.createElement('div');
         sample.className = 'app-shell';
+        sample.style.cssText = 'position:fixed;inset:0;z-index:9999';
         sample.innerHTML = `
             <div class="electron-drag-strip"></div>
-            <div class="conversations-sidebar"><div class="sidebar-header-row"></div></div>
+            <div class="conversations-sidebar" style="position:absolute;width:300px;height:120px;z-index:50">
+                <div class="sidebar-header-row"></div>
+                <div class="sidebar-brand">Brand</div>
+                <div data-testid="sidebar-header-actions">Sidebar actions</div>
+            </div>
+            <div class="electron-sidebar-header-actions">
+                <div data-testid="sidebar-header-actions" style="display:flex">
+                    <button>Search</button><button>Settings</button><button>Collapse</button>
+                </div>
+            </div>
+            <button class="chat-header-sidebar-toggle">Open sidebar</button>
             <div class="conversations-sidebar is-peek" style="position:fixed">
                 <div class="sidebar-header-row"></div>
             </div>
@@ -604,6 +615,11 @@ def test_mac_shell_clearance_renders_with_zoom(
             </aside>`;
         document.body.append(sample);
         const style = selector => getComputedStyle(sample.querySelector(selector));
+        const controls = [...sample.querySelectorAll('.electron-sidebar-header-actions button')];
+        const controlOrder = () => [...controls]
+            .sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left)
+            .map(button => button.textContent);
+        const collapse = controls[2].getBoundingClientRect();
         const strip = sample.querySelector('.electron-drag-strip').getBoundingClientRect();
         const result = {
             strip: {x: strip.x, y: strip.y, width: strip.width, height: strip.height},
@@ -613,11 +629,28 @@ def test_mac_shell_clearance_renders_with_zoom(
             peekRow: style('.is-peek .sidebar-header-row').display,
             settingsTop: parseFloat(style('.settings-sidebar-header').paddingTop),
             closedPadding: parseFloat(style('.workspace-tab-strip').paddingLeft),
+            sidebarMargin: style('.conversations-sidebar').marginTop,
+            brandDisplay: style('.sidebar-brand').display,
+            sidebarActions: style('.conversations-sidebar [data-testid="sidebar-header-actions"]').display,
+            stripActions: style('.electron-sidebar-header-actions [data-testid="sidebar-header-actions"]').display,
+            stripPosition: style('.electron-sidebar-header-actions').position,
+            toggleDisplay: style('.chat-header-sidebar-toggle').display,
+            order: controlOrder(),
+            controlsAboveSidebar: document.elementFromPoint(
+                collapse.x + collapse.width / 2, collapse.y + collapse.height / 2
+            ) === controls[2],
         };
         sample.setAttribute('data-sidebar-open', 'true');
         result.openPadding = parseFloat(style('.workspace-tab-strip').paddingLeft);
         root.removeAttribute('data-electron-mac');
         result.browserRegion = style('.electron-drag-strip').getPropertyValue('-webkit-app-region');
+        result.browserBrand = style('.sidebar-brand').display;
+        result.browserSidebarActions = style('.conversations-sidebar [data-testid="sidebar-header-actions"]').display;
+        result.browserToggle = style('.chat-header-sidebar-toggle').display;
+        result.browserStripPosition = style('.electron-sidebar-header-actions').position;
+        result.browserPeekRow = style('.is-peek .sidebar-header-row').display;
+        result.browserSettingsTop = style('.settings-sidebar-header').paddingTop;
+        result.browserOrder = controlOrder();
         sample.remove();
         root.style.removeProperty('--omnigent-electron-zoom');
         return result;
@@ -634,3 +667,18 @@ def test_mac_shell_clearance_renders_with_zoom(
     assert geometry["settingsTop"] == pytest.approx(height + 8)
     assert geometry["closedPadding"] == pytest.approx(88 / zoom + 80, abs=0.01)
     assert geometry["openPadding"] == 0
+    assert geometry["sidebarMargin"] == "0px"
+    assert geometry["brandDisplay"] == "none"
+    assert geometry["sidebarActions"] == "none"
+    assert geometry["stripActions"] != "none"
+    assert geometry["stripPosition"] == "absolute"
+    assert geometry["toggleDisplay"] == "none"
+    assert geometry["order"] == ["Collapse", "Search", "Settings"]
+    assert geometry["controlsAboveSidebar"] is True
+    assert geometry["browserBrand"] != "none"
+    assert geometry["browserSidebarActions"] != "none"
+    assert geometry["browserToggle"] != "none"
+    assert geometry["browserStripPosition"] == "static"
+    assert geometry["browserPeekRow"] != "none"
+    assert geometry["browserSettingsTop"] == "0px"
+    assert geometry["browserOrder"] == ["Search", "Settings", "Collapse"]

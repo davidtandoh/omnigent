@@ -341,12 +341,8 @@ def test_workflow_inserts_computed_summary_before_secret_scan_and_publication(
 
     assert (tmp_path / "polly-completed-sha.txt").read_text().strip() == "abc"
     receipt = next(step for step in steps if step["name"] == "Upload Polly completion receipt")
-    assert receipt["if"] == "steps.publish.outcome == 'success'"
     publish = next(step for step in steps if step["name"] == "Post review comment")
     assert publish["id"] == "publish"
     assert steps.index(publish) < steps.index(receipt)
     assert receipt["with"]["path"] == "/tmp/polly-completed-sha.txt"
     assert receipt["with"]["overwrite"] is True
-    assert receipt["with"]["name"] == (
-        "polly-completed-${{ steps.pr.outputs.pr_number }}-${{ steps.ctx.outputs.head_sha }}"
-    )

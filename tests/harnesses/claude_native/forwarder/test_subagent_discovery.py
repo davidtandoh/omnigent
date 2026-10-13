@@ -750,27 +750,50 @@ def test_fork_inherited_spawn_record_resolves_to_the_real_parent(
     assert owners["toolu_fork"] is None, "fork should attach to the root transcript"
 
 
-async def test_fork_subagent_inheriting_its_own_spawn_record_registers(
+@pytest.mark.parametrize("history", ["own-spawn", "earlier-sibling", "same-record-sibling"])
+async def test_fork_subagent_registers_local_spawns_after_inherited_history(
     tmp_path: Path,
+    history: str,
 ) -> None:
-    """End to end: a background ``fork`` sub-agent registers as a child row.
-
-    Before the fix the fork's inherited copy of its own spawn record made its
-    spawn id ambiguous, so correlation dropped it and the fork never appeared
-    in the Agents rail — the OMNI-11924 symptom. A non-inheriting sub-agent
-    (e.g. ``general-purpose``) was unaffected and is covered by the tests
-    above.
-    """
+    """Copied sibling spawns stay with the root; later spawns belong to the fork."""
     bridge_dir = tmp_path / "bridge"
     transcript_path = tmp_path / "session.jsonl"
     transcript_path.write_text("", encoding="utf-8")
-    _seed_subagent_on_disk(
+    inherited_records = [_inherited_spawn_record("toolu_fork", "continue in the background")]
+    if history != "own-spawn":
+        sibling_record = _inherited_spawn_record("toolu_sibling", "first sibling")
+        _seed_subagent_on_disk(
+            transcript_path=transcript_path,
+            subagent_id="z-sibling",
+            agent_type="fork",
+            description="first sibling",
+            tool_use_id="toolu_sibling",
+            transcript_records=[sibling_record],
+        )
+        if history == "earlier-sibling":
+            inherited_records.insert(0, sibling_record)
+        else:
+            inherited_records[0]["message"]["content"].extend(sibling_record["message"]["content"])
+    fork_transcript = _seed_subagent_on_disk(
         transcript_path=transcript_path,
         subagent_id="a-fork",
         agent_type="fork",
         description="continue in the background",
         tool_use_id="toolu_fork",
-        transcript_records=[_inherited_spawn_record("toolu_fork", "continue in the background")],
+        transcript_records=inherited_records,
+    )
+
+    _seed_subagent_on_disk(
+        transcript_path=transcript_path,
+        subagent_id="b-nested",
+        agent_type="fork",
+        description="nested fork",
+        tool_use_id="toolu_nested",
+        transcript_records=[
+            *inherited_records,
+            _inherited_spawn_record("toolu_nested", "nested fork"),
+        ],
+        spawn_transcript_path=fork_transcript,
     )
 
     start_paths: dict[str, str] = {}
@@ -802,6 +825,15 @@ async def test_fork_subagent_inheriting_its_own_spawn_record_registers(
             status_retry_tracker=forwarder._PostRetryTracker(base_delay_s=0.0),
         )
 
-    assert start_paths == {"a-fork": "/v1/sessions/conv_root/events"}
+    expected_paths = {
+        "a-fork": "/v1/sessions/conv_root/events",
+        "b-nested": "/v1/sessions/conv_a-fork/events",
+    }
+    if history != "own-spawn":
+        expected_paths["z-sibling"] = "/v1/sessions/conv_root/events"
+        assert state.subagents["z-sibling"].parent_subagent_id is None
+    assert start_paths == expected_paths
+    assert state.subagents["b-nested"].parent_subagent_id == "a-fork"
+    assert forwarder._read_subagent_forward_state(bridge_dir) == state
     assert state.subagents["a-fork"].child_conversation_id == "conv_a-fork"
     assert state.subagents["a-fork"].parent_subagent_id is None
