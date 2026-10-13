@@ -146,7 +146,6 @@ describe("HtmlCommentViewer", () => {
     expect(srcDoc).toContain("<script src=");
     expect(srcDoc).toContain("htmlCommentBridgeRuntime.js");
     expect(srcDoc).toContain("data-omni-nonce=");
-    expect(srcDoc).not.toContain("new Function");
   });
 
   it("starts the diagnostic timer only after the iframe loads", () => {

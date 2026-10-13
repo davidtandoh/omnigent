@@ -346,24 +346,37 @@ def test_nimble_empty_markdown_falls_back_to_html(tool_ctx: ToolContext) -> None
     assert "no content extracted" not in result
 
 
-def test_nimble_short_page_mentioning_cdn_is_not_blocked(tool_ctx: ToolContext) -> None:
-    """
-    A short legitimate page that merely mentions a CDN name (a "secured by
-    Cloudflare" footer) is NOT a challenge page and its content is returned —
-    block detection matches challenge-page phrases, not bare vendor names.
-    """
-    body = "Status: all systems operational. Secured by Cloudflare. Updated 2m ago."
-    assert len(body) < 500
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Status: all systems operational. Secured by Cloudflare. Updated 2m ago.",
+        "Contact Acme. Email: support@example.com. This site is protected by reCAPTCHA.",
+        "Contact Acme. Our support form uses CAPTCHA to prevent spam.",
+    ],
+)
+@pytest.mark.parametrize("output_format", ["markdown", "html"])
+def test_nimble_short_page_mentioning_protection_is_readable(
+    tool_ctx: ToolContext, body: str, output_format: str
+) -> None:
+    if output_format == "html":
+        body = f"<p>{body}</p>"
     fake_response = MagicMock()
-    fake_response.json.return_value = {"data": {"markdown": body}}
+    fake_response.json.return_value = {"data": {output_format: body}}
 
-    tool = WebReadTool(config={"read_provider": "nimble", "api_key": "k"})
+    tool = WebReadTool(
+        config={
+            "read_provider": "nimble",
+            "api_key": "k",
+            "output_format": output_format,
+        }
+    )
     with patch("omnigent.tools.builtins.web_read_nimble.httpx.post") as mock_post:
         mock_post.return_value = fake_response
         result = tool.invoke(json.dumps({"url": "https://example.com"}), tool_ctx)
 
+    mock_post.assert_called_once()
     assert "challenge/denied response" not in result
-    assert "all systems operational" in result
+    assert body in result
 
 
 def test_nimble_detects_cloudflare_challenge_page(tool_ctx: ToolContext) -> None:
@@ -534,23 +547,32 @@ def test_nimble_http_error_returns_error_string(tool_ctx: ToolContext) -> None:
     assert "401" in result
 
 
-def test_nimble_detects_block_page(tool_ctx: ToolContext) -> None:
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Access denied. Are you a robot?",
+        "Verify you are human. Complete the CAPTCHA to continue.",
+    ],
+)
+def test_nimble_detects_block_page(tool_ctx: ToolContext, body: str) -> None:
     """A short body that is only a captcha/denied marker is reported as blocked."""
     fake_response = MagicMock()
-    fake_response.json.return_value = {"data": {"markdown": "Access denied. Are you a robot?"}}
+    fake_response.json.return_value = {"data": {"markdown": body}}
 
     tool = WebReadTool(config={"read_provider": "nimble", "api_key": "k"})
     with patch("omnigent.tools.builtins.web_read_nimble.httpx.post") as mock_post:
         mock_post.return_value = fake_response
         result = tool.invoke(json.dumps({"url": "https://example.com"}), tool_ctx)
 
+    mock_post.assert_called_once()
     assert "challenge/denied response" in result
 
 
 def test_nimble_block_detection_boundary_at_500(tool_ctx: ToolContext) -> None:
     """A body >= 500 chars is NOT block-flagged even if it mentions a marker."""
-    # A legitimate article that merely discusses captchas, padded past 500 chars.
-    body = "This article explains how captcha systems work. " + ("detail " * 80)
+    body = "This article explains why sites display 'verify you are human'. " + " ".join(
+        ["detail"] * 80
+    )
     assert len(body) >= 500
     fake_response = MagicMock()
     fake_response.json.return_value = {"data": {"markdown": body}}
@@ -561,7 +583,7 @@ def test_nimble_block_detection_boundary_at_500(tool_ctx: ToolContext) -> None:
         result = tool.invoke(json.dumps({"url": "https://example.com"}), tool_ctx)
 
     assert "challenge/denied response" not in result
-    assert "captcha systems work" in result
+    assert body in result
 
 
 def test_nimble_empty_content_suggests_stronger_driver(tool_ctx: ToolContext) -> None:

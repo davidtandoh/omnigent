@@ -287,38 +287,45 @@ describe("useBrowserAgentRelay — action dispatch", () => {
     // Every dispatch test wins the claim, then a benign result POST.
     authenticatedFetch.mockResolvedValue(WON);
   });
-  it("derives inherited provenance from the source session, never model args or visible host", async () => {
-    const bridge = installBridge();
-    writeArcaHostId("arca-host");
-    setSessionHost(CONV, "local-host");
-    setSessionHost("parent", "arca-host");
-    setSessionParent("conv_background_A", "parent");
-    getSessionSlim.mockImplementation(async (id: string) => ({
-      id,
-      hostId: id === "parent" ? "arca-host" : null,
-      parentSessionId: id === "parent" ? null : "parent",
-    }));
-    await runAction(
-      actionEvent("navigate", {
-        url: "http://localhost:5173",
-        sourceHostId: "forged",
-        isArca: true,
-      }),
-      { source: "conv_background_A" },
-    );
-    expect(bridge.browserOpenOrNavigate).toHaveBeenCalledWith(
-      "conv_background_A",
-      "http://localhost:5173",
-      undefined,
-      {
-        force: true,
-        agent: true,
-        sourceHostId: "arca-host",
-        rememberedArcaHostId: "arca-host",
-      },
-    );
-    expect(getSessionSlim.mock.calls.map(([id]) => id)).toEqual(["conv_background_A", "parent"]);
-  });
+  it.each(["parent", "side chat"])(
+    "derives %s provenance from the source session, never model args or visible host",
+    async (relationship) => {
+      const bridge = installBridge();
+      writeArcaHostId("arca-host");
+      setSessionHost(CONV, "local-host");
+      setSessionHost("parent", "arca-host");
+      setSessionParent("conv_background_A", "parent");
+      getSessionSlim.mockImplementation(async (id: string) => ({
+        id,
+        hostId: id === "parent" ? "arca-host" : null,
+        parentSessionId: relationship === "parent" && id !== "parent" ? "parent" : null,
+        labels:
+          relationship === "side chat" && id !== "parent"
+            ? { "omnigent.side_chat.source_id": "parent" }
+            : {},
+      }));
+      await runAction(
+        actionEvent("navigate", {
+          url: "http://localhost:5173",
+          sourceHostId: "forged",
+          isArca: true,
+        }),
+        { source: "conv_background_A" },
+      );
+      expect(bridge.browserOpenOrNavigate).toHaveBeenCalledWith(
+        "conv_background_A",
+        "http://localhost:5173",
+        undefined,
+        {
+          force: true,
+          agent: true,
+          sourceHostId: "arca-host",
+          rememberedArcaHostId: "arca-host",
+        },
+      );
+      expect(getSessionSlim.mock.calls.map(([id]) => id)).toEqual(["conv_background_A", "parent"]);
+    },
+  );
 
   it("corrects a mismatched remembered Arca host after an authorized preview retry", async () => {
     const bridge = installBridge();

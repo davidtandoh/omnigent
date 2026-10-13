@@ -14,7 +14,7 @@ import type { BrowserActionRequestEvent } from "@/lib/events";
 import { supportsBrowser } from "@/lib/nativeBridge";
 import { authenticatedFetch } from "@/lib/identity";
 import { useQueryClient } from "@tanstack/react-query";
-import { setSessionHost, setSessionParent } from "@/lib/sessionHost";
+import { getSessionParent, setSessionHost, setSessionParent } from "@/lib/sessionHost";
 import { getSessionSlim } from "@/lib/sessionsApi";
 import { isArcaHost, readArcaHostId, writeArcaHostId } from "@/lib/arcaHost";
 import type { Host } from "@/hooks/useHosts";
@@ -422,12 +422,12 @@ export function useBrowserAgentRelay(conversationId: string | null | undefined):
               retry: false,
             });
             setSessionHost(source.id, source.hostId);
-            setSessionParent(source.id, source.parentSessionId);
+            setSessionParent(source.id, source.parentSessionId, source.labels);
             if (source.hostId) {
               sourceHostId = source.hostId;
               break;
             }
-            id = source.parentSessionId;
+            id = getSessionParent(source.id);
           }
         } catch {
           // Unknown provenance stays denied for localhost; public browsing still works.

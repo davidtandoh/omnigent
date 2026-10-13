@@ -77,7 +77,6 @@ _DEFAULT_TIMEOUT_S = 120.0
 # (e.g. a "secured by Cloudflare" footer) without being a block page, so we match
 # the wording that only a challenge/block interstitial actually renders.
 _BLOCK_MARKERS = (
-    "captcha",
     "access denied",
     "are you a robot",
     "verify you are human",
