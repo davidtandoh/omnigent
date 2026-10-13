@@ -2417,7 +2417,10 @@ def main() -> None:
         _warn_deprecated_harness_path_env_vars()
 
     try:
-        cli(args=argv, standalone_mode=False)
+        exit_code = cli(args=argv, standalone_mode=False)
+        # Non-standalone Click returns explicit exit codes instead of raising.
+        if isinstance(exit_code, int):
+            raise SystemExit(exit_code)
     except click.ClickException as exc:
         log_cli_exception(exc, prefix="Click CLI error")
         exc.show()

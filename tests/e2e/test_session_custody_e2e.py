@@ -323,14 +323,47 @@ def test_codex_inflight_turn_survives_host_death_and_single_adoption(
             assert during["helpers"]["codex_app_server"] == native_before
             assert during["terminals"] == terminal_before
             time.sleep(2)
-        restart = procs.spawn(
-            ["server", "maintenance-start", "--json"],
-            env=env,
-            cwd=home,
-            log=tmp_path / "maintenance-start.log",
-        )
-        assert restart.wait(timeout=30) == 0, (tmp_path / "maintenance-start.log").read_text()
-        _online_host_id(client, timeout=60)
+        owner_process = ProcessIdentity(**runner_before).require_live()
+        if outage_s == 0:
+            owner_process.send_signal(signal.SIGSTOP)
+        try:
+            restart = procs.spawn(
+                ["server", "maintenance-start", "--json"],
+                env=env,
+                cwd=home,
+                log=tmp_path / "maintenance-start.log",
+            )
+            assert restart.wait(timeout=30) == 0, (tmp_path / "maintenance-start.log").read_text()
+            _online_host_id(client, timeout=60)
+            if outage_s == 0:
+                compact = client.post(
+                    f"/v1/sessions/{session_id}/events",
+                    json={"type": "compact"},
+                    timeout=120,
+                )
+                assert compact.status_code == 503, compact.text
+                session = client.get(f"/v1/sessions/{session_id}").json()
+                assert session["runner_id"] == binding["runner_id"]
+                assert session_contract(config_home, session_id)["owner"] == runner_before
+                assert ProcessIdentity.capture(native_before["pid"]) == ProcessIdentity(
+                    **native_before
+                )
+                (tmp_path / "compact-before-runner-reconnect.json").write_text(
+                    json.dumps(
+                        {
+                            "status_code": compact.status_code,
+                            "response": compact.json(),
+                            "runner_id": session["runner_id"],
+                            "owner": runner_before,
+                            "native": native_before,
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+        finally:
+            if outage_s == 0:
+                owner_process.send_signal(signal.SIGCONT)
         _poll_for_terminal_resource(
             client, session_id=session_id, resource_id="terminal_codex_main", timeout=60
         )
@@ -580,11 +613,46 @@ def test_default_local_codex_launch_supports_api_maintenance(
             set_fallback_mock_llm(isolated_mock_llm_server_url, "default", marker)
             set_fallback_mock_llm(isolated_mock_llm_server_url, "mock-custody", marker)
             with httpx.Client(base_url=binding["endpoint"], trust_env=False, timeout=30) as client:
+                _wait_for(
+                    lambda: not client.get(f"/v1/sessions/{session_id}").json().get("runner_id"),
+                    "retired session binding cleared",
+                )
+                # Restore the persisted state left by an interrupted clear-binding PATCH.
+                restored = client.patch(
+                    f"/v1/sessions/{session_id}", json={"runner_id": binding["runner_id"]}
+                )
+                restored.raise_for_status()
+                assert restored.json()["runner_id"] == binding["runner_id"]
+                stopped = client.post(
+                    f"/v1/sessions/{session_id}/events",
+                    json={"type": "stop_session", "data": {}},
+                )
+                assert stopped.status_code == 202, stopped.text
+                archived = client.patch(f"/v1/sessions/{session_id}", json={"archived": True})
+                archived.raise_for_status()
+                assert archived.json()["archived"] is True
                 _send_user_text(
                     client, session_id=successor.session_id, text="Verify successor web turn"
                 )
                 _poll_for_assistant_marker(
                     client, session_id=successor.session_id, marker=marker, timeout=60
+                )
+                (tmp_path / "retired-stop-archive.json").write_text(
+                    json.dumps(
+                        {
+                            "retired_session_id": session_id,
+                            "successor_session_id": successor.session_id,
+                            "retired_runner_id": restored.json()["runner_id"],
+                            "stop": stopped.json(),
+                            "archived": archived.json()["archived"],
+                            "successor_items": client.get(
+                                f"/v1/sessions/{successor.session_id}/items",
+                                params={"order": "asc", "limit": 100},
+                            ).json(),
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n"
                 )
             after = session_contract(config_home, successor.session_id)
             assert after["owner"] == before["owner"]
