@@ -229,6 +229,7 @@ def _build_event(ctx: EvaluationContext) -> PolicyEvent:
             # The session's current model (model_override or spec llm.model),
             # injected by the engine. ``None`` when undeterminable — cost
             # policies treat that as "cannot confirm a cheaper model".
+            "user_period_approvals": [dict(r) for r in ctx.user_period_approvals or []],
             "model": ctx.model,
             # The harness (e.g. "codex-native"), stamped by a native tool
             # hook so policies can tailor messages to it. ``None`` when

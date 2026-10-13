@@ -137,7 +137,9 @@ async def test_approval_updates_in_memory_so_same_engine_does_not_reask(
         conversation_id=conv.id,
         initial_labels={},
         # $3 today, nothing approved yet → first tool call crosses the $2 checkpoint.
-        initial_user_daily_cost=[{"cost_usd": 3.0, "ask_approved_usd": 0.0}],
+        initial_user_daily_cost=[
+            {"cost_usd": 3.0, "ask_approved_usd": 0.0, "day_utc": utc_day(now_epoch())}
+        ],
         conversation_store=conversation_store,
     )
     ctx = EvaluationContext(

@@ -71,6 +71,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from omnigent.policies.cost_windows import cost_window
 from omnigent.policies.schema import (
     SESSION_COST_ASK_APPROVED_STATE_KEY,
     SESSION_COST_UNPRICED_APPROVED_KEY,
@@ -558,67 +559,23 @@ def cost_budget(
     return evaluate
 
 
-def _user_daily_cost_usd(event: PolicyEvent) -> float:
-    """Read the session owner's per-UTC-day cost (USD) from a policy event.
-
-    :param event: Policy event dict.
-    :returns: ``event["context"]["user_daily_cost"][0]["cost_usd"]`` as a
-        float, or ``0.0`` when absent (engine didn't inject it — e.g. no
-        owner / not priced), so the gate never trips on missing data.
-    """
-    context = event.get("context") or {}
-    daily_records = context.get("user_daily_cost") or []
-    if not isinstance(daily_records, list) or not daily_records:
-        return 0.0
-    record = daily_records[0]
-    if not isinstance(record, dict):
-        return 0.0
-    raw = record.get("cost_usd", 0.0)
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return 0.0
+def _cost_records(event: PolicyEvent, start: str, end: str) -> list[Mapping[str, object]]:
+    """Select dated cost records within the inclusive UTC window."""
+    records = (event.get("context") or {}).get("user_daily_cost") or []
+    if not isinstance(records, list):
+        return []
+    return [
+        record
+        for record in records
+        if isinstance(record, dict)
+        and isinstance(record.get("day_utc"), str)
+        and start <= record["day_utc"] <= end
+    ]
 
 
-def _user_daily_ask_approved_usd(event: PolicyEvent) -> float:
-    """Read the highest soft checkpoint the owner approved today (USD).
-
-    :param event: Policy event dict.
-    :returns: ``event["context"]["user_daily_cost"][0]["ask_approved_usd"]``
-        as a float, or ``0.0`` when absent / none approved yet.
-    """
-    context = event.get("context") or {}
-    daily_records = context.get("user_daily_cost") or []
-    if not isinstance(daily_records, list) or not daily_records:
-        return 0.0
-    record = daily_records[0]
-    if not isinstance(record, dict):
-        return 0.0
-    raw = record.get("ask_approved_usd", 0.0)
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _user_daily_owner(event: PolicyEvent) -> str | None:
-    """Read the session owner the daily rollup belongs to, from a policy event.
-
-    Used to name whose spend tripped the gate in the ASK / DENY message.
-
-    :param event: Policy event dict.
-    :returns: ``event["context"]["user_daily_cost"][0]["user_id"]`` as a
-        non-empty string, or ``None`` when absent (single-user mode / not
-        injected) — callers fall back to an un-named phrasing.
-    """
-    context = event.get("context") or {}
-    daily_records = context.get("user_daily_cost") or []
-    if not isinstance(daily_records, list) or not daily_records:
-        return None
-    record = daily_records[0]
-    if not isinstance(record, dict):
-        return None
-    owner = record.get("user_id")
+def _cost_owner(records: list[Mapping[str, object]]) -> str | None:
+    """Read the owner from the selected cost records."""
+    owner = records[0].get("user_id") if records else None
     return owner if isinstance(owner, str) and owner else None
 
 
@@ -701,8 +658,10 @@ def user_daily_cost_budget(
             if not (event.get("session_state") or {}).get(_UNPRICED_APPROVED_KEY):
                 return _UNPRICED_ASK
             return _ALLOW
-        cost = _user_daily_cost_usd(event)
-        owner = _user_daily_owner(event)
+        records = _cost_records(event, *cost_window("day"))
+        record = records[0] if records else {}
+        cost = _state_usd(record, "cost_usd")
+        owner = _cost_owner(records)
         if cfg.hard_cap_enabled and cost >= max_cost_usd:
             if _model_blocked_over_budget(
                 _current_model(event),
@@ -731,7 +690,7 @@ def user_daily_cost_budget(
         if thresholds:
             crossed = max((t for t in thresholds if cost >= t), default=None)
             if crossed is not None:
-                approved_up_to = _user_daily_ask_approved_usd(event)
+                approved_up_to = _state_usd(record, "ask_approved_usd")
                 if crossed > approved_up_to:
                     spend_subject = f"{owner}'s spend today" if owner else "Today's spend"
                     return {
@@ -985,8 +944,9 @@ def user_period_cost_budget(
 
     The budget is the session owner's **cumulative spend across all their
     sessions for the current period (UTC)** instead of this one session's
-    spend. It reads ``event["context"]["user_daily_cost"]`` for day periods
-    or ``event["context"]["user_period_cost"]`` for other periods.
+    spend. Each policy filters ``event["context"]["user_daily_cost"]``
+    to its own UTC window. Non-day approvals are read from
+    ``event["context"]["user_period_approvals"]`` by period and window start.
 
     - **Soft (`ask_thresholds_usd`)**: the first time the owner's period
       spend crosses a checkpoint, the turn (request phase) or tool call
@@ -1004,17 +964,8 @@ def user_period_cost_budget(
     Abstains (ALLOW) on every other phase, and whenever the period cost
     is ``0.0`` (no spend recorded, no owner, or pricing unavailable).
 
-    **Current limitation**: Only ONE non-day period cost policy is supported
-    per agent spec. Configuring multiple period policies (e.g., weekly +
-    monthly) will raise a ``ValueError`` at engine build time. Daily cost
-    policies can coexist with one period policy (they use separate context
-    keys). This limitation prevents silent correctness bugs where multiple
-    policies would read the wrong period's data.
-
-    :param period: Time period granularity: ``"day"``, ``"week"``,
-        ``"month"``, ``"quarter"``, or ``"year"``. ``"day"`` reads from
-        ``user_daily_cost`` context; all others read from
-        ``user_period_cost`` context.
+    :param period: UTC period: ``"day"``, ``"week"``, ``"month"``,
+        ``"quarter"``, or ``"year"``. Multiple periods can coexist.
     :param max_cost_usd: Hard period limit in USD. Must be ``> 0``.
     :param ask_thresholds_usd: Optional soft period warning checkpoints
         in USD, e.g. ``[1.0, 2.5]``. Each value must be ``> 0`` and
@@ -1046,90 +997,21 @@ def user_period_cost_budget(
             )
     cfg = _resolve_expensive_models(expensive_models)
 
-    # Select the context key and state key based on period
-    if period == "day":
-        context_key = "user_daily_cost"
-        state_key = USER_DAILY_ASK_APPROVED_STATE_KEY
-        period_label = "daily"
-        period_noun = "day"
-    else:
-        # All non-day periods use user_period_cost context
-        from omnigent.policies.schema import USER_PERIOD_ASK_APPROVED_STATE_KEY
+    from omnigent.policies.schema import USER_PERIOD_ASK_APPROVED_STATE_KEY
 
-        context_key = "user_period_cost"
-        state_key = USER_PERIOD_ASK_APPROVED_STATE_KEY
-        # Map period to human-readable labels
-        period_labels = {
-            "week": ("weekly", "week"),
-            "month": ("monthly", "month"),
-            "quarter": ("quarterly", "quarter"),
-            "year": ("yearly", "year"),
-        }
-        period_label, period_noun = period_labels.get(period, (period, period))
-
-    # Shared context key for all cost policies (both daily and period)
-    context_key = "user_daily_cost"
-
-    def _read_period_cost(event: PolicyEvent) -> float:
-        """
-        Aggregate daily cost records to compute the period total.
-
-        Reads ``event["context"]["user_period_cost"]`` as a list of daily
-        cost dicts and sums their ``cost_usd`` fields.
-        """
-        context = event.get("context") or {}
-        daily_records = context.get(context_key) or []
-        if not isinstance(daily_records, list):
-            return 0.0
-        from contextlib import suppress
-
-        total = 0.0
-        for record in daily_records:
-            if isinstance(record, dict):
-                raw = record.get("cost_usd")
-                if raw is not None:
-                    with suppress(TypeError, ValueError):
-                        total += float(raw)
-        return total
-
-    def _read_period_approved(event: PolicyEvent) -> float:
-        """
-        Read the highest approved checkpoint across all days in the period.
-
-        Period approval state is stored in daily records. Returns the maximum
-        ``ask_approved_usd`` value across all records in the period.
-        """
-        from contextlib import suppress
-
-        context = event.get("context") or {}
-        daily_records = context.get(context_key) or []
-        if not isinstance(daily_records, list):
-            return 0.0
-
-        max_approved = 0.0
-        for record in daily_records:
-            if isinstance(record, dict):
-                raw = record.get("ask_approved_usd")
-                if raw is not None:
-                    with suppress(TypeError, ValueError):
-                        max_approved = max(max_approved, float(raw))
-        return max_approved
-
-    def _read_period_owner(event: PolicyEvent) -> str | None:
-        """
-        Read the session owner from any daily record.
-
-        All records belong to the same owner, so we read from the first one.
-        """
-        context = event.get("context") or {}
-        daily_records = context.get(context_key) or []
-        if not isinstance(daily_records, list) or not daily_records:
-            return None
-        first_record = daily_records[0]
-        if isinstance(first_record, dict):
-            owner = first_record.get("user_id")
-            return owner if isinstance(owner, str) and owner else None
-        return None
+    state_key = (
+        USER_DAILY_ASK_APPROVED_STATE_KEY
+        if period == "day"
+        else USER_PERIOD_ASK_APPROVED_STATE_KEY
+    )
+    period_label = {
+        "day": "daily",
+        "week": "weekly",
+        "month": "monthly",
+        "quarter": "quarterly",
+        "year": "yearly",
+    }[period]
+    period_noun = period
 
     def evaluate(event: PolicyEvent) -> PolicyResponse:
         """Evaluate the per-user period cost budget for a request or tool call.
@@ -1152,8 +1034,10 @@ def user_period_cost_budget(
             if not (event.get("session_state") or {}).get(_UNPRICED_APPROVED_KEY):
                 return _UNPRICED_ASK
             return _ALLOW
-        cost = _read_period_cost(event)
-        owner = _read_period_owner(event)
+        start, today = cost_window(period)
+        records = _cost_records(event, start, today)
+        cost = sum(_state_usd(record, "cost_usd") for record in records)
+        owner = _cost_owner(records)
         if cfg.hard_cap_enabled and cost >= max_cost_usd:
             if _model_blocked_over_budget(
                 _current_model(event),
@@ -1181,7 +1065,21 @@ def user_period_cost_budget(
         if thresholds:
             crossed = max((t for t in thresholds if cost >= t), default=None)
             if crossed is not None:
-                approved_up_to = _read_period_approved(event)
+                if period == "day":
+                    approved_up_to = max(
+                        (_state_usd(record, "ask_approved_usd") for record in records), default=0.0
+                    )
+                else:
+                    approvals = context.get("user_period_approvals") or []
+                    approved_up_to = max(
+                        (
+                            _state_usd(record, "ask_approved_usd")
+                            for record in approvals
+                            if record.get("period") == period
+                            and record.get("window_start") == start
+                        ),
+                        default=0.0,
+                    )
                 if crossed > approved_up_to:
                     spend_subject = (
                         f"{owner}'s spend this {period_noun}"
@@ -1195,14 +1093,17 @@ def user_period_cost_budget(
                             f"{period_label} warning threshold "
                             f"({period_label} limit ${max_cost_usd:.2f}). Continue?"
                         ),
-                        # Reserved key — the engine routes this to the
-                        # appropriate period store (user_daily_cost or
-                        # user_monthly_cost), applied only on approve.
                         "state_updates": [
                             {
                                 "key": state_key,
                                 "action": "set",
-                                "value": crossed,
+                                "value": crossed
+                                if period == "day"
+                                else {
+                                    "period": period,
+                                    "window_start": start,
+                                    "ask_approved_usd": crossed,
+                                },
                             },
                         ],
                     }
@@ -1338,16 +1239,15 @@ POLICY_REGISTRY: list[dict[str, object]] = [
         "Once a hard period limit is reached, DENY (the whole turn at the request phase, "
         "or each tool call) while still on an expensive model (prompting a /model downgrade), "
         "and ASK for approval at each soft warning checkpoint (request + tool-call phases, "
-        "remembered per user+period). Reads event.context.user_daily_cost for day periods "
-        "or event.context.user_period_cost for others.",
+        "remembered per user+period+window). Reads event.context.user_daily_cost and "
+        "event.context.user_period_approvals.",
         "params_schema": {
             "type": "object",
             "properties": {
                 "period": {
                     "type": "string",
                     "enum": ["day", "week", "month", "quarter", "year"],
-                    "description": "Time period granularity. 'day' reads from user_daily_cost "
-                    "context; all others read from user_period_cost context.",
+                    "description": "UTC time period used to filter user_daily_cost records.",
                 },
                 "max_cost_usd": {
                     "type": "number",

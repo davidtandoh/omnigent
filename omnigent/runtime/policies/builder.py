@@ -127,9 +127,8 @@ def _get_cost_policy_oldest_period(specs: list[PolicySpec]) -> str | None:
     :returns: The period string ("day", "week", "month", "quarter", "year")
         for the oldest period, or None if no cost-budget policies are present.
     """
-    from datetime import datetime, timedelta, timezone
-
-    from omnigent.db.utils import now_epoch
+    from omnigent.db.utils import now_epoch, utc_day
+    from omnigent.policies.cost_windows import cost_window
 
     # Collect all periods from cost-budget policies
     periods: list[str] = []
@@ -150,30 +149,8 @@ def _get_cost_policy_oldest_period(specs: list[PolicySpec]) -> str | None:
     if not periods:
         return None
 
-    # Calculate start date for each period and find the oldest
-    now = now_epoch()
-    dt = datetime.fromtimestamp(now, tz=timezone.utc)
-
-    def period_start_date(period: str) -> datetime:
-        if period == "day":
-            return datetime.combine(dt.date(), datetime.min.time(), tzinfo=timezone.utc)
-        if period == "week":
-            # ISO week starts on Monday
-            start = dt.date() - timedelta(days=dt.weekday())
-            return datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc)
-        if period == "month":
-            return datetime(dt.year, dt.month, 1, tzinfo=timezone.utc)
-        if period == "quarter":
-            quarter = (dt.month - 1) // 3 + 1
-            start_month = (quarter - 1) * 3 + 1
-            return datetime(dt.year, start_month, 1, tzinfo=timezone.utc)
-        if period == "year":
-            return datetime(dt.year, 1, 1, tzinfo=timezone.utc)
-        # Unknown period, treat as day
-        return datetime.combine(dt.date(), datetime.min.time(), tzinfo=timezone.utc)
-
-    # Find the period with the oldest start date
-    return min(periods, key=period_start_date)
+    today = utc_day(now_epoch())
+    return min(periods, key=lambda period: cost_window(period, today)[0])
 
 
 def _needs_subtree_usage(specs: list[PolicySpec]) -> bool:
@@ -345,38 +322,14 @@ def _load_user_period_cost(
     :returns: List of daily cost dicts, one per day in the period. Empty
         in single-user mode.
     """
-    from datetime import datetime, timedelta, timezone
-
-    from omnigent.db.utils import now_epoch
+    from omnigent.db.utils import now_epoch, utc_day
+    from omnigent.policies.cost_windows import cost_window
 
     owner = _resolve_session_owner_cached(conversation_id, conversation_store)
     if owner is None:
         return []
 
-    # Calculate date range for the period
-    now = now_epoch()
-    dt = datetime.fromtimestamp(now, tz=timezone.utc)
-
-    if period == "day":
-        start = dt.date()
-    elif period == "week":
-        # ISO week starts on Monday
-        start = dt.date() - timedelta(days=dt.weekday())
-    elif period == "month":
-        start = dt.date().replace(day=1)
-    elif period == "quarter":
-        quarter = (dt.month - 1) // 3 + 1
-        start_month = (quarter - 1) * 3 + 1
-        start = dt.date().replace(month=start_month, day=1)
-    elif period == "year":
-        start = dt.date().replace(month=1, day=1)
-    else:
-        # Fallback: treat as single day
-        start = dt.date()
-
-    start_date = start.isoformat()
-
-    # Query daily cost records for the period
+    start_date, _ = cost_window(period, utc_day(now_epoch()))
     return conversation_store.list_daily_cost_states(owner, start_date)
 
 
@@ -794,11 +747,27 @@ def build_policy_engine(
     # load daily records from that date forward, so all policies can filter
     # to their own period ranges from a single seed.
     initial_user_daily_cost = None
+    initial_user_period_approvals = None
     oldest_period = _get_cost_policy_oldest_period(all_policy_specs)
     if oldest_period:
         initial_user_daily_cost = _load_user_period_cost(
             conversation_id, conversation_store, period=oldest_period
         )
+        if any(
+            isinstance(policy, FunctionPolicySpec)
+            and policy.function is not None
+            and policy.function.path == _USER_PERIOD_COST_POLICY_PATH
+            and (policy.function.arguments or {}).get("period") != "day"
+            for policy in all_policy_specs
+        ):
+            from omnigent.db.utils import now_epoch, utc_day
+            from omnigent.policies.cost_windows import cost_window
+
+            owner = _resolve_session_owner_cached(conversation_id, conversation_store)
+            start, _ = cost_window(oldest_period, utc_day(now_epoch()))
+            initial_user_period_approvals = (
+                conversation_store.list_period_ask_approvals(owner, start) if owner else []
+            )
     # Session model: the conversation's model_override (set when a user
     # picks a model mid-session) wins over the spec's llm.model; None when
     # neither is available and cost policies treat it as undeterminable.
@@ -869,6 +838,7 @@ def build_policy_engine(
         initial_usage=initial_usage,
         initial_subtree_usage=initial_subtree_usage,
         initial_user_daily_cost=initial_user_daily_cost,
+        initial_user_period_approvals=initial_user_period_approvals,
         token_pricing=token_pricing,
         initial_model=initial_model,
         conversation_store=conversation_store,

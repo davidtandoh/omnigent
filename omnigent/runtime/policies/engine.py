@@ -115,6 +115,7 @@ class PolicyEngine:
         initial_user_daily_cost: list[dict[str, float | str | None]]
         | list[DailyCostState]
         | None = None,
+        initial_user_period_approvals: list[dict[str, float | str]] | None = None,
         token_pricing: ModelPricing | None = None,
         initial_model: str | None = None,
         conversation_store: ConversationStore,
@@ -161,6 +162,7 @@ class PolicyEngine:
         # today's record; for period budgets, contains all days in the period.
         # ``None`` → not needed → never injected.
         self._user_daily_cost = initial_user_daily_cost
+        self._user_period_approvals = initial_user_period_approvals
         self._token_pricing = token_pricing
         self._model = initial_model
         self._store = conversation_store
@@ -637,56 +639,34 @@ class PolicyEngine:
         from omnigent.db.utils import now_epoch, utc_day
 
         with target_account_scope(owner.user_id, owner.generation):
-            self._store.set_daily_ask_approved(owner.user_id, utc_day(now_epoch()), approved)
+            today = utc_day(now_epoch())
+            self._store.set_daily_ask_approved(owner.user_id, today, approved)
         # Keep the in-memory snapshot current so any later evaluate() on
         # this engine sees the approval and doesn't re-ASK the checkpoint
         # the user just approved — mirroring how the session policy's
         # approval stays current via _apply_one(self._session_state, ...).
-        if self._user_daily_cost and len(self._user_daily_cost) > 0:
-            self._user_daily_cost[0]["ask_approved_usd"] = approved
-
-    def _record_user_period_ask_approved(self, value: Any) -> None:
-        """
-        Persist a per-user period cost-budget ASK approval.
-
-        Writes the approved soft-checkpoint value to today's daily cost
-        record for the session owner, so the same checkpoint won't re-prompt
-        that user again this period (including from other sessions). A no-op
-        when the session has no owner grant (single-user mode) or *value* is
-        not numeric.
-
-        Note: Period approval state is stored in today's daily record and
-        reused across the entire period (day/week/month/quarter/year). This
-        avoids creating separate period-specific approval tracking.
-
-        :param value: The crossed checkpoint value (USD) the user
-            approved, e.g. ``50.0``.
-        """
-        if value is None:
-            return
-        try:
-            approved = float(value)
-        except (TypeError, ValueError):
-            return
-        owner = self._store.get_session_owner(self._conversation_id)
-        if owner is None:
-            return
-        if self._user_daily_cost is None:
-            return
-
-        # Write approval to today's daily record
-        from omnigent.db.utils import now_epoch
-        from omnigent.runtime.policies.builder import _utc_day
-
-        today = _utc_day(now_epoch())
-        self._store.set_daily_ask_approved(owner, today, approved)
-        # Keep the in-memory snapshot current so any later evaluate() on
-        # this engine sees the approval and doesn't re-ASK the checkpoint
-        # the user just approved. Find today's record in the list.
-        for record in self._user_daily_cost:
+        for record in self._user_daily_cost or []:
             if record.get("day_utc") == today:
                 record["ask_approved_usd"] = approved
-                break
+
+    def _record_user_period_ask_approved(self, value: Any) -> None:
+        """Persist a checkpoint for the period and UTC window that requested it."""
+        if not isinstance(value, dict):
+            raise ValueError("Period approval requires period, window_start, and ask_approved_usd")
+        period = value.get("period")
+        start = value.get("window_start")
+        approved = value.get("ask_approved_usd")
+        owner = self._store.get_session_owner_authority(self._conversation_id)
+        if owner is None:
+            return
+        from omnigent.db.account_authority import target_account_scope
+
+        with target_account_scope(owner.user_id, owner.generation):
+            self._store.set_period_ask_approved(owner.user_id, period, start, approved)
+        self._user_period_approvals = self._store.list_period_ask_approvals(
+            owner.user_id,
+            min([start] + [str(r["window_start"]) for r in self._user_period_approvals or []]),
+        )
 
     def record_usage(
         self,
@@ -813,6 +793,7 @@ class PolicyEngine:
 
         return replace(
             ctx,
+            user_period_approvals=[dict(r) for r in self._user_period_approvals or []],
             user_daily_cost=cast(
                 "list[dict[str, float | str | None]]",
                 [dict(d) for d in self._user_daily_cost],

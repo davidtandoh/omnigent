@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import PureWindowsPath
@@ -15,6 +16,7 @@ from sqlalchemy import (
     Select,
     and_,
     asc,
+    case,
     delete,
     desc,
     func,
@@ -47,6 +49,7 @@ from omnigent.db.db_models import (
     SqlSessionPermission,
     SqlUser,
     SqlUserDailyCost,
+    SqlUserPeriodApproval,
     current_workspace_id,
     uuid_to_bytes,
 )
@@ -1938,6 +1941,107 @@ class SqlAlchemyConversationStore(ConversationStore):
             "set_daily_ask_approved",
             write,
         )
+
+    def set_period_ask_approved(
+        self, user_id: str, period: str, window_start: str, ask_approved_usd: float
+    ) -> None:
+        """Persist a monotonic checkpoint under the active account authority."""
+        from omnigent.policies.cost_windows import cost_window
+
+        if period not in ("week", "month", "quarter", "year"):
+            raise ValueError("Invalid approval period")
+        if (
+            not isinstance(window_start, str)
+            or cost_window(period, window_start)[0] != window_start
+        ):
+            raise ValueError("Invalid approval window start")
+        if (
+            isinstance(ask_approved_usd, bool)
+            or not isinstance(ask_approved_usd, int | float)
+            or not math.isfinite(ask_approved_usd)
+            or ask_approved_usd <= 0
+        ):
+            raise ValueError("Approval must be a positive finite USD value")
+        now = now_epoch()
+
+        def write(session: Session) -> None:
+            require_active_account(session, user_id)
+            dialect = session.bind.dialect.name if session.bind is not None else ""
+            if dialect == "sqlite" or is_postgresql_family(dialect):
+                stmt: Any
+                if dialect == "sqlite":
+                    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+                    stmt = sqlite_insert(SqlUserPeriodApproval)
+                else:
+                    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+                    stmt = pg_insert(SqlUserPeriodApproval)
+                stmt = stmt.values(
+                    user_id=user_id,
+                    period=period,
+                    window_start=window_start,
+                    ask_approved_usd=ask_approved_usd,
+                    updated_at=now,
+                )
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["workspace_id", "user_id", "period", "window_start"],
+                    set_={
+                        "ask_approved_usd": case(
+                            (
+                                SqlUserPeriodApproval.ask_approved_usd < ask_approved_usd,
+                                ask_approved_usd,
+                            ),
+                            else_=SqlUserPeriodApproval.ask_approved_usd,
+                        ),
+                        "updated_at": now,
+                    },
+                )
+                session.execute(stmt)
+                return
+            existing = session.get(
+                SqlUserPeriodApproval,
+                (current_workspace_id(), user_id, period, window_start),
+                with_for_update=True,
+            )
+            if existing is None:
+                session.add(
+                    SqlUserPeriodApproval(
+                        user_id=user_id,
+                        period=period,
+                        window_start=window_start,
+                        ask_approved_usd=ask_approved_usd,
+                        updated_at=now,
+                    )
+                )
+            else:
+                existing.ask_approved_usd = max(existing.ask_approved_usd, ask_approved_usd)
+                existing.updated_at = now
+
+        run_write_transaction(self._session_immediate, "set_period_ask_approved", write)
+
+    def list_period_ask_approvals(
+        self, user_id: str, since_day_utc: str
+    ) -> list[dict[str, float | str]]:
+        """Read this workspace user's non-day approvals from a UTC window start."""
+        with self._session("list_period_ask_approvals") as session:
+            rows = session.execute(
+                select(SqlUserPeriodApproval)
+                .where(
+                    SqlUserPeriodApproval.workspace_id == current_workspace_id(),
+                    SqlUserPeriodApproval.user_id == user_id,
+                    SqlUserPeriodApproval.window_start >= since_day_utc,
+                )
+                .order_by(SqlUserPeriodApproval.period, SqlUserPeriodApproval.window_start)
+            ).scalars()
+            return [
+                {
+                    "period": row.period,
+                    "window_start": row.window_start,
+                    "ask_approved_usd": float(row.ask_approved_usd),
+                }
+                for row in rows
+            ]
 
     def list_daily_cost_states(
         self,

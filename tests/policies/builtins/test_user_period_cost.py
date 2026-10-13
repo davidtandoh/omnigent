@@ -5,10 +5,22 @@ Covers all period types (day, week, month, quarter, year).
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 from omnigent.policies.builtins.cost import user_period_cost_budget
 from omnigent.policies.schema import USER_PERIOD_ASK_APPROVED_STATE_KEY
+
+
+@pytest.fixture(autouse=True)
+def frozen_utc_day(monkeypatch):
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 8, 25, 12, tzinfo=timezone.utc).astimezone(tz)
+
+    monkeypatch.setattr("omnigent.policies.cost_windows.datetime", Clock)
 
 
 def _event(
@@ -123,7 +135,11 @@ class TestMonthlyBudget:
         assert "$30.00" in result["reason"]
         assert "$25.00" in result["reason"]
         assert result["state_updates"][0]["key"] == USER_PERIOD_ASK_APPROVED_STATE_KEY
-        assert result["state_updates"][0]["value"] == 25.0
+        assert result["state_updates"][0]["value"] == {
+            "period": "month",
+            "window_start": "2026-08-01",
+            "ask_approved_usd": 25.0,
+        }
 
     def test_no_ask_after_approval(self):
         """Should not ASK again at same threshold after approval."""
@@ -140,6 +156,9 @@ class TestMonthlyBudget:
                 }
             ]
         )
+        event["context"]["user_period_approvals"] = [
+            {"period": "month", "window_start": "2026-08-01", "ask_approved_usd": 25.0}
+        ]
         result = policy(event)
         assert result["result"] == "ALLOW"
 

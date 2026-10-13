@@ -101,7 +101,7 @@ SESSION_COST_ASK_APPROVED_STATE_KEY = "_policy_cost_ask_approved_usd"
 # Reserved ``state_updates`` key the per-user period cost-budget policy emits
 # on an ASK to record the highest soft checkpoint approved for a period.
 # Routed by :class:`PolicyEngine.apply_state_updates` to
-# ``user_period_cost.ask_approved_usd`` (per user+period) instead of
+# ``user_period_approvals.ask_approved_usd`` (per user+period+window) instead of
 # the per-conversation ``session_state``. Shared by the policy (emits it) and
 # the engine (intercepts it) so a period approval persists across the user's
 # sessions, not just the one conversation.
@@ -120,9 +120,9 @@ class UserDailyCostContext(TypedDict, total=False):
 
     Injected into the event context when a policy needs it (the per-user
     daily cost-budget policy or period cost-budget policy is configured);
-    absent / empty otherwise. For daily budgets, read via
-    ``event["context"]["user_daily_cost"]``. For period budgets, read via
-    ``event["context"]["user_period_cost"]`` as a list of daily records.
+    absent / empty otherwise. All cost policies read
+    ``event["context"]["user_daily_cost"]`` and select their own UTC window.
+    Non-day approvals use ``event["context"]["user_period_approvals"]``.
 
     :param cost_usd: The session owner's accumulated LLM spend (USD)
         for this UTC day, as of this turn's start, e.g. ``0.18``. ``0.0``
@@ -136,8 +136,7 @@ class UserDailyCostContext(TypedDict, total=False):
         whose spend tripped the gate. Absent in single-user mode (no
         owner grant), where messages fall back to an un-named phrasing.
     :param day_utc: The UTC calendar day this record represents, as
-        ``"YYYY-MM-DD"``, e.g. ``"2026-08-25"``. Present when this record
-        is part of a period cost list.
+        ``"YYYY-MM-DD"``, e.g. ``"2026-08-25"``. Required for date filtering.
     :param harness: The harness this record is scoped to, e.g.
         ``"codex-native"``, when the policy is configured for per-harness
         budgets. ``None`` when the policy uses cross-harness budgets
@@ -199,6 +198,7 @@ class EventContext(TypedDict, total=False):
     usage: UsageContext
     subtree_usage: UsageContext
     user_daily_cost: list[UserDailyCostContext]
+    user_period_approvals: list[dict[str, float | str]]
     # ``str | None`` (not ``str``): the value is ``ctx.model``, which is
     # ``None`` when the engine could not determine a model — the dict carries
     # ``None``, it is not merely absent. Cost policies treat ``None`` as an

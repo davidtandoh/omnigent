@@ -1333,6 +1333,20 @@ class ConversationStore(ABC):
         ...
 
     @abstractmethod
+    def set_period_ask_approved(
+        self, user_id: str, period: str, window_start: str, ask_approved_usd: float
+    ) -> None:
+        """Record a non-day checkpoint for this user, period, and UTC window."""
+        ...
+
+    @abstractmethod
+    def list_period_ask_approvals(
+        self, user_id: str, since_day_utc: str
+    ) -> list[dict[str, float | str]]:
+        """Read non-day approvals with window starts on or after the given UTC day."""
+        ...
+
+    @abstractmethod
     def list_daily_cost_states(
         self,
         user_id: str,

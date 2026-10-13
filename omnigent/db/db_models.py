@@ -1499,6 +1499,25 @@ class SqlUserDailyCost(OmnigentBase):
     updated_at: Mapped[int] = mapped_column(Integer)
 
 
+class SqlUserPeriodApproval(OmnigentBase):
+    """Highest approved checkpoint per workspace, user, period, and UTC window."""
+
+    __tablename__ = "user_period_approvals"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    user_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    period: Mapped[str] = mapped_column(String(8), primary_key=True)
+    window_start: Mapped[str] = mapped_column(String(10), primary_key=True)
+    ask_approved_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    updated_at: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
 class SqlScheduledTask(OmnigentBase):
     """
     SQLAlchemy model for the ``scheduled_tasks`` table.
