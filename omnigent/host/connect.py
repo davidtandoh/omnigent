@@ -148,6 +148,7 @@ from omnigent.runner.custody import (
     CustodyProcess,
     SessionAttachment,
     custody_records,
+    custody_session_key,
     host_config_digest,
     make_custody_context,
 )
@@ -1813,7 +1814,7 @@ class HostProcess:
                     "Session custody refused",
                     error_code=str(exc) if isinstance(exc, CustodyError) else "record_mismatch",
                 )
-            if category := self._custody_refusals.get(frame.session_id):
+            if category := self._custody_refusals.get(custody_session_key(frame.session_id)):
                 return self._launch_failed(frame, "Session custody refused", error_code=category)
             existing = next(
                 (
@@ -2402,9 +2403,22 @@ class HostProcess:
             # Shield shared completions from a status request's cancellation.
             await asyncio.shield(asyncio.gather(*pending, return_exceptions=True))
         if IS_POSIX:
-            self._adopt_custodied_runners()
+            try:
+                self._adopt_custodied_runners()
+            except (CustodyError, OSError, ValueError):
+                return HostRunnerStatusResultFrame(request_id=frame.request_id, status="refused")
         handle = self._runners.get(frame.runner_id)
-        if handle is None:
+        if frame.session_id and (
+            custody_session_key(frame.session_id) in self._custody_refusals
+            or (handle is not None and handle.session_id != frame.session_id)
+            or any(
+                runner_id != frame.runner_id and owned.session_id == frame.session_id
+                for runner_id, owned in self._runners.items()
+                if owned.durable
+            )
+        ):
+            status = "refused"
+        elif handle is None:
             status = "unknown"
         else:
             # poll() is a lock-free waitpid for a direct-Popen runner, but a
@@ -4282,7 +4296,7 @@ class HostProcess:
         base = data_dir()
         config_digest = host_config_digest()
         self._custody_refusals.clear()
-        for record in custody_records(base):
+        for record in custody_records(base, refusals=self._custody_refusals):
             if record.host_id != self._identity.host_id or record.endpoint != self._server_url:
                 continue
             if record.session_id in self._custody_attachments:
@@ -4300,7 +4314,7 @@ class HostProcess:
             except (CustodyError, OSError, ValueError) as exc:
                 attachment.__exit__(None, None, None)
                 category = str(exc) if isinstance(exc, CustodyError) else "record_mismatch"
-                self._custody_refusals[record.session_id] = category
+                self._custody_refusals[custody_session_key(record.session_id)] = category
                 _logger.warning("Session %s custody refused: %s", record.session_id, category)
                 continue
             except BaseException:

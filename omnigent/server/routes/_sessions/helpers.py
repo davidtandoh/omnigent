@@ -5411,6 +5411,8 @@ async def _query_host_runner_status(
     host_conn: HostConnection,
     host_registry: HostRegistry,
     runner_id: str,
+    *,
+    session_id: str | None = None,
 ) -> str | None:
     """
     Ask a host whether a runner's process is alive, dead, or unknown.
@@ -5436,7 +5438,9 @@ async def _query_host_runner_status(
     request_id = secrets.token_hex(8)
     future: asyncio.Future[dict[str, str | None]] = asyncio.get_running_loop().create_future()
     host_conn.pending_runner_status[request_id] = future
-    frame = encode_host_frame(HostRunnerStatusFrame(request_id=request_id, runner_id=runner_id))
+    frame = encode_host_frame(
+        HostRunnerStatusFrame(request_id=request_id, runner_id=runner_id, session_id=session_id)
+    )
     try:
         try:
             host_registry.send_text(host_conn, frame)
@@ -5780,7 +5784,9 @@ async def _launch_runner_on_host_locked(
                 error_code="host_launch_failed",
                 error="The bound host connection changed; retry after reconnecting.",
             )
-        status = await _query_host_runner_status(host_conn, host_registry, conv.runner_id)
+        status = await _query_host_runner_status(
+            host_conn, host_registry, conv.runner_id, session_id=conv.id
+        )
         if host_registry.get(conv.host_id) is not host_conn or status not in {
             "alive",
             "dead",

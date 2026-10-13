@@ -100,12 +100,20 @@ class AttachmentRecord(BaseModel):
     owner_generation: str
 
 
+def custody_session_key(session_id: str) -> str:
+    return hashlib.sha256(session_id.encode()).hexdigest()
+
+
 def _session_dir(base: Path, session_id: str, *, create: bool = False) -> Path:
-    key = hashlib.sha256(session_id.encode()).hexdigest()
+    key = custody_session_key(session_id)
     root = base.resolve() / "custody"
     for directory in (root, root / key):
         if create:
-            directory.mkdir(mode=0o700, exist_ok=True)
+            try:
+                directory.mkdir(mode=0o700)
+            except FileExistsError:
+                if directory != root and not (directory / "session.json").exists():
+                    raise CustodyError("record_mismatch") from None
         info = directory.lstat()
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
             raise CustodyError("record_mismatch")
@@ -187,9 +195,11 @@ class SessionCustody:
         except ValueError as exc:
             raise CustodyError("unsupported_custody") from exc
         directory = _session_dir(base, parsed.session_id, create=True)
+        path = directory / "session.json"
+        if path.exists() or path.is_symlink():
+            _read_record(path)
         lock = _lock(directory / "owner.lock")
         try:
-            path = directory / "session.json"
             if path.exists() or path.is_symlink():
                 previous = _read_record(path)
                 if previous.state != "ended":
@@ -522,7 +532,7 @@ def make_custody_context(
     }
 
 
-def custody_records(base: Path) -> list[CustodyRecord]:
+def custody_records(base: Path, *, refusals: dict[str, str] | None = None) -> list[CustodyRecord]:
     root = base.resolve() / "custody"
     if not root.exists() and not root.is_symlink():
         return []
@@ -534,12 +544,23 @@ def custody_records(base: Path) -> list[CustodyRecord]:
         raise CustodyError("unavailable_probe")
     records = []
     for child in sorted(children):
-        info = child.lstat()
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
-            raise CustodyError("record_mismatch")
-        record = _read_record(child / "session.json")
-        if _session_dir(base, record.session_id) != child:
-            raise CustodyError("scope_mismatch")
+        try:
+            info = child.lstat()
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != os.getuid()
+                or info.st_mode & 0o077
+            ):
+                raise CustodyError("record_mismatch")
+            record = _read_record(child / "session.json")
+            if _session_dir(base, record.session_id) != child:
+                raise CustodyError("scope_mismatch")
+        except (CustodyError, OSError) as exc:
+            if refusals is not None:
+                refusals[child.name] = (
+                    str(exc) if isinstance(exc, CustodyError) else "record_mismatch"
+                )
+            continue
         records.append(record)
     return [record for record in records if record.state != "ended"]
 

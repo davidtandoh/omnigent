@@ -8111,7 +8111,7 @@ async def test_stale_custody_does_not_block_healthy_adoption_or_allow_relaunch(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    from omnigent.runner.custody import SessionCustody
+    from omnigent.runner.custody import SessionCustody, custody_session_key
     from tests.runner.test_session_custody import context
 
     host = _make_host_process()
@@ -8129,7 +8129,7 @@ async def test_stale_custody_does_not_block_healthy_adoption_or_allow_relaunch(
     ):
         host._adopt_custodied_runners()
         assert host._runners["healthy_runner"].session_id == "healthy"
-        assert host._custody_refusals == {"stale": "stale_attachment"}
+        assert host._custody_refusals == {custody_session_key("stale"): "stale_attachment"}
         result = await host._handle_launch(
             HostLaunchRunnerFrame(
                 request_id="stale-relaunch",
@@ -8142,5 +8142,95 @@ async def test_stale_custody_does_not_block_healthy_adoption_or_allow_relaunch(
         assert result.status == "failed" and result.error_code == "stale_attachment"
         assert stale.record_path.read_bytes() == stale_before
         assert "healthy_runner" in host._runners
+        host._cleanup_runners()
+    _cleanup_host(host)
+
+
+async def test_custody_status_refuses_drift_then_adopts_same_owner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from omnigent.runner.custody import SessionCustody
+    from tests.runner.test_session_custody import context
+
+    host = _make_host_process()
+    monkeypatch.setattr("omnigent.process_logging.data_dir", lambda: tmp_path)
+    digest = "d" * 64
+    monkeypatch.setattr("omnigent.host.connect.host_config_digest", lambda: digest)
+    common = {**context(), "host_id": host._identity.host_id, "endpoint": host._server_url}
+    with SessionCustody.create(tmp_path, common) as owner:
+        before = owner.record_path.read_bytes()
+        query = HostRunnerStatusFrame(
+            request_id="drift",
+            runner_id=owner.record.runner_id,
+            session_id=owner.record.session_id,
+        )
+        refused = await host._handle_runner_status(query)
+        assert refused.status == "refused"
+        assert not host._runners
+        assert owner.still_owner()
+        assert owner.record_path.read_bytes() == before
+        digest = str(common["config_digest"])
+        accepted = await host._handle_runner_status(query)
+        assert accepted.status == "alive"
+        assert host._runners[owner.record.runner_id].proc.pid == owner.record.owner.pid
+        assert owner.record_path.read_bytes() == before
+        foreign = await host._handle_runner_status(
+            HostRunnerStatusFrame(
+                request_id="foreign", runner_id="other_runner", session_id=owner.record.session_id
+            )
+        )
+        assert foreign.status == "refused"
+        host._cleanup_runners()
+    _cleanup_host(host)
+
+
+@pytest.mark.parametrize("publication", ["directory", "owner_lock", "malformed"])
+async def test_incomplete_custody_refuses_only_affected_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, publication: str
+) -> None:
+    from omnigent.runner.custody import CustodyError, SessionCustody, custody_session_key
+    from tests.runner.test_session_custody import context
+
+    host = _make_host_process()
+    monkeypatch.setattr("omnigent.process_logging.data_dir", lambda: tmp_path)
+    monkeypatch.setattr("omnigent.host.connect.host_config_digest", lambda: "a" * 64)
+    monkeypatch.setattr("omnigent.host.connect.SUPPORTED_HARNESSES", frozenset({"codex-native"}))
+    common = {**context(), "host_id": host._identity.host_id, "endpoint": host._server_url}
+    with SessionCustody.create(tmp_path, common) as owner:
+        directory = tmp_path / "custody" / custody_session_key("incomplete")
+        directory.mkdir(mode=0o700)
+        if publication in {"owner_lock", "malformed"}:
+            (directory / "owner.lock").touch(mode=0o600)
+        if publication == "malformed":
+            (directory / "session.json").write_text("{")
+        contents = {p.name: p.read_bytes() for p in directory.iterdir()}
+        healthy = await host._handle_runner_status(
+            HostRunnerStatusFrame(
+                request_id="healthy",
+                runner_id=owner.record.runner_id,
+                session_id=owner.record.session_id,
+            )
+        )
+        assert healthy.status == "alive"
+        refused = await host._handle_runner_status(
+            HostRunnerStatusFrame(
+                request_id="incomplete", runner_id="missing", session_id="incomplete"
+            )
+        )
+        assert refused.status == "refused"
+        launch = await host._handle_launch(
+            HostLaunchRunnerFrame(
+                request_id="relaunch",
+                binding_token="synthetic",
+                session_id="incomplete",
+                workspace=str(tmp_path),
+                harness="codex-native",
+            )
+        )
+        assert launch.status == "failed" and launch.error_code == "record_mismatch"
+        with pytest.raises(CustodyError, match="record_mismatch"):
+            SessionCustody.create(tmp_path, {**common, "session_id": "incomplete"})
+        assert {p.name: p.read_bytes() for p in directory.iterdir()} == contents
+        assert owner.still_owner()
         host._cleanup_runners()
     _cleanup_host(host)

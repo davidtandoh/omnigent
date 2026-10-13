@@ -3139,7 +3139,9 @@ async def test_rider_of_a_refused_relaunch_surfaces_the_refusal(
         assert "omnigent setup" in item["message"], item
 
 
-@pytest.mark.parametrize("owner_status", ["alive", "timeout", "invalid", "disconnected"])
+@pytest.mark.parametrize(
+    "owner_status", ["alive", "timeout", "invalid", "disconnected", "refused"]
+)
 async def test_compact_preserves_codex_binding_while_owner_reconnects(
     client: httpx.AsyncClient,
     app: FastAPI,
@@ -3183,6 +3185,7 @@ async def test_compact_preserves_codex_binding_while_owner_reconnects(
         frame = decode_host_frame(message["text"])
         assert isinstance(frame, HostRunnerStatusFrame), frame
         assert frame.runner_id == runner_id
+        assert frame.session_id == session_id
         if owner_status == "disconnected":
             await comm.send_input({"type": "websocket.disconnect", "code": 1000})
         elif owner_status != "timeout":

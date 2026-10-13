@@ -355,6 +355,7 @@ class HostRunnerStatusFrame:
 
     request_id: str
     runner_id: str
+    session_id: str | None = None
 
 
 @dataclass
@@ -372,6 +373,8 @@ class HostRunnerStatusResultFrame:
         * ``"unknown"`` — the host has no record of this runner (it was
           stopped, or a fresh post-restart host never spawned it).
           Relaunch now.
+        * ``"refused"`` — custody or session identity could not be verified.
+          Preserve the binding.
     """
 
     request_id: str
@@ -1260,6 +1263,7 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "kind": HostFrameKind.RUNNER_STATUS.value,
                 "request_id": frame.request_id,
                 "runner_id": frame.runner_id,
+                "session_id": frame.session_id,
             }
         )
     if isinstance(frame, HostRunnerStatusResultFrame):
@@ -1877,6 +1881,7 @@ def _decode_runner_status(msg: _JsonObject) -> HostRunnerStatusFrame:
     return HostRunnerStatusFrame(
         request_id=_required_str(msg, "request_id"),
         runner_id=_required_str(msg, "runner_id"),
+        session_id=_optional_nullable_str(msg, "session_id"),
     )
 
 

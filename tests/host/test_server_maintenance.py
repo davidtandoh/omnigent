@@ -389,3 +389,108 @@ def test_maintenance_ignores_only_internal_daemon_signature(
     else:
         assert local_server.maintenance_stop_local_server()["state"] == "detached"
         process.terminate.assert_called_once()
+
+
+@pytest.mark.parametrize("logging_drift", [None, "OMNIGENT_LOG_LEVEL", "OMNIGENT_LOG_TO_STDERR"])
+def test_maintenance_excludes_injected_tty_descriptor_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, logging_drift: str | None
+) -> None:
+    from omnigent.process_logging import LOG_TTY_FD_ENV_VAR, child_logging_popen_kwargs
+
+    monkeypatch.setenv("OMNIGENT_LOG_TO_STDERR", "1")
+    monkeypatch.setenv("OMNIGENT_LOG_LEVEL", "INFO")
+    monkeypatch.delenv(LOG_TTY_FD_ENV_VAR, raising=False)
+    with (tmp_path / "terminal.log").open("w") as terminal:
+        child_env = {**os.environ, LOG_TTY_FD_ENV_VAR: str(terminal.fileno())}
+        with child_logging_popen_kwargs(child_env) as kwargs:
+            assert kwargs["pass_fds"]
+            with monkeypatch.context() as child:
+                child.setenv(LOG_TTY_FD_ENV_VAR, child_env[LOG_TTY_FD_ENV_VAR])
+                recipe = _recipe(tmp_path)
+    record = local_server.ServerMaintenanceRecord(
+        schema_version=2,
+        recipe=recipe,
+        process=ProcessIdentity.capture(os.getpid()),
+        port=8123,
+        base_path="",
+    )
+    if logging_drift:
+        monkeypatch.setenv(logging_drift, "DEBUG" if logging_drift.endswith("LEVEL") else "0")
+    process = Mock()
+    monkeypatch.setattr(ProcessIdentity, "require_live", lambda self: process)
+    monkeypatch.setattr(local_server, "_server_maintenance_record", lambda path: record)
+    monkeypatch.setattr(local_server, "_read_local_server_pid_file", lambda: (os.getpid(), 8123))
+    monkeypatch.setattr(local_server, "_pid_listening_on_port", lambda port: os.getpid())
+    if logging_drift:
+        with pytest.raises(local_server.ServerMaintenanceError, match="config_mismatch"):
+            local_server.maintenance_stop_local_server()
+        process.terminate.assert_not_called()
+    else:
+        assert local_server.maintenance_stop_local_server()["state"] == "detached"
+        process.terminate.assert_called_once()
+
+
+def test_managed_child_does_not_publish_competing_server_for_discovery(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import socket
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    import httpx
+    import uvicorn.server
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+
+    class CompetingServer(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"status":"ok"}')
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    observed = []
+
+    def lose_bind_race(server: uvicorn.server.Server) -> None:
+        with ThreadingHTTPServer(("127.0.0.1", port), CompetingServer) as competitor:
+            thread = threading.Thread(target=competitor.serve_forever)
+            thread.start()
+            try:
+                assert (
+                    httpx.get(f"http://127.0.0.1:{port}/health", trust_env=False).status_code
+                    == 200
+                )
+                receipt = local_server._server_maintenance_record(
+                    local_server._LOCAL_SERVER_OWNER_PATH
+                )
+                assert receipt.process == ProcessIdentity.capture(os.getpid())
+                assert receipt.recipe is not None
+                assert not local_server._LOCAL_SERVER_PID_PATH.exists()
+                assert local_server.local_server_url_if_healthy() is None
+                observed.append(receipt)
+            finally:
+                competitor.shutdown()
+                thread.join(timeout=5)
+
+    monkeypatch.setattr(uvicorn.server.Server, "run", lose_bind_race)
+    result = CliRunner().invoke(
+        cli_module.cli,
+        [
+            "server",
+            "--managed-local",
+            "--port",
+            str(port),
+            "--database-uri",
+            f"sqlite:///{tmp_path}/chat.db",
+            "--artifact-location",
+            str(tmp_path / "artifacts"),
+        ],
+    )
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert len(observed) == 1
+    assert not local_server._LOCAL_SERVER_PID_PATH.exists()

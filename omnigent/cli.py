@@ -4686,29 +4686,26 @@ def server(
             err=True,
         )
 
-    # Advertise this server in the shared pidfile so the run/host
-    # daemon discovers and reuses it (loopback only). Cleared on exit so
-    # a clean shutdown doesn't leave a stale record.
     if _is_canonical_local_server or managed_local:
         from omnigent.host.local_server import (
-            register_local_server,
+            _resolve_effective_base_path,
             qualify_server_restart,
+            record_server_maintenance,
+            register_local_server,
         )
 
-        # Stamp the same config signature host/run compute so they reuse
-        # this foreground server instead of tearing it down on a spurious
-        # sig mismatch.
-        register_local_server(
-            port,
-            recipe=qualify_server_restart(
-                database_uri=db_uri,
-                artifact_location=art_loc,
-                config_path=config_path,
-                unsupported_options=bool(
-                    conv_db_uri or execution_timeout is not None or agent_dirs
-                ),
-            ),
+        recipe = qualify_server_restart(
+            database_uri=db_uri,
+            artifact_location=art_loc,
+            config_path=config_path,
+            unsupported_options=bool(conv_db_uri or execution_timeout is not None or agent_dirs),
         )
+        if managed_local:
+            record_server_maintenance(
+                os.getpid(), port, _resolve_effective_base_path(), recipe=recipe
+            )
+        else:
+            register_local_server(port, recipe=recipe)
 
     class _ShutdownSignalingServer(uvicorn.server.Server):
         """uvicorn.Server that signals active SSE subscribers before the

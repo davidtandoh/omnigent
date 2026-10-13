@@ -45,6 +45,7 @@ from omnigent.native.state_files import (
     write_state_file,
 )
 from omnigent.process_logging import (
+    LOG_TTY_FD_ENV_VAR,
     PROCESS_LOG_FILE_ENV_VAR,
     child_logging_popen_kwargs,
     open_process_log_file,
@@ -408,6 +409,12 @@ def _write_local_server_record(
         with contextlib.suppress(OSError):
             _LOCAL_SERVER_LOG_REF_PATH.unlink()
     _atomic_write(_LOCAL_SERVER_PID_PATH, f"{pid}\n{port}\n")
+    record_server_maintenance(pid, port, base_path, recipe=recipe)
+
+
+def record_server_maintenance(
+    pid: int, port: int, base_path: str, *, recipe: ServerRestartRecipe | None
+) -> None:
     try:
         identity = ProcessIdentity.capture(pid)
     except (ValueError, psutil.Error):
@@ -473,6 +480,7 @@ def _maintenance_environment_digest() -> str:
         "OMNIGENT_CONFIG",
         "OMNIGENT_ACCOUNTS_AUTO_OPEN",
         DAEMON_CONFIG_SIG_ENV_VAR,
+        LOG_TTY_FD_ENV_VAR,
         PROCESS_LOG_FILE_ENV_VAR,
     }
     return hashlib.sha256(

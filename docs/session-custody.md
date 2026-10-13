@@ -41,6 +41,13 @@ for that exact runner's status. The host adopts verified retained owners before
 answering. A live owner keeps its existing binding while its tunnel reconnects;
 the API does not schedule superseded teardown. If the host connection changes
 or gives no valid status, the API refuses relaunch without changing the binding.
+The status query includes the exact session ID. Custody verification failure
+returns `refused`, which also preserves the binding. Restoring the approved
+configuration allows adoption of the same owner.
+
+A missing or invalid session receipt refuses that session. Enumeration continues
+for other sessions. The incomplete directory remains in place and cannot be
+used to create a replacement owner.
 
 The retained runner owns its inference config, MCP relay, policy callbacks,
 native app-server and terminals. Host replacement does not rebuild them. This
@@ -155,9 +162,13 @@ schema-2 maintenance receipt records these effective paths, the working director
 the exact single-user
 marker and configuration/environment digests. It never records secrets or raw
 launch arguments. The restart uses this bounded recipe and checks the new API
-process's receipt after readiness. Package version remains part of normal runtime
+process's receipt after readiness. A managed child publishes only this maintenance
+receipt. The parent publishes discovery after verifying readiness and port ownership.
+Package version remains part of normal runtime
 reuse detection but is absent from maintenance configuration identity. The internal
-`OMNIGENT_HOST_DAEMON_CONFIG_SIG` launch marker is also excluded. Effective
+`OMNIGENT_HOST_DAEMON_CONFIG_SIG` launch marker and injected
+`OMNIGENT_LOG_TTY_FD` descriptor are also excluded. Logging preferences remain
+part of configuration identity. Effective
 auth, data, config and explicit native environment checks remain unchanged.
 
 Non-header authentication, nonlocal databases, relative artifact paths and
