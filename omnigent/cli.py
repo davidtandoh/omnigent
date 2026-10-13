@@ -2126,6 +2126,7 @@ _CLICK_SUBCOMMANDS: frozenset[str] = frozenset(
         "qwen",
         "resume",
         "run",
+        "runtime",
         "session",
         "sandbox",
         "server",

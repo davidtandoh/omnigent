@@ -430,7 +430,7 @@ def create_oauth_token_router(
                 int(now_wall), max_lifetime_seconds=_grant_max_lifetime
             )
         except Exception:  # Housekeeping must never fail a refresh.
-            _logger.debug("oauth/token: opportunistic grant purge failed", exc_info=True)
+            _logger.exception("oauth/token: opportunistic grant purge failed")
 
     def _issue_access_token(grant_id: str, user_id: str, client_id: str) -> str:
         grant = device_grant_store.authorize_access(grant_id)
