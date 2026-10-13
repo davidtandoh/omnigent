@@ -5603,9 +5603,8 @@ class _HostLaunchAttempt:
     """
     Outcome of a relaunch ``host.launch_runner`` round-trip.
 
-    :param runner_id: The token-bound runner id minted for this attempt,
-        e.g. ``"runner_token_abc123..."``. Always set (the binding is
-        rotated before the frame is sent), even when the host refused.
+    :param runner_id: The existing token-bound runner id while its owner
+        reconnects, or the new binding minted for a launch attempt.
     :param error_code: Structured failure category from the host's result
         frame, e.g. ``"harness_not_configured"``; ``None`` on a successful
         launch, on a timeout waiting for the result, or when the host sent
@@ -5613,7 +5612,7 @@ class _HostLaunchAttempt:
     :param error: Human-readable failure message from the host, e.g.
         ``"harness 'codex' is not configured on host 'laptop' — run
         `omnigent setup` ..."``; ``None`` when there was no error.
-    :param acknowledged: Whether the host confirmed ``status="launched"``;
+    :param acknowledged: Whether the host confirmed a launch or a live owner;
         timeout and lost-connection attempts remain unconfirmed.
     """
 
@@ -5774,6 +5773,26 @@ async def _launch_runner_on_host_locked(
     from omnigent.runner.identity import token_bound_runner_id
 
     await host_registry.admit_launch(host_conn, conv.id)
+    if conv.runner_id and _resolve_harness(conv) == "codex-native":
+        if conv.host_id is None or host_registry.get(conv.host_id) is not host_conn:
+            return _HostLaunchAttempt(
+                runner_id=conv.runner_id,
+                error_code="host_launch_failed",
+                error="The bound host connection changed; retry after reconnecting.",
+            )
+        status = await _query_host_runner_status(host_conn, host_registry, conv.runner_id)
+        if host_registry.get(conv.host_id) is not host_conn or status not in {
+            "alive",
+            "dead",
+            "unknown",
+        }:
+            return _HostLaunchAttempt(
+                runner_id=conv.runner_id,
+                error_code="host_launch_failed",
+                error="The bound owner status could not be verified; retry after reconnecting.",
+            )
+        if status == "alive":
+            return _HostLaunchAttempt(runner_id=conv.runner_id, acknowledged=True)
     superseded_runner_id = conv.runner_id
     binding_token = secrets.token_urlsafe(32)
     new_runner_id = token_bound_runner_id(binding_token)

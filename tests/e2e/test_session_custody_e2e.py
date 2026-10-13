@@ -35,15 +35,10 @@ from tests.e2e.test_pi_native_subagent_startup_lifecycle import _mcp
 from tests.server.integration.test_sessions_policy_evaluate import _tool_call_request
 
 
-@pytest.mark.skipif(
-    not IS_DARWIN or shutil.which("codex") is None or shutil.which("tmux") is None,
-    reason="requires the admitted macOS Codex and tmux platform",
-)
-@pytest.mark.timeout(300)
-@pytest.mark.parametrize("outage_s", [0, 65])
-def test_codex_inflight_turn_survives_host_death_and_single_adoption(
-    tmp_path: Path, isolated_mock_llm_server_url: str, outage_s: int
-) -> None:
+@pytest.fixture
+def custody_environment(
+    tmp_path: Path, isolated_mock_llm_server_url: str
+) -> tuple[Path, Path, dict[str, str]]:
     home = tmp_path / "home"
     home.mkdir()
     config_home = home / ".omnigent"
@@ -86,6 +81,23 @@ def test_codex_inflight_turn_survives_host_death_and_single_adoption(
             "OPENAI_BASE_URL": isolated_mock_llm_server_url + "/v1",
         }
     )
+    return home, config_home, env
+
+
+@pytest.mark.skipif(
+    not IS_DARWIN or shutil.which("codex") is None or shutil.which("tmux") is None,
+    reason="requires the admitted macOS Codex and tmux platform",
+)
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("outage_s", [0, 65])
+def test_codex_inflight_turn_survives_host_death_and_single_adoption(
+    tmp_path: Path,
+    isolated_mock_llm_server_url: str,
+    outage_s: int,
+    custody_environment: tuple[Path, Path, dict[str, str]],
+) -> None:
+    home, config_home, env = custody_environment
+    port = int(env["OMNIGENT_LOCAL_SERVER_PORT"])
     procs = _Procs()
     procs.track_pidfile(config_home / "local_server.pid")
     client = httpx.Client(base_url=f"http://127.0.0.1:{port}", trust_env=False, timeout=30)
@@ -457,3 +469,76 @@ def test_codex_inflight_turn_survives_host_death_and_single_adoption(
         finally:
             client.close()
             procs.teardown()
+
+
+@pytest.mark.skipif(
+    not IS_DARWIN or shutil.which("codex") is None or shutil.which("tmux") is None,
+    reason="requires the admitted macOS Codex and tmux platform",
+)
+@pytest.mark.timeout(180)
+def test_default_local_codex_launch_supports_api_maintenance(
+    tmp_path: Path,
+    custody_environment: tuple[Path, Path, dict[str, str]],
+) -> None:
+    home, config_home, env = custody_environment
+    procs = _Procs()
+    procs.track_pidfile(config_home / "local_server.pid")
+    try:
+        launch_log = tmp_path / "local-launch.log"
+        launch = procs.spawn(
+            ["codex", "--binding-json"], env=env, cwd=home, log=launch_log
+        )
+        assert launch.wait(timeout=90) == 0, launch_log.read_text()
+        binding = next(
+            json.loads(line)
+            for line in launch_log.read_text().splitlines()
+            if line.startswith('{"config_digest":')
+        )
+        session_id = binding["session_id"]
+        before = session_contract(config_home, session_id)
+        assert before["state"] == "live"
+        for action in ("maintenance-stop", "maintenance-start"):
+            log = tmp_path / f"local-{action}.log"
+            command = procs.spawn(
+                ["server", action, "--json"], env=env, cwd=home, log=log
+            )
+            assert command.wait(timeout=45) == 0, log.read_text()
+            current = session_contract(config_home, session_id)
+            assert current["owner"] == before["owner"]
+            assert current["helpers"] == before["helpers"]
+            assert current["terminals"] == before["terminals"]
+            assert current["reattachment"] == before["reattachment"]
+        with httpx.Client(base_url=binding["endpoint"], trust_env=False, timeout=30) as client:
+            assert _online_host_id(client, timeout=60) == binding["host_id"]
+            _poll_for_terminal_resource(
+                client, session_id=session_id, resource_id="terminal_codex_main", timeout=60
+            )
+        binding_path = tmp_path / "local-binding.json"
+        binding_path.write_text(json.dumps(binding))
+        attach_log = tmp_path / "local-attach.log"
+        attach = procs.spawn(
+            ["codex", "--reattach-binding", str(binding_path), "--binding-json"],
+            env=env,
+            cwd=home,
+            log=attach_log,
+        )
+        assert attach.wait(timeout=30) == 0, attach_log.read_text()
+        assert json.loads(attach_log.read_text()) == binding
+    finally:
+        try:
+            for record in custody_records(config_home):
+                process = CustodyProcess(record)
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=10)
+        finally:
+            detach = procs.spawn(
+                ["host", "stop", "--all", "--daemon-only"],
+                env=env,
+                cwd=home,
+                log=tmp_path / "local-detach.log",
+            )
+            try:
+                detach.wait(timeout=30)
+            finally:
+                procs.teardown()

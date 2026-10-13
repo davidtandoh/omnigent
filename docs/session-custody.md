@@ -36,6 +36,12 @@ The host never launches another native agent for a live session. Repeated
 adoption by the same attachment is idempotent. Concurrent adoption refuses
 `owner_busy`. A replacement increments the attachment epoch once.
 
+Before relaunching a bound Codex runner, the API asks the authenticated host
+for that exact runner's status. The host adopts verified retained owners before
+answering. A live owner keeps its existing binding while its tunnel reconnects;
+the API does not schedule superseded teardown. If the host connection changes
+or gives no valid status, the API refuses relaunch without changing the binding.
+
 The retained runner owns its inference config, MCP relay, policy callbacks,
 native app-server and terminals. Host replacement does not rebuild them. This
 approved contract uses “attachment runner” for the replaceable host attachment,
@@ -150,7 +156,9 @@ the exact single-user
 marker and configuration/environment digests. It never records secrets or raw
 launch arguments. The restart uses this bounded recipe and checks the new API
 process's receipt after readiness. Package version remains part of normal runtime
-reuse detection but is absent from maintenance configuration identity.
+reuse detection but is absent from maintenance configuration identity. The internal
+`OMNIGENT_HOST_DAEMON_CONFIG_SIG` launch marker is also excluded. Effective
+auth, data, config and explicit native environment checks remain unchanged.
 
 Non-header authentication, nonlocal databases, relative artifact paths and
 a separate conversation database, execution-timeout or agent CLI overrides

@@ -351,3 +351,41 @@ def test_local_mode_endpoint_detaches_exact_record(monkeypatch: pytest.MonkeyPat
     )
     assert result.exit_code != 0
     assert terminated.call_count == 1
+
+
+@pytest.mark.parametrize("daemon_signature", [None, "upgraded-daemon"])
+@pytest.mark.parametrize("effective_drift", [False, True])
+def test_maintenance_ignores_only_internal_daemon_signature(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    daemon_signature: str | None,
+    effective_drift: bool,
+) -> None:
+    from omnigent.host.daemon_lifecycle import DAEMON_CONFIG_SIG_ENV_VAR
+
+    monkeypatch.setenv(DAEMON_CONFIG_SIG_ENV_VAR, "original-daemon")
+    record = local_server.ServerMaintenanceRecord(
+        schema_version=2,
+        recipe=_recipe(tmp_path),
+        process=ProcessIdentity.capture(os.getpid()),
+        port=8123,
+        base_path="",
+    )
+    if daemon_signature is None:
+        monkeypatch.delenv(DAEMON_CONFIG_SIG_ENV_VAR)
+    else:
+        monkeypatch.setenv(DAEMON_CONFIG_SIG_ENV_VAR, daemon_signature)
+    if effective_drift:
+        monkeypatch.setenv("OMNIGENT_DATABASE_URI", f"sqlite:///{tmp_path}/other.db")
+    process = Mock()
+    monkeypatch.setattr(ProcessIdentity, "require_live", lambda self: process)
+    monkeypatch.setattr(local_server, "_server_maintenance_record", lambda path: record)
+    monkeypatch.setattr(local_server, "_read_local_server_pid_file", lambda: (os.getpid(), 8123))
+    monkeypatch.setattr(local_server, "_pid_listening_on_port", lambda port: os.getpid())
+    if effective_drift:
+        with pytest.raises(local_server.ServerMaintenanceError, match="config_mismatch"):
+            local_server.maintenance_stop_local_server()
+        process.terminate.assert_not_called()
+    else:
+        assert local_server.maintenance_stop_local_server()["state"] == "detached"
+        process.terminate.assert_called_once()

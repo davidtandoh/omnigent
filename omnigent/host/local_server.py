@@ -35,6 +35,7 @@ from filelock import FileLock
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from omnigent.config import global_config_path
+from omnigent.host.daemon_lifecycle import DAEMON_CONFIG_SIG_ENV_VAR
 from omnigent.inner import _proc
 from omnigent.native.owner_claim import ProcessIdentity
 from omnigent.native.state_files import (
@@ -471,6 +472,7 @@ def _maintenance_environment_digest() -> str:
         "OMNIGENT_LOCAL_SERVER_PORT",
         "OMNIGENT_CONFIG",
         "OMNIGENT_ACCOUNTS_AUTO_OPEN",
+        DAEMON_CONFIG_SIG_ENV_VAR,
         PROCESS_LOG_FILE_ENV_VAR,
     }
     return hashlib.sha256(
