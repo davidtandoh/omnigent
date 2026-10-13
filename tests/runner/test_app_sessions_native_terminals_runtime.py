@@ -427,8 +427,7 @@ async def test_auto_create_codex_terminal_keeps_loop_responsive_during_profile_r
             retain_subscription,
             use_envelope,
             None,
-            id=f"{version}-"
-            f"{'envelope' if use_envelope else 'legacy'}",
+            id=f"{version}-{'envelope' if use_envelope else 'legacy'}",
         )
         for version, permission_args, retain_subscription in [
             ((0, 153, 1), ["--config", "approval_policy=on-request"], False),
@@ -443,7 +442,10 @@ async def test_auto_create_codex_terminal_keeps_loop_responsive_during_profile_r
         )
     ],
 )
-@pytest.mark.parametrize("launch_outcome", ["success", "cancelled", "retained"])
+@pytest.mark.parametrize(
+    "launch_outcome",
+    ["success", "cancelled", "retained", "observation_cancelled", "observation_exited"],
+)
 async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -481,6 +483,9 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     import omnigent.harnesses.codex_native.app_server as codex_app_mod
     from omnigent.runner import app as runner_app_mod
 
+    retained_failure = launch_outcome in {
+        "retained", "observation_cancelled", "observation_exited"
+    }
     session_id = "76cbdcbbf84d4149b2a7d7441b6966c1"
     thread_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
     monkeypatch.setattr(codex_native_bridge, "_BRIDGE_ROOT", tmp_path / "codex-bridge")
@@ -701,7 +706,7 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
             launched_specs.append(spec)
             if launch_outcome == "cancelled":
                 raise asyncio.CancelledError
-            if launch_outcome == "retained":
+            if retained_failure:
                 return await super().launch_auxiliary_terminal(
                     session_id=session_id,
                     terminal_name=terminal_name,
@@ -795,16 +800,31 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
 
     terminal_registry = TerminalRegistry()
     resources = _FakeResourceRegistry(terminal_registry=terminal_registry)
-    if launch_outcome == "retained":
+    if retained_failure:
         private_dir = tmp_path / "terminal"
         private_dir.mkdir()
         instance = TerminalInstance("codex", "main", private_dir / "tmux.sock", private_dir)
 
-        async def cancelled_after_start(**_kwargs: Any) -> None:
+        async def start_terminal(**_kwargs: Any) -> None:
             instance.running = True
-            raise asyncio.CancelledError
+            instance.socket_path.touch()
+            if launch_outcome == "retained":
+                raise asyncio.CancelledError
 
-        instance.launch = cancelled_after_start
+        probe_count = 0
+
+        async def probe_terminal() -> bool:
+            nonlocal probe_count
+            probe_count += 1
+            if probe_count == 1:
+                return True
+            if launch_outcome == "observation_cancelled":
+                raise asyncio.CancelledError
+            instance.running = False
+            return False
+
+        instance.launch = start_terminal
+        instance.is_alive = probe_terminal
         monkeypatch.setattr(
             registry_mod, "create_terminal_instance",
             Mock(return_value=TerminalCreateResult(instance, tmp_path)),
@@ -813,8 +833,15 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
         monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
 
     try:
-        if launch_outcome == "retained":
-            with pytest.raises(RuntimeError, match="could not start"):
+        if retained_failure:
+            error_type, error_message = {
+                "retained": (RuntimeError, "could not start"),
+                "observation_cancelled": (asyncio.CancelledError, None),
+                "observation_exited": (
+                    registry_mod.TerminalExitedDuringLaunch, "exited before it became available"
+                ),
+            }[launch_outcome]
+            with pytest.raises(error_type, match=error_message):
                 await _auto_create_codex_terminal(
                     session_id, resources,
                     lambda _sid, event: published_events.append(event),
@@ -823,13 +850,14 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
                     session_init=session_init,
                 )
             assert instance.launch_failed
-            assert instance.running
+            assert instance.running is (launch_outcome != "observation_exited")
             assert private_dir.exists()
             assert terminal_registry.list_for_cleanup(session_id)[0].instance is instance
             assert not app_server.closed
             assert runner_app_mod._AUTO_CODEX_APP_SERVERS[session_id] is app_server
             assert not forward_calls
             assert not published_events
+            assert resources.terminal_resource_role(session_id, "terminal_codex_main") is None
             with pytest.raises(RuntimeError, match="process_pending"):
                 await _auto_create_codex_terminal(
                     session_id, resources, lambda *_: None,

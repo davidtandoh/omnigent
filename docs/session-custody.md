@@ -38,7 +38,9 @@ What works today for every harness:
   proven is retained, never reported as ended.
 
 A failed launch whose cleanup fails remains in the terminal registry with its
-lock and resources. The registry refuses reuse until explicit cleanup succeeds.
+lock and resources. Failed lifecycle observation also marks the exact terminal
+as a failed launch. The registry refuses reuse until explicit cleanup succeeds.
+The idle reaper excludes failed launches and continues to inspect healthy sessions.
 Session cleanup closes terminals before releasing the primary environment,
 skills or native bridge files. A terminal cleanup failure propagates through
 the resource registry as a named JSON error; the runner does not return

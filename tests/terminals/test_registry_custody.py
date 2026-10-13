@@ -643,3 +643,61 @@ async def test_native_cleanup_refusal_preserves_dependents_and_deletion_events(
     finally:
         forwarder.cancel()
         await asyncio.gather(forwarder, return_exceptions=True)
+
+
+async def test_native_reaper_skips_failed_launch_and_closes_healthy_session(
+    owned_terminal, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from omnigent.runner import app as runner_app
+    from omnigent.runner.resource_registry import (
+        CODEX_NATIVE_TERMINAL_ROLE,
+        SessionResourceRegistry,
+    )
+    from tests.runner.helpers import NullServerClient
+
+    t = owned_terminal
+    resources = SessionResourceRegistry(terminal_registry=t.registry)
+    monkeypatch.setattr(
+        t.instance, "is_alive", AsyncMock(side_effect=[True, asyncio.CancelledError])
+    )
+    t.spawn.side_effect = OSError(errno.EAGAIN, "synthetic resource exhaustion")
+    with pytest.raises(asyncio.CancelledError):
+        await resources.launch_auxiliary_terminal(
+            *t.args, resource_role=CODEX_NATIVE_TERMINAL_ROLE
+        )
+    assert t.instance.launch_failed
+    receipt = t.owner.record_path.read_bytes()
+    failed_lock = t.registry.get_instance_lock(*t.args[:3])
+    healthy = TerminalInstance("codex", "main", tmp_path / "healthy.sock", tmp_path, running=True)
+    healthy.launch = AsyncMock()
+    healthy.is_alive = AsyncMock(return_value=True)
+    healthy.close = AsyncMock()
+    t.create.return_value = TerminalCreateResult(healthy, tmp_path)
+    await resources.launch_auxiliary_terminal(
+        "conv_healthy", "codex", "main", t.args[3], resource_role=CODEX_NATIVE_TERMINAL_ROLE
+    )
+    app = runner_app.create_runner_app(
+        terminal_registry=t.registry,
+        resource_registry=resources,
+        server_client=NullServerClient(),
+    )
+    reaper = app.state.native_pane_reaper
+    reaper._is_busy = AsyncMock(return_value=False)
+    reaper._idle_timeout_s = 0
+    await reaper._scan_once()
+    await reaper._scan_once()
+    healthy.close.assert_awaited_once()
+    assert t.registry.list_for_cleanup("conv_healthy") == []
+    assert t.registry.get_instance_lock("conv_healthy", "codex", "main") is None
+    assert t.registry.list_for_cleanup(t.args[0])[0].instance is t.instance
+    assert t.registry.get_instance_lock(*t.args[:3]) is failed_lock
+    assert t.owner.record_path.read_bytes() == receipt
+    assert t.instance.private_dir.exists()
+    assert t.process.poll() is None
+    with pytest.raises(RuntimeError, match="process_pending"):
+        await t.registry.launch(*t.args)
+    t.spawn.side_effect = None
+    assert await t.registry.close(*t.args[:3], expected=t.instance)
+    assert t.registry.list_for_cleanup(t.args[0]) == []
+    assert t.owner.record.terminals == []
+    assert t.process.poll() is not None

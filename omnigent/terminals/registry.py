@@ -482,7 +482,11 @@ class TerminalRegistry:
         with self._lock:
             for conv_id, slot in self._by_conversation.items():
                 for (name, key), instance in slot.items():
-                    if key == "main" and name in NATIVE_PANE_TERMINAL_NAMES:
+                    if (
+                        key == "main"
+                        and name in NATIVE_PANE_TERMINAL_NAMES
+                        and not instance.launch_failed
+                    ):
                         self._verify_usable(conv_id, instance)
                         out.append((conv_id, name, instance.socket_path))
         return out

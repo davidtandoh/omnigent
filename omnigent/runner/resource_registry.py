@@ -1297,14 +1297,18 @@ class SessionResourceRegistry:
                 before_observation=True,
             )
             raise
-        return await self._observe_terminal_with_lifecycle(
-            lifecycle,
-            session_id=session_id,
-            terminal_name=terminal_name,
-            session_key=session_key,
-            instance=instance,
-            resource_role=resource_role,
-        )
+        try:
+            return await self._observe_terminal_with_lifecycle(
+                lifecycle,
+                session_id=session_id,
+                terminal_name=terminal_name,
+                session_key=session_key,
+                instance=instance,
+                resource_role=resource_role,
+            )
+        except BaseException:
+            instance.launch_failed = True
+            raise
 
     async def observe_required_terminal(
         self,
