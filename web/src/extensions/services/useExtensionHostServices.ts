@@ -178,7 +178,7 @@ export function useExtensionHostServices(extension: ExtensionCatalogItem) {
           if (typeof sessionId !== "string" || !sessionId || sessionId.length > 256) {
             throw new ExtensionHostServiceError("InvalidParams", "sessionId is invalid");
           }
-          // Shares the GitHub panel's cache so the runner is asked at most every 30s per session.
+          // Shares the Pull Requests panel's cache, refreshed at most every 30s per session.
           const info = await queryClient.fetchQuery({
             queryKey: ["github-info", sessionId],
             queryFn: () => fetchPullRequestInfo(sessionId),

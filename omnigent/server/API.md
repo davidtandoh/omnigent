@@ -573,12 +573,14 @@ Request parts:
 {"session_id": "conv_abc123"}
 ```
 
-The server stores the bundle, then creates the `conversations` row
-and the session-scoped `agents` row in one database transaction. The
-new agent row has `agents.kind` set to `'session'`,
-and `conversations.agent_id` points at that agent. If the database
-agent write fails, the conversation row rolls back. If multipart or
-bundle parsing fails, no database row is written.
+On stores that support user agents, a top-level upload reuses the uploader's
+agent row with the same name and bundle contents. Changed contents create a
+different row; a row changed by an MCP edit is not reused for the old upload.
+The server persists the user agent before creating the conversation, whose
+`agent_id` references it. Child uploads receive separate agent rows. Stores
+without user-agent support also create a separate row per upload. These
+separate rows and their conversations are created in one transaction.
+If multipart or bundle parsing fails, no database row is written.
 
 400 Bad Request - invalid metadata or invalid agent bundle
 409 Conflict - agent write violates a uniqueness constraint
@@ -1225,8 +1227,8 @@ Request body matches `SessionForkRequest`:
 201 Created — body matches `SessionResponse` (status "idle",
   items are the deep-copied items from the source session).
 
-400 Bad Request — source session is a sub-agent session, has
-  no agent binding, up_to_response_id names no response in
+400 Bad Request — source session has no agent binding,
+  up_to_response_id names no response in
   the source session, or a managed fork asks for a sandbox this
   server has not configured
 404 Not Found — no session with that source_id, or the source's
@@ -1236,23 +1238,22 @@ Request body matches `SessionForkRequest`:
   repository URL
 ```
 
-Creates a new session by deep-copying every item from the source
-session. The server also clones the source's agent (new agent ID,
-same bundle and config) so the fork can be reconfigured independently.
-Unless `host_type: "managed"` is requested, the forked session is
+Creates a new session by deep-copying items from the source session, subject
+to `up_to_response_id`. A server agent or an agent owned by the caller is
+reused. An agent owned by another user, or a user agent without an owner,
+is copied under a new ID owned by the caller. This also applies when selecting
+a different target agent. On a single-user server without authentication,
+the agent is reused.
+Unless `host_type: "managed"` or `side_chat: true` is requested, the forked session is
 **not** bound to a runner — clients must `PATCH /v1/sessions/{id}`
 with `runner_id` before posting events, the same way they bind a
 runner after resuming an existing session.
+Side chats use their source session for routing and may share its live runner.
 
-The fork's bound agent is always that session-scoped clone, never the
-built-in it derives from. A managed fork's runner therefore carries no
-built-in agent classifier, so an admission policy keyed on one does not
-match it.
-
-The response is a full `SessionResponse` snapshot of the fork — same
-shape as `GET /v1/sessions/{id}` — with status `"idle"` and all
-copied items in chronological order. Clients must bind a runner
-before opening the fork's SSE stream or posting events.
+The response has the `SessionResponse` shape with status `"idle"` and the
+newest page of copied items in chronological order. Load earlier history
+through the session items endpoint. A standard external fork needs a runner
+binding before opening its SSE stream or posting events.
 
 ### Stream Session
 

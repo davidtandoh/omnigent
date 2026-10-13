@@ -683,6 +683,23 @@ Run it with:
 omnigent run path/to/my_agent.yaml
 ```
 
+On a shared server, follow the
+[uploaded-agent tool restrictions](docs/AGENT_YAML_SPEC.md#uploaded-agent-compatibility-in-0180)
+before uploading the bundle.
+
+To keep an agent in the new-session picker without starting a session, install
+it on your configured server:
+
+```bash
+omnigent agent add path/to/my_agent.yaml
+omnigent agent list
+omnigent agent remove my_agent
+```
+
+Installed agents belong to your account and appear on every host you use.
+Removal asks for confirmation if sessions still use the agent; those sessions
+must be forked into another agent to continue after removal.
+
 The same file can declare sub-agents and reviewers. For a fuller example, see
 Polly at [`examples/polly/`](https://github.com/omnigent-ai/omnigent/tree/main/examples/polly/), and the
 [Agent YAML spec](https://github.com/omnigent-ai/omnigent/blob/main/docs/AGENT_YAML_SPEC.md) for the full schema.

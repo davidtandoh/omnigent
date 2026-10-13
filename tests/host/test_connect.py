@@ -467,6 +467,7 @@ async def test_handle_model_options_serves_the_claude_catalog(
                 "model": "system.ai.claude-sonnet-5",
                 "displayName": "Sonnet 5",
                 "isDefault": True,
+                "source": {"kind": "subscription", "label": "Subscription", "name": "claude"},
             }
         ],
         routable_models=[
@@ -6556,8 +6557,16 @@ async def test_handle_model_options_serves_claude_sdk_endpoint_listing(
         request_id="req_sdk",
         status="ok",
         models=[
-            {"id": "databricks-claude-sonnet-5", "displayName": "databricks-claude-sonnet-5"},
-            {"id": "databricks-claude-opus-4-8", "displayName": "databricks-claude-opus-4-8"},
+            {
+                "id": "databricks-claude-sonnet-5",
+                "displayName": "databricks-claude-sonnet-5",
+                "source": {"kind": "subscription", "label": "Subscription", "name": "claude"},
+            },
+            {
+                "id": "databricks-claude-opus-4-8",
+                "displayName": "databricks-claude-opus-4-8",
+                "source": {"kind": "subscription", "label": "Subscription", "name": "claude"},
+            },
         ],
         routable_models=["databricks-claude-sonnet-5", "databricks-claude-opus-4-8"],
     )
@@ -6603,7 +6612,14 @@ async def test_handle_model_options_claude_sdk_rides_the_probe_when_endpoints_li
     assert result == HostModelOptionsResultFrame(
         request_id="req_sdk_sub",
         status="ok",
-        models=[{"id": "sonnet", "model": "claude-sonnet-5", "displayName": "Sonnet 5"}],
+        models=[
+            {
+                "id": "sonnet",
+                "model": "claude-sonnet-5",
+                "displayName": "Sonnet 5",
+                "source": {"kind": "subscription", "label": "Subscription", "name": "claude"},
+            }
+        ],
         routable_models=[],
     )
     _cleanup_host(host)

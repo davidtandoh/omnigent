@@ -12,30 +12,30 @@ redeploy the server:
 OMNIGENT_FEATURES=usage_page,harness_install
 ```
 
-Unset or empty means every release feature is off. Unknown names fail startup.
+Unset or empty uses the built-in defaults. The configured names add to those
+defaults; omitting a default-enabled feature does not disable it. Unknown names
+fail startup. Harnesses settings is always available in current clients; the
+server enables `harness_settings_ui` by default for older clients.
 The former `OMNIGENT_HARNESS_INSTALL_ENABLED` switch is rejected with a
 migration hint; use `OMNIGENT_FEATURES=harness_install` instead. The server resolves the set once at startup and publishes frontend-visible
 values in `GET /v1/info` under `features`. Users must reload the web app after a
 flag change because server capabilities are cached at page boot.
 
-`omnigent/server/feature_flags.py` is the source of truth for known keys and
-lifecycle metadata.
-
 ## Inventory
 
-| Key | Default | Owner | Review by | Purpose |
-| --- | --- | --- | --- | --- |
-| `usage_page` | Off | Web | 0.11.0 | Exposes the web Usage route, sidebar navigation, timeline, and cost breakdown details. The existing `GET /v1/usage` CLI API remains available while off. |
-| `harness_install` | Off | Onboarding | 0.11.0 | Allows the web UI to install or configure supported harnesses on a connected host. |
-| `canvas` | Off | Web | 0.15.0 | Exposes the web Canvas route (`/canvas`) and its sidebar navigation: top-level sessions as draggable cards, one canvas per project. |
-| `custom_agents_settings_ui` | Off | Web | 0.18.0 | Exposes Custom agents settings when the server also advertises `agent_install`. |
-| `sidebar_grouping_ui` | Off | Web | 0.19.0 | Adds Grouping, Ordering and Show options to the sidebar filter menu, moves that menu to the Projects header, splits Shared sessions into their own section, lets a Status or Updated grouping replace the Projects, Shared and Sessions sections, and expands the session tooltip with Repo, PR and Created by. |
+See `FEATURE_DEFINITIONS` in
+[`omnigent/server/feature_flags.py`](../omnigent/server/feature_flags.py) for
+the authoritative keys, purposes, owners, and review releases. `FeatureFlags`
+in that module defines the enabled defaults. Inspect `GET /v1/info` for the
+frontend-visible values resolved by a running server.
 
 At the review release, each flag must be removed by making the feature
 unconditional, removing the feature, or moving a genuinely permanent operator
 policy into normal server configuration.
 
 ## Rollout and rollback
+
+These steps apply to optional features that are off by default.
 
 1. Deploy an immutable image with the feature absent from `OMNIGENT_FEATURES`.
 2. Enable it on one deployment, consistently across all replicas.

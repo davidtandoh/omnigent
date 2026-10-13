@@ -1,7 +1,9 @@
 # Reusable user agents: install once, keep in the picker
 
-> **PROPOSED.** Implemented by a stack of PRs: this schema change, then switch-agent retirement,
-> shared agent rows on fork, user-agent install/list/remove, and the UI import.
+> **Design record.** The core reusable-agent flow is implemented. The problem
+> statement below describes the pre-implementation baseline; follow-up proposals
+> remain proposals. For current session upload and fork contracts, see the
+> [Server API](../omnigent/server/API.md#sessions-api-v1sessions).
 
 ## 1. Summary
 

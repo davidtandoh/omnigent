@@ -1840,7 +1840,7 @@ def _account_home_dir() -> Path:
         :meth:`Path.home` where no password database exists.
     """
     try:
-        import pwd  # noqa: FlagLocalImports - POSIX-only module
+        import pwd  # POSIX-only module.
 
         return Path(pwd.getpwuid(os.getuid()).pw_dir)
     except (ImportError, KeyError):
