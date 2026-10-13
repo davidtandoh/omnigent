@@ -105,7 +105,7 @@ class _FaultingRegistry:
             future.set_exception(RuntimeError("receive loop blew up"))
 
 
-@pytest.mark.parametrize("verdict", ["alive", "dead", "unknown"])
+@pytest.mark.parametrize("verdict", ["alive", "dead", "unknown", "refused"])
 async def test_query_returns_host_verdict(verdict: str) -> None:
     """Each host verdict is returned verbatim to the caller.
 

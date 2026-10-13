@@ -41,6 +41,7 @@ directly instead of going through `data_dir()`.
 | `chat.db` (+ `-shm`, `-wal`) | Main SQLite runtime DB — conversations, sessions, messages. Machine-global unless a project-local `.omnigent/` is used. | `omnigent/cli.py`, `omnigent/host/local_server.py` |
 | `auth_tokens.json` / `auth_tokens.lock` | Per-server OIDC/session tokens keyed by server URL, written with user-only permissions, plus its lock file (`.json` is replaced by `.lock`, so it is `auth_tokens.lock`, not `auth_tokens.json.lock`). | `omnigent/cli_auth.py` |
 | `local_server.pid` / `local_server.sig` | Recorded pid/port and signature of the running local server. | `omnigent/host/local_server.py` |
+| `local_server.owner.json` / `local_server.maintenance.json` | Exact API process identity and maintenance restart receipt. Restart preserves the port, base path and auth/config signature. | `omnigent/host/local_server.py` |
 | `host.pid` | Recorded pid of the local host process. | `omnigent/cli.py` |
 | `telemetry.json` | Telemetry state, including the persistent `installation_id`. | `omnigent/telemetry/installation_id.py` |
 | `.update_check.json` **†** | Cached result of the (potentially slow) update check. | `omnigent/update_check.py` |
@@ -57,6 +58,7 @@ directly instead of going through `data_dir()`.
 | `attachments/` | Native harness attachment copies, grouped by an opaque session cache key. The original uploads remain in the server's configured artifact store. | `attachment_cache_dir()` in `omnigent/inner/native_attachments.py` |
 | `runners/` | Runner identity: `runner_id` (stable per-machine id), created by `identity.py`. Also holds per-runner workspace subdirs — `runner_<id>/` and, for token-bound remote `run --server` runners, `runner_token_<hash>/` — each with a `pending-tokens/` dir; those are created by the host/runner launch path, not `identity.py`. | `omnigent/runner/identity.py` (`runner_id`) |
 | `daemons/` | Daemon lifecycle registry, one JSON record per target. | `daemon_registry_dir()` in `omnigent/host/daemon_lifecycle.py` |
+| `custody/` | Private session owners and replaceable host attachment claims, keyed by SHA-256 of the exact session ID. `session.json` retains an `ended` tombstone. | `omnigent/runner/custody.py`; [session custody](session-custody.md) |
 | `crashes/` | Crash reports, `crash-<timestamp>.md`. | `omnigent/crash_handler.py` |
 | `cache/` | Derived caches: `model-catalogs/` (per-harness model lists) and `codex-model-probe/` **†**. | `omnigent/models/model_catalog_store.py`, `omnigent/harnesses/codex_native/app_server.py` |
 | `models/` **†** | Downloaded models, e.g. `dictation/asr` and `dictation/punct`. | `omnigent/server/dictation.py` |

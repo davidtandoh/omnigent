@@ -289,6 +289,7 @@ def sse_tool_call_response(
                 "call_id": tc.get("call_id", "call-mock"),
                 "name": tc["name"],
                 "arguments": tc.get("arguments", "{}"),
+                **({"namespace": tc["namespace"]} if "namespace" in tc else {}),
                 "status": "completed",
                 **({"namespace": tc["namespace"]} if "namespace" in tc else {}),
             }

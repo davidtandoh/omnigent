@@ -3869,7 +3869,7 @@ async def _wait_for_host_bound_runner_client(
         )
     )
     status_task = asyncio.ensure_future(
-        _query_host_runner_status(host_conn, host_registry, runner_id)
+        _query_host_runner_status(host_conn, host_registry, runner_id, session_id=session_id)
     )
     try:
         done, _pending = await asyncio.wait(

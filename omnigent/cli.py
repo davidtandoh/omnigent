@@ -2130,6 +2130,7 @@ _CLICK_SUBCOMMANDS: frozenset[str] = frozenset(
         "qwen",
         "resume",
         "run",
+        "runtime",
         "session",
         "sandbox",
         "server",
@@ -2421,7 +2422,10 @@ def main() -> None:
         _warn_deprecated_harness_path_env_vars()
 
     try:
-        cli(args=argv, standalone_mode=False)
+        exit_code = cli(args=argv, standalone_mode=False)
+        # Non-standalone Click returns explicit exit codes instead of raising.
+        if isinstance(exit_code, int):
+            raise SystemExit(exit_code)
     except click.ClickException as exc:
         log_cli_exception(exc, prefix="Click CLI error")
         exc.show()
@@ -4250,6 +4254,7 @@ def _adopt_cli_runner_process(proc: subprocess.Popen[bytes]) -> None:
         "with or without the prefix. Default: served at the origin root."
     ),
 )
+@click.option("--managed-local", is_flag=True, hidden=True)
 @click.pass_context
 def server(
     ctx: click.Context,
@@ -4265,6 +4270,7 @@ def server(
     admin_password: str | None,
     background: bool,
     base_path: str | None,
+    managed_local: bool = False,
 ) -> None:
     """Start the Omnigent server, or manage the background server.
 
@@ -4327,6 +4333,8 @@ def server(
         _run_background_server()
         return
 
+    if managed_local and host != "127.0.0.1":
+        raise click.UsageError("Managed local servers require the loopback interface.")
     port_source = ctx.get_parameter_source("port")
     port_was_explicit = port_source is click.core.ParameterSource.COMMANDLINE
     if port_was_explicit:
@@ -4686,18 +4694,26 @@ def server(
             err=True,
         )
 
-    # Advertise this server in the shared pidfile so the run/host
-    # daemon discovers and reuses it (loopback only). Cleared on exit so
-    # a clean shutdown doesn't leave a stale record.
-    if _is_canonical_local_server:
+    if _is_canonical_local_server or managed_local:
         from omnigent.host.local_server import (
+            _resolve_effective_base_path,
+            qualify_server_restart,
+            record_server_maintenance,
             register_local_server,
         )
 
-        # Stamp the same config signature host/run compute so they reuse
-        # this foreground server instead of tearing it down on a spurious
-        # sig mismatch.
-        register_local_server(port)
+        recipe = qualify_server_restart(
+            database_uri=db_uri,
+            artifact_location=art_loc,
+            config_path=config_path,
+            unsupported_options=bool(conv_db_uri or execution_timeout is not None or agent_dirs),
+        )
+        if managed_local:
+            record_server_maintenance(
+                os.getpid(), port, _resolve_effective_base_path(), recipe=recipe
+            )
+        else:
+            register_local_server(port, recipe=recipe)
 
     class _ShutdownSignalingServer(uvicorn.server.Server):
         """uvicorn.Server that signals active SSE subscribers before the
@@ -4766,10 +4782,90 @@ def server(
         # a Ctrl-C exit doesn't print Click's "Aborted!" or exit non-zero.
         pass
     finally:
-        if _is_canonical_local_server:
+        if _is_canonical_local_server or managed_local:
             from omnigent.host.local_server import clear_local_server_record
 
             clear_local_server_record()
+
+
+@cli.group("runtime")
+def runtime_commands() -> None:
+    """Inspect runtime contracts and manage exactly scoped sessions."""
+
+
+@runtime_commands.command("launch-contract")
+@click.option("--server", required=True, help="Exact endpoint to verify.")
+@click.option("--json", "json_output", is_flag=True, required=True, help="Emit canonical JSON.")
+def runtime_launch_contract(server: str, json_output: bool) -> None:
+    """Publish the executable, generation, environment and harness contract."""
+    from omnigent.host.launch_contract import LaunchContractError, launch_contract
+    from omnigent.native.state_files import canonical_json
+
+    if not json_output:
+        raise click.UsageError("--json is required")
+    try:
+        receipt = launch_contract(server)
+    except LaunchContractError as exc:
+        click.echo(
+            canonical_json({"schema_version": 1, "error": {"category": exc.category}}), nl=False
+        )
+        raise click.exceptions.Exit(1) from exc
+    click.echo(canonical_json(receipt), nl=False)
+
+
+@runtime_commands.command("session-contract")
+@click.option("--session", "session_id", required=True)
+@click.option("--json", "json_output", is_flag=True)
+def runtime_session_contract(session_id: str, json_output: bool) -> None:
+    """Read exact custody and reattachment identities for one local session."""
+    from omnigent.native.state_files import canonical_json
+    from omnigent.process_logging import data_dir
+    from omnigent.runner.custody import CustodyError, session_contract
+
+    if not json_output:
+        raise click.UsageError("--json is required")
+    try:
+        receipt = session_contract(data_dir(), session_id)
+    except (CustodyError, OSError, psutil.Error) as exc:
+        category = str(exc) if isinstance(exc, CustodyError) else "unavailable_probe"
+        click.echo(
+            canonical_json({"schema_version": 1, "error": {"category": category}}), nl=False
+        )
+        raise click.exceptions.Exit(1) from exc
+    click.echo(canonical_json(receipt), nl=False)
+
+
+@runtime_commands.command("end-session")
+@click.option("--session", "session_id", required=True)
+@click.option("--owner-generation", required=True)
+@click.option("--host-id", required=True)
+@click.option("--server", required=True)
+@click.option("--json", "json_output", is_flag=True)
+def runtime_end_session(
+    session_id: str, owner_generation: str, host_id: str, server: str, json_output: bool
+) -> None:
+    """End the exact recorded local session and its native resources."""
+    from omnigent.native.state_files import canonical_json
+    from omnigent.process_logging import data_dir
+    from omnigent.runner.custody import CustodyError, end_session
+
+    if not json_output:
+        raise click.UsageError("--json is required")
+    try:
+        receipt = end_session(
+            data_dir(),
+            session_id,
+            owner_generation=owner_generation,
+            host_id=host_id,
+            endpoint=server.rstrip("/"),
+        )
+    except (CustodyError, OSError, psutil.Error) as exc:
+        category = str(exc) if isinstance(exc, CustodyError) else "unavailable_probe"
+        click.echo(
+            canonical_json({"schema_version": 1, "error": {"category": category}}), nl=False
+        )
+        raise click.exceptions.Exit(1) from exc
+    click.echo(canonical_json(receipt), nl=False)
 
 
 def _stop_local_server_and_daemon(*, force: bool) -> bool:
@@ -4788,15 +4884,23 @@ def _stop_local_server_and_daemon(*, force: bool) -> bool:
     """
     was_running = local_server_url_if_healthy() is not None
     local_record = _find_daemon_record(_LOCAL_DAEMON_MARKER)
+    refusal: click.ClickException | None = None
     if local_record is not None:
-        # A stubborn daemon shouldn't block stopping the server.
-        with contextlib.suppress(click.ClickException):
-            _terminate_daemon(local_record, force=force)
+        try:
+            _end_daemon_custodied_sessions(local_record)
+        except click.ClickException as exc:
+            refusal = exc
+        else:
+            # A stubborn daemon shouldn't block stopping the server.
+            with contextlib.suppress(click.ClickException):
+                _terminate_daemon(local_record, force=force)
     stop_local_omnigent_server()
     # Also catch an orphan on the canonical port whose pidfile was lost, so
     # `server stop` isn't blind to it (it reported "No background server is
     # running" while one was still listening on the default port).
     orphan_pid = stop_untracked_local_server()
+    if refusal is not None:
+        raise refusal
     return was_running or orphan_pid is not None
 
 
@@ -4869,6 +4973,51 @@ def server_stop(force: bool) -> None:
         click.echo("Stopped the background server.")
     else:
         click.echo("No background server is running.")
+
+
+def _server_maintenance_result(*, start: bool, json_output: bool) -> None:
+    from filelock import Timeout as LockTimeout
+
+    from omnigent.host.local_server import (
+        LocalServerStartupError,
+        ServerMaintenanceError,
+        maintenance_start_local_server,
+        maintenance_stop_local_server,
+    )
+    from omnigent.native.state_files import canonical_json
+
+    try:
+        result = maintenance_start_local_server() if start else maintenance_stop_local_server()
+    except (
+        ServerMaintenanceError,
+        LocalServerStartupError,
+        LockTimeout,
+        OSError,
+        psutil.Error,
+    ) as exc:
+        category = str(exc) if isinstance(exc, ServerMaintenanceError) else "unavailable_probe"
+        click.echo(
+            canonical_json({"schema_version": 1, "error": {"category": category}}), nl=False
+        )
+        raise click.exceptions.Exit(1) from exc
+    if json_output:
+        click.echo(canonical_json({"schema_version": 1, **result}), nl=False)
+    else:
+        click.echo(f"Server {result['state']} at {result['endpoint']}; host sessions preserved.")
+
+
+@server.command("maintenance-stop")
+@click.option("--json", "json_output", is_flag=True, help="Emit canonical JSON.")
+def server_maintenance_stop(json_output: bool) -> None:
+    """Detach the API server for maintenance, preserving host and sessions."""
+    _server_maintenance_result(start=False, json_output=json_output)
+
+
+@server.command("maintenance-start")
+@click.option("--json", "json_output", is_flag=True, help="Emit canonical JSON.")
+def server_maintenance_start(json_output: bool) -> None:
+    """Restore the detached API server on its exact endpoint and auth config."""
+    _server_maintenance_result(start=True, json_output=json_output)
 
 
 @server.command("status")
@@ -4980,7 +5129,7 @@ def stop(force: bool) -> None:
 
     The off switch, and the counterpart of ``omnigent start``: stops every host
     daemon (local and remote-targeted) and the detached background server.
-    Runners are reaped when their daemon exits. To stop only hosting while
+    Retained session owners are ended before their daemon exits. To stop hosting while
     keeping the local server (web UI / history) up, use ``omnigent host stop``
     instead.
 
@@ -4990,15 +5139,27 @@ def stop(force: bool) -> None:
     """
     stopped = 0
     failures: list[str] = []
-    for record in _list_daemon_records():
-        # Terminating the daemon reaps its runners (orphan-watchdog), so the
-        # off-switch doesn't need the graceful per-session HTTP stop that
-        # `host stop` does — that keeps teardown quiet and dependency-free.
+    records = _list_daemon_records()
+    for record in records:
+        # End retained owners locally before stopping the host; the API may be down.
         try:
+            _end_daemon_custodied_sessions(record)
             _terminate_daemon(record, force=force)
             stopped += 1
         except click.ClickException as exc:
             failures.append(exc.message)
+    detached_stopped = 0
+    covered_scopes: set[tuple[str | None, str | None]] = {
+        (
+            record.host_id,
+            record.resolved_server_url if record.mode == "local" else record.server_url,
+        )
+        for record in records
+    }
+    try:
+        detached_stopped = _end_custodied_sessions(covered_scopes, exclude=True)
+    except click.ClickException as exc:
+        failures.append(exc.message)
     server_was_running = local_server_url_if_healthy() is not None
     stop_local_omnigent_server()
     # Sweep the canonical port for an orphaned server the pidfile lost track
@@ -5010,6 +5171,8 @@ def stop(force: bool) -> None:
     parts: list[str] = []
     if stopped:
         parts.append(f"{stopped} daemon(s)")
+    if detached_stopped:
+        parts.append(f"{detached_stopped} detached session(s)")
     if server_was_running:
         parts.append("the background server")
     if orphan_pid is not None:
@@ -9351,8 +9514,19 @@ def _selected_daemon_records(
     if all_targets or (server is None and default_all):
         return _list_daemon_records()
     target = _normalize_daemon_target(_resolve_host_server(server))
-    record = _find_daemon_record(target)
-    return [] if record is None else [record]
+    records = [
+        record
+        for record in _list_daemon_records()
+        if record.target == target
+        or (
+            record.mode == "local"
+            and record.resolved_server_url is not None
+            and record.resolved_server_url.rstrip("/") == target
+        )
+    ]
+    if len(records) > 1:
+        raise click.ClickException("Ambiguous host endpoint; refusing to select a daemon.")
+    return records
 
 
 # Per-process header cache keyed on base_url. _remote_headers() resolves
@@ -10606,11 +10780,66 @@ def host_stop(
         stopped = 0
         if not daemon_only and not force:
             stopped = _stop_daemon_sessions(record)
+        if not daemon_only:
+            _end_daemon_custodied_sessions(record)
         _terminate_daemon(record, force=force)
         click.echo(
             f"Stopped {_host_display_url(record.target)} daemon "
             f"pid={record.pid}; sessions_stopped={stopped}."
         )
+
+
+def _end_daemon_custodied_sessions(record: _HostDaemonRecord) -> None:
+    """Preserve intentional stop semantics even while the API is unavailable.
+
+    Each owner goes through exact end; one session's refusal neither blocks the
+    others nor lets the daemon stop.
+    """
+    endpoint = record.resolved_server_url if record.mode == "local" else record.server_url
+    _end_custodied_sessions({(record.host_id, endpoint)})
+
+
+def _end_custodied_sessions(
+    scopes: set[tuple[str | None, str | None]], *, exclude: bool = False
+) -> int:
+    from omnigent.process_logging import data_dir
+    from omnigent.runner.custody import CustodyError, custody_records, end_session
+
+    def category(exc: Exception) -> str:
+        return str(exc) if isinstance(exc, CustodyError) else "unavailable_probe"
+
+    scan_refusals: dict[str, str] = {}
+    try:
+        selected = [
+            receipt
+            for receipt in custody_records(data_dir(), refusals=scan_refusals)
+            if ((receipt.host_id, receipt.endpoint) in scopes) != exclude
+        ]
+    except (CustodyError, OSError, psutil.Error) as exc:
+        raise click.ClickException(f"Session teardown refused: {category(exc)}") from exc
+    refusals = set(scan_refusals.values())
+    for receipt in selected:
+        try:
+            end_session(
+                data_dir(),
+                receipt.session_id,
+                owner_generation=receipt.owner_generation,
+                host_id=receipt.host_id,
+                endpoint=receipt.endpoint,
+            )
+        except (CustodyError, OSError, psutil.Error) as exc:
+            refusals.add(category(exc))
+    if refusals:
+        raise click.ClickException(f"Session teardown refused: {', '.join(sorted(refusals))}")
+    return len(selected)
+
+
+@host.command("maintenance-detach")
+@click.option("--server", required=True, help="Exact host endpoint to detach.")
+@click.pass_context
+def host_maintenance_detach(ctx: click.Context, server: str) -> None:
+    """Detach this host attachment while live Codex sessions continue."""
+    ctx.invoke(host_stop, server=server, all_targets=False, daemon_only=True, force=False)
 
 
 @host.command("stop-session")

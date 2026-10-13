@@ -320,10 +320,13 @@ class HostStopRunnerFrame:
         e.g. ``"req_def456"``.
     :param runner_id: Runner to stop, e.g.
         ``"runner_token_abc123..."``.
+    :param session_id: Exact session scope for session-originated stops;
+        ``None`` for an intentional host-wide stop. Required on the wire.
     """
 
     request_id: str
     runner_id: str
+    session_id: str | None
 
 
 @dataclass
@@ -368,23 +371,21 @@ class HostRunnerExitedFrame:
 
 @dataclass
 class HostRunnerStatusFrame:
-    """Server → host: is this runner's process alive, dead, or unknown?
+    """Server → host: verify runner liveness and optional session scope.
 
-    The host is the authoritative owner of runner-process liveness — it
-    holds each runner's :class:`subprocess.Popen`. The runner tunnel
-    only tells the server "connected right now"; it cannot distinguish a
-    runner that is still booting (will connect) from one that was stopped
-    or died when the host restarted (never will). The message-dispatch
-    path asks this before its connect grace so it waits for a runner that
-    is coming and relaunches immediately for one that is not.
+    The host checks a child process handle or an adopted custody receipt.
+    The runner tunnel reports only the current connection. See
+    :class:`HostRunnerStatusResultFrame` for liveness and refusal results.
 
     :param request_id: Unique id for correlating the result, e.g.
         ``"req_rs_1"``.
     :param runner_id: Runner to query, e.g. ``"runner_abc123..."``.
+    :param session_id: Exact session scope to verify, when supplied.
     """
 
     request_id: str
     runner_id: str
+    session_id: str | None = None
 
 
 @dataclass
@@ -402,6 +403,8 @@ class HostRunnerStatusResultFrame:
         * ``"unknown"`` — the host has no record of this runner (it was
           stopped, or a fresh post-restart host never spawned it).
           Relaunch now.
+        * ``"refused"`` — custody or session identity could not be verified.
+          Preserve the binding.
     """
 
     request_id: str
@@ -1403,6 +1406,7 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "kind": HostFrameKind.STOP_RUNNER.value,
                 "request_id": frame.request_id,
                 "runner_id": frame.runner_id,
+                "session_id": frame.session_id,
             }
         )
     if isinstance(frame, HostStopRunnerResultFrame):
@@ -1428,6 +1432,7 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "kind": HostFrameKind.RUNNER_STATUS.value,
                 "request_id": frame.request_id,
                 "runner_id": frame.runner_id,
+                "session_id": frame.session_id,
             }
         )
     if isinstance(frame, HostRunnerStatusResultFrame):
@@ -2309,9 +2314,12 @@ def _decode_stop_runner(msg: _JsonObject) -> HostStopRunnerFrame:
     :param msg: Decoded frame object.
     :returns: Typed stop-runner frame.
     """
+    if "session_id" not in msg:
+        raise ValueError("stop_runner requires session_id")
     return HostStopRunnerFrame(
         request_id=_required_str(msg, "request_id"),
         runner_id=_required_str(msg, "runner_id"),
+        session_id=_optional_nullable_str(msg, "session_id"),
     )
 
 
@@ -2351,6 +2359,7 @@ def _decode_runner_status(msg: _JsonObject) -> HostRunnerStatusFrame:
     return HostRunnerStatusFrame(
         request_id=_required_str(msg, "request_id"),
         runner_id=_required_str(msg, "runner_id"),
+        session_id=_optional_nullable_str(msg, "session_id"),
     )
 
 

@@ -2151,7 +2151,7 @@ async def test_first_message_during_host_spawn_does_not_launch_replacement(
     monkeypatch.setattr(host, "_current_auth_token", lambda **_kwargs: None)
     monkeypatch.setattr(host, "_spawn_runner_proc", _spawn)
     monkeypatch.setattr(host, "_watch_runner", AsyncMock())
-    monkeypatch.setattr(host, "_stop_runner_proc", lambda _proc: None)
+    monkeypatch.setattr(host, "_stop_runner_proc", lambda _proc, grace_s=None: None)
     monkeypatch.setattr(host, "_handle_runner_status", _status)
     monkeypatch.setattr(sessions_module, "_get_runner_client", _get_runner)
     monkeypatch.setattr(sessions_module, "_ensure_runner_relay_ready", AsyncMock())
@@ -3568,3 +3568,78 @@ async def test_rider_of_a_refused_relaunch_surfaces_the_refusal(
             f"host refusal: {item!r}"
         )
         assert "omnigent setup" in item["message"], item
+
+
+@pytest.mark.parametrize(
+    "owner_status", ["alive", "timeout", "invalid", "disconnected", "refused"]
+)
+async def test_compact_preserves_codex_binding_while_owner_reconnects(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_status: str,
+) -> None:
+    from omnigent.server.routes import sessions as sessions_module
+    from tests.server.integration.test_sessions_compact import _fake_runner_returning
+
+    comm = await _connect_host(app)
+    session = await _inline_launch_session(client, comm)
+    session_id, runner_id = session["id"], session["runner_id"]
+    store = SqlAlchemyConversationStore(db_uri)
+    store.update_conversation(session_id, harness_override="codex-native")
+    fake_runner, compact_events = _fake_runner_returning(200)
+    reconnected = False
+
+    async def runner_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient | None:
+        return fake_runner if reconnected else None
+
+    async def reconnect(*args: Any, **kwargs: Any) -> httpx.AsyncClient | None:
+        nonlocal reconnected
+        assert store.get_conversation(session_id).runner_id == runner_id
+        if owner_status != "alive":
+            return None
+        assert kwargs["runner_id"] == runner_id
+        reconnected = True
+        return fake_runner
+
+    monkeypatch.setattr(sessions_module, "_get_runner_client", runner_client)
+    monkeypatch.setattr("omnigent.runtime.get_runner_client", lambda: None)
+    monkeypatch.setattr(sessions_module, "_wait_for_runner_client", reconnect)
+    monkeypatch.setattr(sessions_module, "_ensure_runner_relay_ready", AsyncMock())
+    monkeypatch.setattr(sessions_module, "_HOST_RUNNER_STATUS_TIMEOUT_S", 0.2)
+    request = asyncio.create_task(
+        client.post(f"/v1/sessions/{session_id}/events", json={"type": "compact"})
+    )
+    try:
+        message = await comm.receive_output(timeout=5)
+        frame = decode_host_frame(message["text"])
+        assert isinstance(frame, HostRunnerStatusFrame), frame
+        assert frame.runner_id == runner_id
+        assert frame.session_id == session_id
+        if owner_status == "disconnected":
+            await comm.send_input({"type": "websocket.disconnect", "code": 1000})
+        elif owner_status != "timeout":
+            await comm.send_input(
+                {
+                    "type": "websocket.receive",
+                    "text": encode_host_frame(
+                        HostRunnerStatusResultFrame(
+                            request_id=frame.request_id, status=owner_status
+                        )
+                    ),
+                }
+            )
+        response = await request
+        assert response.status_code == (202 if owner_status == "alive" else 503), response.text
+        assert compact_events == ([{"type": "compact"}] if owner_status == "alive" else [])
+        assert store.get_conversation(session_id).runner_id == runner_id
+        if owner_status != "disconnected":
+            assert await comm.receive_nothing(timeout=0.05)
+    finally:
+        request.cancel()
+        await asyncio.gather(request, return_exceptions=True)
+        await fake_runner.aclose()
+        if owner_status != "disconnected":
+            await comm.send_input({"type": "websocket.disconnect", "code": 1000})
+        await comm.wait()

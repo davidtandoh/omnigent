@@ -966,6 +966,21 @@ async def test_native_pbcopy_uses_consent_transport_not_host_clipboard(
     task: asyncio.Task[None] | None = None
     try:
         await instance.launch(cwd=created.cwd)
+        copied = "native copy λ\nsecond line\n"
+        ready = instance.private_dir / "copy-ready"
+        done = instance.private_dir / "copy-done"
+        result_path = instance.private_dir / "copy-result"
+        # Start the native command before a read-only tmux client can reject
+        # the fixture's send-keys. Release it only after that client attaches.
+        sent = await instance.send(
+            text=(
+                f"while [ ! -f {shlex.quote(str(ready))} ]; do sleep 0.02; done; "
+                f"printf %s {shlex.quote(copied)} | pbcopy; "
+                f"printf '%s' \"$?\" > {shlex.quote(str(result_path))}; "
+                f"touch {shlex.quote(str(done))}"
+            )
+        )
+        assert sent == {"status": "sent"}, sent
         task = asyncio.create_task(
             bridge_tmux_control_to_websocket(
                 ws,
@@ -980,16 +995,13 @@ async def test_native_pbcopy_uses_consent_transport_not_host_clipboard(
             await asyncio.sleep(0.02)
         assert ws.sent, "terminal did not attach"
         await asyncio.sleep(0.1)
-        copied = "native copy λ\nsecond line\n"
-        done = instance.private_dir / "copy-done"
-        await instance.send(
-            text=f"printf %s {shlex.quote(copied)} | pbcopy && touch {shlex.quote(str(done))}"
-        )
+        ready.touch()
         for _ in range(100):
             if done.exists():
                 break
             await asyncio.sleep(0.03)
         assert done.exists(), b"".join(ws.sent).decode(errors="replace")
+        assert result_path.read_text() == "0"
         assert not bypass_marker.exists(), "native pbcopy bypassed browser consent"
         if recent_input and not read_only:
             for _ in range(100):

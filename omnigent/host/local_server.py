@@ -17,23 +17,35 @@ importing ``cli.py`` to keep that dependency direction clean.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
 import re
 import subprocess
 import sys
-import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import click
 import psutil  # type: ignore[import-untyped]
+from filelock import FileLock
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from omnigent.config import global_config_path
+from omnigent.host.daemon_lifecycle import DAEMON_CONFIG_SIG_ENV_VAR
 from omnigent.inner import _proc
+from omnigent.native.owner_claim import ProcessIdentity
+from omnigent.native.state_files import (
+    canonical_json,
+    read_regular_file,
+    write_regular_file,
+    write_state_file,
+)
 from omnigent.process_logging import (
+    LOG_TTY_FD_ENV_VAR,
     PROCESS_LOG_FILE_ENV_VAR,
     child_logging_popen_kwargs,
     open_process_log_file,
@@ -118,6 +130,8 @@ _LOCAL_SERVER_SIG_PATH = _local_data_dir() / "local_server.sig"
 # server this invocation didn't spawn. Absent for a foreground
 # ``omnigent server`` (its logs stream to the terminal, not a file).
 _LOCAL_SERVER_LOG_REF_PATH = _local_data_dir() / "local_server.logpath"
+_LOCAL_SERVER_OWNER_PATH = _local_data_dir() / "local_server.owner.json"
+_LOCAL_SERVER_MAINTENANCE_PATH = _local_data_dir() / "local_server.maintenance.json"
 
 # Sidecar carrying the normalized base path (one line, "" for root) the
 # running local server was spawned under. Unlike the other signature inputs,
@@ -171,7 +185,7 @@ def configured_local_server_port() -> int | None:
     return None
 
 
-def server_config_signature(*, include_features: bool = True) -> str:
+def server_config_signature(*, include_features: bool = True, base_path: str | None = None) -> str:
     """
     Compute a signature of the server-affecting config for one invocation.
 
@@ -233,7 +247,8 @@ def server_config_signature(*, include_features: bool = True) -> str:
         # nothing to key version-drift on, so leave it out of the payload.
         version = ""
 
-    base_path = _resolve_effective_base_path()
+    if base_path is None:
+        base_path = _resolve_effective_base_path()
 
     payload = json.dumps(
         {
@@ -351,7 +366,13 @@ def local_server_base_path(server_url: str) -> str:
 
 
 def _write_local_server_record(
-    pid: int, port: int, sig: str, base_path: str, log_path: Path | None = None
+    pid: int,
+    port: int,
+    sig: str,
+    base_path: str,
+    log_path: Path | None = None,
+    *,
+    recipe: ServerRestartRecipe | None = None,
 ) -> None:
     """Write the pidfile + config-signature sidecars for the canonical server.
 
@@ -389,6 +410,254 @@ def _write_local_server_record(
         with contextlib.suppress(OSError):
             _LOCAL_SERVER_LOG_REF_PATH.unlink()
     _atomic_write(_LOCAL_SERVER_PID_PATH, f"{pid}\n{port}\n")
+    record_server_maintenance(pid, port, base_path, recipe=recipe)
+
+
+def record_server_maintenance(
+    pid: int, port: int, base_path: str, *, recipe: ServerRestartRecipe | None
+) -> None:
+    try:
+        identity = ProcessIdentity.capture(pid)
+    except (ValueError, psutil.Error):
+        # Maintenance requires an exact receipt even when legacy startup succeeds.
+        return
+    if recipe is None:
+        with contextlib.suppress(ServerMaintenanceError):
+            previous = _server_maintenance_record(_LOCAL_SERVER_OWNER_PATH)
+            if previous.process == identity:
+                recipe = previous.recipe
+    write_state_file(
+        _LOCAL_SERVER_OWNER_PATH,
+        ServerMaintenanceRecord(
+            schema_version=2,
+            process=identity,
+            port=port,
+            base_path=base_path,
+            recipe=recipe,
+        ).model_dump(mode="json"),
+    )
+
+
+class ServerMaintenanceError(ValueError):
+    """A scoped refusal that never includes subprocess output."""
+
+
+class ServerRestartRecipe(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    data_dir: str
+    working_directory: str
+    database_uri: str
+    artifact_location: str
+    config_path: str | None
+    config_digest: str
+    environment_digest: str
+    local_single_user: Literal["0", "1"]
+    auth_source: Literal["header"]
+
+    @model_validator(mode="after")
+    def require_supported_paths(self) -> ServerRestartRecipe:
+        if (
+            not self.database_uri.startswith("sqlite:////")
+            or "?" in self.database_uri
+            or any(
+                not Path(path).is_absolute()
+                for path in (
+                    self.data_dir,
+                    self.working_directory,
+                    self.artifact_location,
+                    *([self.config_path] if self.config_path is not None else []),
+                )
+            )
+        ):
+            raise ValueError("unsupported_restart")
+        return self
+
+
+def _maintenance_environment_digest() -> str:
+    excluded = {
+        "OMNIGENT_LOCAL_SINGLE_USER",
+        "OMNIGENT_WEB_BASE_PATH",
+        "OMNIGENT_LOCAL_SERVER_PORT",
+        "OMNIGENT_CONFIG",
+        "OMNIGENT_ACCOUNTS_AUTO_OPEN",
+        DAEMON_CONFIG_SIG_ENV_VAR,
+        LOG_TTY_FD_ENV_VAR,
+        PROCESS_LOG_FILE_ENV_VAR,
+    }
+    return hashlib.sha256(
+        canonical_json(
+            {
+                key: value
+                for key, value in os.environ.items()
+                if (key.startswith("OMNIGENT_") or key in {"HOME", "XDG_CONFIG_HOME"})
+                and key not in excluded
+            }
+        ).encode()
+    ).hexdigest()
+
+
+def _maintenance_config_digest(config_path: str | None) -> str:
+    paths = {global_config_path().absolute()}
+    if config_path is not None:
+        paths.add(Path(config_path))
+    digest = hashlib.sha256()
+    for path in sorted(paths):
+        digest.update(str(path).encode())
+        if path.exists() or path.is_symlink():
+            digest.update(read_regular_file(path, limit=4 * 1024 * 1024))
+    return digest.hexdigest()
+
+
+def qualify_server_restart(
+    *,
+    database_uri: str,
+    artifact_location: str,
+    config_path: str | None,
+    unsupported_options: bool = False,
+) -> ServerRestartRecipe | None:
+    from omnigent.server.auth import resolve_auth_source
+
+    if unsupported_options or resolve_auth_source() != "header":
+        return None
+    if config_path is None and os.environ.get("OMNIGENT_CONFIG"):
+        return None
+    single_user = os.environ.get("OMNIGENT_LOCAL_SINGLE_USER", "0")
+    if single_user not in {"0", "1"}:
+        return None
+    path = str(Path(config_path).absolute()) if config_path is not None else None
+    try:
+        return ServerRestartRecipe(
+            data_dir=str(_local_data_dir().absolute()),
+            working_directory=str(Path.cwd()),
+            database_uri=database_uri,
+            artifact_location=artifact_location,
+            config_path=path,
+            config_digest=_maintenance_config_digest(path),
+            environment_digest=_maintenance_environment_digest(),
+            local_single_user=single_user,
+            auth_source="header",
+        )
+    except (OSError, ValueError):
+        return None
+
+
+def _verify_restart_recipe(record: ServerMaintenanceRecord) -> ServerRestartRecipe:
+    recipe = record.recipe
+    if recipe is None:
+        raise ServerMaintenanceError("unsupported_restart")
+    from omnigent.server.auth import resolve_auth_source
+
+    if (
+        resolve_auth_source() != recipe.auth_source
+        or (
+            os.environ.get("OMNIGENT_CONFIG") is not None
+            and os.environ["OMNIGENT_CONFIG"] != recipe.config_path
+        )
+        or str(_local_data_dir().absolute()) != recipe.data_dir
+        or _maintenance_environment_digest() != recipe.environment_digest
+        or _maintenance_config_digest(recipe.config_path) != recipe.config_digest
+        or (
+            os.environ.get("OMNIGENT_LOCAL_SINGLE_USER", recipe.local_single_user)
+            != recipe.local_single_user
+        )
+        or (os.environ.get("OMNIGENT_WEB_BASE_PATH", record.base_path) != record.base_path)
+        or (os.environ.get("OMNIGENT_LOCAL_SERVER_PORT", str(record.port)) != str(record.port))
+    ):
+        raise ServerMaintenanceError("config_mismatch")
+    return recipe
+
+
+class ServerMaintenanceRecord(BaseModel):
+    """Exact process and endpoint needed for a server-only maintenance cycle."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    schema_version: Literal[2]
+    process: ProcessIdentity
+    port: int = Field(gt=0, lt=65536)
+    base_path: str
+    recipe: ServerRestartRecipe | None
+
+
+def _server_maintenance_record(path: Path) -> ServerMaintenanceRecord:
+    try:
+        return ServerMaintenanceRecord.model_validate_json(read_regular_file(path, limit=65536))
+    except (OSError, ValueError) as exc:
+        raise ServerMaintenanceError("record_mismatch") from exc
+
+
+def maintenance_stop_local_server() -> dict[str, object]:
+    """Detach only the verified API process, retaining endpoint/config for restart."""
+    with FileLock(str(_LOCAL_SERVER_MAINTENANCE_PATH) + ".lock", timeout=0):
+        record = _server_maintenance_record(_LOCAL_SERVER_OWNER_PATH)
+        existing = _read_local_server_pid_file()
+        try:
+            identity = record.process
+            process = identity.require_live()
+        except (KeyError, TypeError, ValueError, psutil.Error) as exc:
+            raise ServerMaintenanceError("record_mismatch") from exc
+        port = record.port
+        if existing != (identity.pid, port):
+            raise ServerMaintenanceError("record_mismatch")
+        _verify_restart_recipe(record)
+        if _pid_listening_on_port(port) != identity.pid:
+            raise ServerMaintenanceError("occupied_port")
+        write_state_file(_LOCAL_SERVER_MAINTENANCE_PATH, record.model_dump(mode="json"))
+        process.terminate()
+        try:
+            process.wait(timeout=_STOP_GRACE_S)
+        except psutil.TimeoutExpired as exc:
+            try:
+                stopped = process.status() == psutil.STATUS_ZOMBIE
+            except psutil.NoSuchProcess:
+                stopped = True
+            if not stopped:
+                raise ServerMaintenanceError("process_pending") from exc
+        return {"endpoint": f"http://127.0.0.1:{port}{record.base_path}", "state": "detached"}
+
+
+def maintenance_start_local_server() -> dict[str, object]:
+    """Restore the recorded API endpoint and refuse config or port drift."""
+    with FileLock(str(_LOCAL_SERVER_MAINTENANCE_PATH) + ".lock", timeout=0):
+        record = _server_maintenance_record(_LOCAL_SERVER_MAINTENANCE_PATH)
+        try:
+            record.process.require_live()
+        except psutil.NoSuchProcess:
+            pass
+        except ValueError as exc:
+            if str(exc) != "process_pending":
+                raise ServerMaintenanceError("record_mismatch") from exc
+        except psutil.Error as exc:
+            raise ServerMaintenanceError("unavailable_probe") from exc
+        else:
+            raise ServerMaintenanceError("process_pending")
+        recipe = _verify_restart_recipe(record)
+        try:
+            _assert_server_port_bindable("127.0.0.1", record.port)
+        except click.ClickException as exc:
+            raise ServerMaintenanceError("occupied_port") from exc
+        spawned = _spawn_local_server(record.port, record.base_path, recipe=recipe)
+        try:
+            _wait_for_local_omnigent_server(spawned.base_url, spawned.proc, spawned.log_path)
+            if _pid_listening_on_port(record.port) != spawned.proc.pid:
+                raise ServerMaintenanceError("occupied_port")
+            replacement = _server_maintenance_record(_LOCAL_SERVER_OWNER_PATH)
+            if (
+                replacement.process != ProcessIdentity.capture(spawned.proc.pid)
+                or replacement.recipe != recipe
+            ):
+                raise ServerMaintenanceError("config_mismatch")
+            _write_local_server_record(
+                spawned.proc.pid,
+                record.port,
+                server_config_signature(base_path=record.base_path),
+                record.base_path,
+                log_path=spawned.log_path,
+                recipe=recipe,
+            )
+        except BaseException:
+            _stop_spawned_local_server(spawned.proc)
+            raise
+        return {"endpoint": f"{spawned.base_url}{record.base_path}", "state": "ready"}
 
 
 def _read_local_server_log_path() -> Path | None:
@@ -412,26 +681,7 @@ def _atomic_write(path: Path, text: str) -> None:
     :param path: Destination file, e.g. ``~/.omnigent/local_server.pid``.
     :param text: Full file contents to write.
     """
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
-    try:
-        fh = os.fdopen(fd, "w", encoding="utf-8")
-    except BaseException:
-        # fdopen didn't take ownership of the fd — close it ourselves. (Once
-        # fdopen succeeds, the `with` below owns and closes it; closing here
-        # too would risk a double-close of a reused fd in this multithreaded
-        # process.)
-        os.close(fd)
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_name)
-        raise
-    try:
-        with fh:
-            fh.write(text)
-        os.replace(tmp_name, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_name)
-        raise
+    write_regular_file(path, text)
 
 
 def _read_local_server_sig() -> str | None:
@@ -734,7 +984,9 @@ def _await_doomed_child_exit(proc: subprocess.Popen[bytes]) -> None:
     _terminate_pid(proc.pid)
 
 
-def _spawn_local_server(port: int, base_path: str) -> _SpawnedLocalServer:
+def _spawn_local_server(
+    port: int, base_path: str, *, recipe: ServerRestartRecipe | None = None
+) -> _SpawnedLocalServer:
     """Spawn the detached background server subprocess on *port*.
 
     Deliberately does NOT write the pidfile record: the caller
@@ -770,6 +1022,11 @@ def _spawn_local_server(port: int, base_path: str) -> _SpawnedLocalServer:
 
         db_uri = normalize_database_url(db_uri)
 
+    config_path = global_config_path()
+    if recipe is not None:
+        db_uri = recipe.database_uri
+        artifact_path = Path(recipe.artifact_location)
+        config_path = Path(recipe.config_path) if recipe.config_path is not None else None
     log_path, log_fh = open_process_log_file("server", root=data_dir / "logs")
 
     # Pass the full parent env: this server IS the local runtime —
@@ -802,7 +1059,7 @@ def _spawn_local_server(port: int, base_path: str) -> _SpawnedLocalServer:
     # host tunnel may re-own this machine's host_id across an auth-mode flip
     # (header↔accounts changes the owner). Deployed multi-user servers never
     # set this, preserving the W2-class host-hijack boundary.
-    child_env["OMNIGENT_LOCAL_SINGLE_USER"] = "1"
+    child_env["OMNIGENT_LOCAL_SINGLE_USER"] = recipe.local_single_user if recipe else "1"
     _accounts_mode = resolve_auth_source() == "accounts"
     if _accounts_mode:
         if "OMNIGENT_ACCOUNTS_COOKIE_SECRET" not in os.environ:
@@ -827,6 +1084,7 @@ def _spawn_local_server(port: int, base_path: str) -> _SpawnedLocalServer:
                     "-m",
                     "omnigent.cli",
                     "server",
+                    "--managed-local",
                     "--host",
                     "127.0.0.1",
                     "--port",
@@ -835,9 +1093,14 @@ def _spawn_local_server(port: int, base_path: str) -> _SpawnedLocalServer:
                     db_uri,
                     "--artifact-location",
                     str(artifact_path),
-                    *(["--config", str(p)] if (p := global_config_path()).exists() else []),
+                    *(
+                        ["--config", str(config_path)]
+                        if config_path is not None and config_path.exists()
+                        else []
+                    ),
                 ],
                 env=child_env,
+                cwd=recipe.working_directory if recipe is not None else None,
                 stdout=log_fh,
                 stderr=log_fh,
                 **_proc.spawn_kwargs(),
@@ -997,7 +1260,7 @@ def stop_untracked_local_server(port: int = _DEFAULT_LOCAL_PORT) -> int | None:
     return pid
 
 
-def register_local_server(port: int) -> None:
+def register_local_server(port: int, *, recipe: ServerRestartRecipe | None = None) -> None:
     """Record THIS process as the canonical local server in the pidfile.
 
     Lets a foreground ``omnigent server`` advertise itself in the same
@@ -1013,7 +1276,7 @@ def register_local_server(port: int) -> None:
     :param port: The port this server bound, e.g. ``6767``.
     """
     _write_local_server_record(
-        os.getpid(), port, server_config_signature(), _resolve_effective_base_path()
+        os.getpid(), port, server_config_signature(), _resolve_effective_base_path(), recipe=recipe
     )
 
 
@@ -1100,6 +1363,11 @@ def _wait_for_local_omnigent_server(
     # The child never became healthy: stop it before reporting failure so the
     # raise does not strand a running, untracked server. Popen-reap it too —
     # this process spawned it, so an unreaped kill would leave a zombie.
+    _stop_spawned_local_server(proc)
+    _raise_local_server_failed(base_url, log_path)
+
+
+def _stop_spawned_local_server(proc: subprocess.Popen[bytes]) -> None:
     if proc.poll() is None:
         proc.terminate()
         try:
@@ -1108,7 +1376,6 @@ def _wait_for_local_omnigent_server(
             proc.kill()
             with contextlib.suppress(subprocess.TimeoutExpired):
                 proc.wait(timeout=5.0)
-    _raise_local_server_failed(base_url, log_path)
 
 
 def _raise_local_server_failed(base_url: str, log_path: Path) -> None:

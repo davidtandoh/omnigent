@@ -37,12 +37,15 @@ outside the lock.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
+
+import psutil
 
 from omnigent.inner.datamodel import OSEnvSpec, TerminalEnvSpec
 from omnigent.inner.os_env import OSEnvironment
@@ -154,7 +157,7 @@ class TerminalRegistry:
         self._instance_locks: dict[tuple[str, str, str], threading.Lock] = {}
         # Threading lock — see module docstring for the rationale.
         # Protects both ``_by_conversation`` and ``_instance_locks``.
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self.environment_resolver: Callable[[str, OSEnvSpec], OSEnvironment] | None = None
 
     def conversation_link_for_id(self, conversation_id: str) -> str:
@@ -217,95 +220,149 @@ class TerminalRegistry:
             fails. Inner code surfaces a clear error; the caller
             tool wraps in a JSON error envelope.
         """
-        key = (terminal_name, session_key)
+        lock_key = (conversation_id, terminal_name, session_key)
         with self._lock:
-            existing = self._by_conversation.get(conversation_id, {}).get(key)
-        if existing is not None and existing.running:
-            if await existing.is_alive():
-                return existing
-            await self.close(conversation_id, terminal_name, session_key)
-        elif existing is not None:
-            await self.close(conversation_id, terminal_name, session_key)
+            instance_lock = self._instance_locks.setdefault(lock_key, threading.Lock())
+            if not instance_lock.acquire(blocking=False):
+                raise RuntimeError("Session custody refused: owner_busy")
+        try:
+            key = (terminal_name, session_key)
+            from omnigent.runner.custody import CustodyError, current_custody
 
-        # Lock-free section: ``create_terminal_instance`` and
-        # ``launch`` may take real time (tmux spawn). Holding the
-        # registry lock across them would serialize all conversations'
-        # terminal spawns globally. Instead we re-check after the
-        # spawn completes.
-        parent_environment = None
-        environment_spec = spec.os_env if isinstance(spec.os_env, OSEnvSpec) else parent_os_env
-        if (
-            environment_spec is not None
-            and environment_spec.sandbox is not None
-            and any(p.copy_on_write for p in environment_spec.sandbox.write_path_specs)
-        ):
-            if self.environment_resolver is None:
-                raise RuntimeError("copy_on_write terminals require a session resource registry")
-            parent_environment = self.environment_resolver(
-                conversation_id, parent_os_env or environment_spec
+            custody = current_custody()
+            if custody is not None and custody.record.session_id != conversation_id:
+                custody = None
+            with self._lock:
+                existing = self._by_conversation.get(conversation_id, {}).get(key)
+            if existing is not None and existing.running:
+                self._verify_custody(conversation_id, existing)
+                if await existing.is_alive():
+                    if custody is not None:
+                        from omnigent.runner.custody import _require_terminal_live
+
+                        try:
+                            _require_terminal_live(
+                                custody.require_terminal_published(
+                                    terminal_name, session_key, existing.socket_path
+                                )
+                            )
+                        except CustodyError as exc:
+                            raise RuntimeError(f"Session custody refused: {exc}") from exc
+                    return existing
+            if existing is not None:
+                await self.close(conversation_id, terminal_name, session_key, _preserve_lock=True)
+
+            if custody is not None:
+                try:
+                    custody.require_terminal_available(terminal_name, session_key)
+                except CustodyError as exc:
+                    raise RuntimeError(f"Session custody refused: {exc}") from exc
+
+            parent_environment = None
+            environment_spec = spec.os_env if isinstance(spec.os_env, OSEnvSpec) else parent_os_env
+            if (
+                environment_spec is not None
+                and environment_spec.sandbox is not None
+                and any(p.copy_on_write for p in environment_spec.sandbox.write_path_specs)
+            ):
+                if self.environment_resolver is None:
+                    raise RuntimeError(
+                        "copy_on_write terminals require a session resource registry"
+                    )
+                parent_environment = self.environment_resolver(
+                    conversation_id, parent_os_env or environment_spec
+                )
+            shared_environment_args = (
+                {"parent_environment": parent_environment} if parent_environment else {}
             )
-        shared_environment_args = (
-            {"parent_environment": parent_environment} if parent_environment else {}
-        )
-        created = create_terminal_instance(
-            terminal_name,
-            session_key,
-            spec,
-            parent_os_env_spec=parent_os_env,
-            **shared_environment_args,
-            cwd_override=cwd_override,
-            sandbox_override=sandbox_override,
-            conversation_link=self.conversation_link_for_id(conversation_id),
-        )
-        created.instance.lifecycle_trace.transfer_session(conversation_id)
-        await created.instance.launch(cwd=created.cwd)
-        if not await created.instance.is_alive():
-            created.instance.lifecycle_trace.note_exit()
+            created = create_terminal_instance(
+                terminal_name,
+                session_key,
+                spec,
+                parent_os_env_spec=parent_os_env,
+                **shared_environment_args,
+                cwd_override=cwd_override,
+                sandbox_override=sandbox_override,
+                conversation_link=self.conversation_link_for_id(conversation_id),
+            )
+            instance = created.instance
+            instance.operation_lock = instance_lock
+            pending = None
+            if custody is not None:
+                try:
+                    pending = custody.reserve_terminal(
+                        terminal_name, session_key, instance.socket_path
+                    )
+                except (CustodyError, OSError) as exc:
+                    category = str(exc) if isinstance(exc, CustodyError) else "unavailable_probe"
+                    raise RuntimeError(f"Session custody refused: {category}") from exc
             try:
-                await asyncio.wait_for(created.instance.close(), timeout=_CLOSE_TIMEOUT_S)
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Newly launched terminal close timed out for %s:%s in conv %s",
-                    terminal_name,
-                    session_key,
-                    conversation_id,
-                )
-            raise TerminalExitedDuringLaunch(created.instance)
+                instance.lifecycle_trace.transfer_session(conversation_id)
+                await instance.launch(cwd=created.cwd)
+                if not await instance.is_alive():
+                    instance.lifecycle_trace.note_exit()
+                    raise TerminalExitedDuringLaunch(instance)
+                if custody is not None:
 
-        with self._lock:
-            slot = self._by_conversation.setdefault(conversation_id, {})
-            # Re-check: another concurrent launch for the same key may
-            # have raced ours. Take the second-arrival policy: close
-            # ours and return the racer's. Avoids two live tmux
-            # sessions for the same key.
-            racer = slot.get(key)
-            if racer is not None and racer.running:
-                # Close ours outside the lock; racer wins.
-                instance_to_close: TerminalInstance | None = created.instance
-                winning_instance = racer
-            else:
-                slot[key] = created.instance
-                instance_to_close = None
-                winning_instance = created.instance
-                # Allocate a per-instance lock alongside the
-                # registration. Tools fetch it via
-                # :meth:`get_instance_lock` to serialize concurrent
-                # tmux ops on this instance.
-                self._instance_locks[(conversation_id, terminal_name, session_key)] = (
-                    threading.Lock()
-                )
+                    def _publish_custody() -> None:
+                        pane_pid = instance.pane_pid_sync()
+                        if pane_pid is None:
+                            raise CustodyError("unavailable_probe")
+                        tmux_pid = psutil.Process(pane_pid).ppid()
+                        custody.publish_terminal(
+                            terminal_name,
+                            session_key,
+                            instance.socket_path,
+                            tmux_pid,
+                            pane_pid,
+                            pending=pending,
+                        )
+                        custody.require_terminal_published(
+                            terminal_name, session_key, instance.socket_path
+                        )
 
-        if instance_to_close is not None:
-            try:
-                await asyncio.wait_for(instance_to_close.close(), timeout=_CLOSE_TIMEOUT_S)
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Race-loser terminal close timed out for %s:%s in conv %s",
-                    terminal_name,
-                    session_key,
-                    conversation_id,
+                    await asyncio.to_thread(_publish_custody)
+            except (
+                RuntimeError,
+                OSError,
+                ValueError,
+                psutil.Error,
+                asyncio.CancelledError,
+            ) as exc:
+                with contextlib.suppress(RuntimeError, OSError, ValueError, psutil.Error):
+                    await asyncio.wait_for(
+                        self._close_instance(instance, conversation_id), timeout=_CLOSE_TIMEOUT_S
+                    )
+                if custody is None or isinstance(exc, asyncio.CancelledError):
+                    raise
+                category = str(exc) if isinstance(exc, CustodyError) else "unavailable_probe"
+                raise RuntimeError(f"Session custody refused: {category}") from exc
+            with self._lock:
+                slot = self._by_conversation.setdefault(conversation_id, {})
+                slot[key] = instance
+            return instance
+        finally:
+            with self._lock:
+                instance_lock.release()
+                if self._instance_locks.get(
+                    lock_key
+                ) is instance_lock and key not in self._by_conversation.get(conversation_id, {}):
+                    self._instance_locks.pop(lock_key)
+
+    def _verify_custody(self, conversation_id: str, instance: TerminalInstance) -> None:
+        from omnigent.runner.custody import CustodyError, current_custody
+
+        custody = current_custody()
+        if custody is None:
+            return
+        try:
+            if custody.record.session_id == conversation_id:
+                custody.require_terminal_published(
+                    instance.name, instance.session_key, instance.socket_path
                 )
-        return winning_instance
+        except (CustodyError, OSError) as exc:
+            category = str(exc) if isinstance(exc, CustodyError) else "unavailable_probe"
+            raise RuntimeError(f"Session custody refused: {category}") from exc
 
     def get_instance_lock(
         self,
@@ -353,7 +410,12 @@ class TerminalRegistry:
         :returns: The :class:`TerminalInstance` or ``None``.
         """
         with self._lock:
-            return self._by_conversation.get(conversation_id, {}).get((terminal_name, session_key))
+            instance = self._by_conversation.get(conversation_id, {}).get(
+                (terminal_name, session_key)
+            )
+            if instance is not None:
+                self._verify_custody(conversation_id, instance)
+            return instance
 
     def list_for_conversation(
         self,
@@ -373,6 +435,8 @@ class TerminalRegistry:
         """
         with self._lock:
             slot = dict(self._by_conversation.get(conversation_id, {}))
+        for instance in slot.values():
+            self._verify_custody(conversation_id, instance)
         return [
             TerminalListEntry(
                 terminal_name=name,
@@ -403,6 +467,7 @@ class TerminalRegistry:
             for conv_id, slot in self._by_conversation.items():
                 for (name, key), instance in slot.items():
                     if key == "main" and name in NATIVE_PANE_TERMINAL_NAMES:
+                        self._verify_custody(conv_id, instance)
                         out.append((conv_id, name, instance.socket_path))
         return out
 
@@ -430,32 +495,83 @@ class TerminalRegistry:
         :raises RuntimeError: If the target conversation already has an
             entry with the same terminal name and session key.
         """
-        key = (terminal_name, session_key)
-        source_lock_key = (source_conversation_id, terminal_name, session_key)
-        target_lock_key = (target_conversation_id, terminal_name, session_key)
         with self._lock:
-            source_slot = self._by_conversation.get(source_conversation_id)
-            if source_slot is None:
-                return False
-            instance = source_slot.get(key)
-            if instance is None:
-                return False
-            target_slot = self._by_conversation.setdefault(target_conversation_id, {})
-            if key in target_slot:
-                raise RuntimeError(
-                    f"Terminal {terminal_name!r}:{session_key!r} already exists for "
-                    f"conversation {target_conversation_id!r}"
+            return self._transfer_locked(
+                source_conversation_id, target_conversation_id, terminal_name, session_key
+            )
+
+    def _transfer_locked(
+        self,
+        source_conversation_id: str,
+        target_conversation_id: str,
+        terminal_name: str,
+        session_key: str,
+    ) -> bool:
+        key = (terminal_name, session_key)
+        source_slot = self._by_conversation.get(source_conversation_id)
+        if source_slot is None:
+            return False
+        instance = source_slot.get(key)
+        if instance is None:
+            return False
+        target_slot = self._by_conversation.get(target_conversation_id, {})
+
+        from omnigent.runner.custody import CustodyError, current_custody
+
+        custody = current_custody()
+        if key in target_slot:
+            raise RuntimeError(
+                f"Terminal {terminal_name!r}:{session_key!r} already exists for "
+                f"conversation {target_conversation_id!r}"
+            )
+        # A custody-owned terminal stays within its owner's session scope.
+        if custody is not None and custody.record.session_id in {
+            source_conversation_id,
+            target_conversation_id,
+        }:
+            try:
+                custody.require_terminal_published(
+                    terminal_name, session_key, instance.socket_path
                 )
-
-            source_slot.pop(key)
-            if not source_slot:
-                self._by_conversation.pop(source_conversation_id, None)
-            target_slot[key] = instance
-            instance.lifecycle_trace.transfer_session(target_conversation_id)
-
-            lock = self._instance_locks.pop(source_lock_key, None)
-            self._instance_locks[target_lock_key] = lock or threading.Lock()
+                if target_conversation_id != custody.record.session_id:
+                    raise CustodyError("scope_mismatch")
+            except CustodyError as exc:
+                raise RuntimeError(f"Session custody refused: {exc}") from exc
+        target_slot = self._by_conversation.setdefault(target_conversation_id, {})
+        source_slot.pop(key)
+        target_slot[key] = instance
+        instance.lifecycle_trace.transfer_session(target_conversation_id)
+        lock = self._instance_locks.pop((source_conversation_id, terminal_name, session_key), None)
+        self._instance_locks[(target_conversation_id, terminal_name, session_key)] = (
+            lock or threading.Lock()
+        )
+        if not source_slot:
+            self._by_conversation.pop(source_conversation_id, None)
         return True
+
+    async def _close_instance(self, instance: TerminalInstance, conversation_id: str) -> None:
+        from omnigent.runner.custody import current_custody
+
+        custody = current_custody()
+        receipt = (
+            next(
+                (r for r in custody.record.terminals if r.socket == str(instance.socket_path)),
+                None,
+            )
+            if custody is not None
+            else None
+        )
+        if (
+            custody is not None
+            and custody.record.session_id == conversation_id
+            and receipt is None
+        ):
+            receipt = custody.reserve_terminal(
+                instance.name, instance.session_key, instance.socket_path
+            )
+        await instance.close()
+        if custody is not None and receipt is not None:
+            custody.retire_terminal(receipt)
 
     async def close(
         self,
@@ -464,6 +580,7 @@ class TerminalRegistry:
         session_key: str,
         *,
         expected: TerminalInstance | None = None,
+        _preserve_lock: bool = False,
     ) -> bool:
         """Close one terminal and remove it from the registry.
 
@@ -502,11 +619,14 @@ class TerminalRegistry:
             # ``get_instance_lock`` calls return ``None`` for this
             # closed instance (callers surface a "not running"
             # error to the LLM).
-            self._instance_locks.pop((conversation_id, terminal_name, session_key), None)
+            if not _preserve_lock:
+                self._instance_locks.pop((conversation_id, terminal_name, session_key), None)
         if instance is None:
             return False
         try:
-            await asyncio.wait_for(instance.close(), timeout=_CLOSE_TIMEOUT_S)
+            await asyncio.wait_for(
+                self._close_instance(instance, conversation_id), timeout=_CLOSE_TIMEOUT_S
+            )
         except asyncio.TimeoutError:
             logger.warning(
                 "Terminal close timed out for %s:%s in conv %s",
@@ -548,7 +668,9 @@ class TerminalRegistry:
             return
         for (name, key), instance in slot.items():
             try:
-                await asyncio.wait_for(instance.close(), timeout=_CLOSE_TIMEOUT_S)
+                await asyncio.wait_for(
+                    self._close_instance(instance, conversation_id), timeout=_CLOSE_TIMEOUT_S
+                )
             except asyncio.TimeoutError:
                 logger.warning(
                     "cleanup_conversation: close timed out for %s:%s in conv %s",
@@ -583,7 +705,9 @@ class TerminalRegistry:
         for conversation_id, slot in slots:
             for (name, key), instance in slot.items():
                 try:
-                    await asyncio.wait_for(instance.close(), timeout=_CLOSE_TIMEOUT_S)
+                    await asyncio.wait_for(
+                        self._close_instance(instance, conversation_id), timeout=_CLOSE_TIMEOUT_S
+                    )
                 except asyncio.TimeoutError:
                     logger.warning(
                         "shutdown: close timed out for %s:%s in conv %s",

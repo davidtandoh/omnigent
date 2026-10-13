@@ -19,8 +19,11 @@ scope, from the leaf :mod:`omnigent.cli_common`.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import sys
 from collections.abc import Callable
+from pathlib import Path
 from typing import ParamSpec, TypeVar
 
 import click
@@ -396,6 +399,17 @@ def register_native_commands(cli: click.Group) -> None:
             "you type in the TUI is what gets routed, so this takes no -p."
         ),
     )
+    @click.option(
+        "--binding-json",
+        is_flag=True,
+        help="Emit the durable launch binding without attaching a TTY.",
+    )
+    @click.option(
+        "--reattach-binding",
+        type=click.Path(path_type=Path),
+        default=None,
+        help="Attach only the exact live owner in this binding file; never launch.",
+    )
     @click.argument("codex_args", nargs=-1, type=click.UNPROCESSED)
     @observe_native_startup("codex-native")
     @_native_env_option
@@ -408,6 +422,8 @@ def register_native_commands(cli: click.Group) -> None:
         smart_routing: bool,
         launch_env_entries: tuple[str, ...],
         codex_args: tuple[str, ...],
+        binding_json: bool = False,
+        reattach_binding: Path | None = None,
     ) -> None:
         # Param docs live in comments — Click uses the docstring for --help.
         # :param server: Remote Omnigent server URL, or None for local.
@@ -428,6 +444,50 @@ def register_native_commands(cli: click.Group) -> None:
           omnigent codex --server https://<app>.databricksapps.com
           omnigent codex --smart-routing           # first message picks the model
         """
+        from omnigent.native.state_files import canonical_json
+        from omnigent.runner.custody import SUPPORTED_HARNESSES, CustodyError
+
+        if reattach_binding is not None:
+            if any(
+                (
+                    server is not None,
+                    resume is not None,
+                    session_id is not None,
+                    model is not None,
+                    prompt is not None,
+                    smart_routing,
+                    launch_env_entries,
+                    codex_args,
+                )
+            ):
+                raise click.UsageError(
+                    "Reattachment accepts only --reattach-binding and --binding-json."
+                )
+            from omnigent.harnesses.codex_native.main import reattach_codex_binding
+
+            try:
+                reattach_codex_binding(reattach_binding, json_output=binding_json)
+            except (CustodyError, OSError, ValueError) as exc:
+                category = str(exc) if isinstance(exc, CustodyError) else "unavailable_probe"
+                click.echo(
+                    canonical_json({"schema_version": 1, "error": {"category": category}}),
+                    nl=False,
+                )
+                raise click.exceptions.Exit(1) from exc
+            return
+        if binding_json and (
+            "codex-native" not in SUPPORTED_HARNESSES
+            or resume is not None
+            or session_id is not None
+            or smart_routing
+        ):
+            click.echo(
+                canonical_json(
+                    {"schema_version": 1, "error": {"category": "unsupported_custody"}}
+                ),
+                nl=False,
+            )
+            raise click.exceptions.Exit(1)
         _reject_native_on_windows("codex")
         launch_env = _parse_native_env_option(launch_env_entries)
         if smart_routing:
@@ -450,46 +510,63 @@ def register_native_commands(cli: click.Group) -> None:
         from omnigent.harness_startup_config import resolve_harness_command
         from omnigent.harnesses.codex_native.main import run_codex_native
 
-        cfg = _load_effective_config()
-        if server is None:
-            server = cfg.get("server")
-        if model is None:
-            model = cfg.get("model")
-        auto_open_conversation = _resolve_auto_open_conversation_from_config(cfg)
+        try:
+            with (
+                contextlib.redirect_stdout(sys.stderr)
+                if binding_json
+                else contextlib.nullcontext()
+            ):
+                cfg = _load_effective_config()
+                if server is None:
+                    server = cfg.get("server")
+                if model is None:
+                    model = cfg.get("model")
+                auto_open_conversation = _resolve_auto_open_conversation_from_config(cfg)
 
-        # Ensure the host daemon (local when ``--server`` is omitted/empty,
-        # remote otherwise) and resolve the concrete Omnigent server URL. Codex follows
-        # the same ownership model as attach/run/claude: the daemon-spawned runner
-        # owns the app-server and TUI; the CLI attaches to the tmux terminal.
-        server = _ensure_backend(server)
+                # Ensure the host daemon (local when ``--server`` is omitted/empty,
+                # remote otherwise) and resolve the concrete Omnigent server URL. Codex follows
+                # the same ownership model as attach/run/claude: the daemon-spawned runner
+                # owns the app-server and TUI; the CLI attaches to the tmux terminal.
+                server = _ensure_backend(server)
 
-        resolved_session_id = (
-            choice.conversation_id if choice.conversation_id is not None else session_id
-        )
+                resolved_session_id = (
+                    choice.conversation_id if choice.conversation_id is not None else session_id
+                )
 
-        resolved_command = resolve_harness_command(
-            "codex-native",
-            default="codex",
-            explicit=None,
-            cfg=cfg,
-        )
-        if smart_routing:
-            # Attach to the armed session — arming created it. Nothing is picked
-            # yet, so ``model`` keeps whatever the user or config asked for
-            # until the first typed message routes.
-            armed = _smart_routing_decision(server=server, harness="codex-native")
-            resolved_session_id = armed.session_id or resolved_session_id
-        run_codex_native(
-            server=server,
-            session_id=resolved_session_id,
-            resume_picker=choice.picker,
-            extra_args=codex_args,  # raw; runner is the sole arg-merge point (see claude)
-            model=model,
-            prompt=prompt,
-            auto_open_conversation=auto_open_conversation,
-            command=resolved_command,
-            launch_env=launch_env,
-        )
+                resolved_command = resolve_harness_command(
+                    "codex-native",
+                    default="codex",
+                    explicit=None,
+                    cfg=cfg,
+                )
+                if smart_routing:
+                    # Attach to the armed session — arming created it. Nothing is picked
+                    # yet, so ``model`` keeps whatever the user or config asked for
+                    # until the first typed message routes.
+                    armed = _smart_routing_decision(server=server, harness="codex-native")
+                    resolved_session_id = armed.session_id or resolved_session_id
+                result = run_codex_native(
+                    server=server,
+                    session_id=resolved_session_id,
+                    resume_picker=choice.picker,
+                    extra_args=codex_args,  # raw; runner is the sole arg-merge point (see claude)
+                    model=model,
+                    prompt=prompt,
+                    auto_open_conversation=auto_open_conversation,
+                    command=resolved_command,
+                    launch_env=launch_env,
+                    binding_json=binding_json,
+                )
+        except (CustodyError, OSError, ValueError, click.ClickException) as exc:
+            if not binding_json:
+                raise
+            category = str(exc) if isinstance(exc, CustodyError) else "launch_unavailable"
+            click.echo(
+                canonical_json({"schema_version": 1, "error": {"category": category}}), nl=False
+            )
+            raise click.exceptions.Exit(1) from exc
+        if binding_json:
+            click.echo(canonical_json(result), nl=False)
 
     @cli.command(
         context_settings={

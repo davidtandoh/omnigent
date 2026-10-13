@@ -602,9 +602,12 @@ class SysTerminalLaunchTool(Tool):
         # Snapshot whether the registry already has a live instance
         # so we can report ``status: "already_running"`` accurately
         # without racing against the launch.
-        existing = self._registry.get(
-            ctx.conversation_id, validated.terminal_name, validated.session_key
-        )
+        try:
+            existing = self._registry.get(
+                ctx.conversation_id, validated.terminal_name, validated.session_key
+            )
+        except RuntimeError as exc:
+            return json.dumps({"error": f"launch failed: {exc}"})
         was_running = existing is not None and existing.running
 
         return self._spawn_and_format(

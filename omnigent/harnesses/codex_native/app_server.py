@@ -114,6 +114,9 @@ _CONNECT_TIMEOUT_SECONDS = 10.0
 # 10 s to start codex. Match the 60 s native-terminal readiness budget; a child
 # that exits early still fails at once.
 _APP_SERVER_READY_TIMEOUT_SECONDS = 60.0
+# close() bounds: SIGTERM wait before kill, then the stderr drain after exit.
+APP_SERVER_STOP_TIMEOUT_S = 5.0
+APP_SERVER_STDERR_DRAIN_S = 1.0
 # Initialization and model/list can stall after the listener becomes ready.
 _MODEL_CATALOG_PROBE_TIMEOUT_SECONDS = 30.0
 _MODEL_DISCOVERY_CACHE_SECONDS = 300.0
@@ -2215,13 +2218,20 @@ class CodexNativeAppServer:
 
         :returns: None.
         """
+        from omnigent.runner.custody import current_custody
+
+        custody = current_custody()
+        receipt = custody.record.helpers.get("codex_app_server") if custody is not None else None
+        owned = receipt is not None and self.proc is not None and receipt.pid == self.proc.pid
         if self.proc is not None and self.proc.returncode is None:
             _terminate_process_tree(self.proc)
             try:
-                await asyncio.wait_for(self.proc.wait(), timeout=5.0)
+                await asyncio.wait_for(self.proc.wait(), timeout=APP_SERVER_STOP_TIMEOUT_S)
             except asyncio.TimeoutError:
                 _kill_process_tree(self.proc)
                 await self.proc.wait()
+        if owned and custody is not None and receipt is not None:
+            custody.retire_helper("codex_app_server", receipt)
         if self.process_registry_tag is not None:
             unregister_codex_native_process(self.process_registry_tag)
         if self.process_owner_lock is not None:
@@ -2230,7 +2240,7 @@ class CodexNativeAppServer:
             if self.stderr_task is not None and self._stderr_diagnostics is not None:
                 # The process has exited; allow buffered output to reach EOF.
                 # A descendant can still hold the pipe open, so bound the wait.
-                await asyncio.wait({self.stderr_task}, timeout=1.0)
+                await asyncio.wait({self.stderr_task}, timeout=APP_SERVER_STDERR_DRAIN_S)
         finally:
             try:
                 if self.stderr_task is not None:
