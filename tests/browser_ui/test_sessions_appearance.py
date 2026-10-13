@@ -595,7 +595,8 @@ def test_mac_shell_clearance_renders_with_zoom(
         sample.style.cssText = 'position:fixed;inset:0;z-index:9999';
         sample.innerHTML = `
             <div class="electron-drag-strip"></div>
-            <div class="conversations-sidebar" style="position:absolute;width:300px;height:120px;z-index:50">
+            <div class="conversations-sidebar"
+                style="position:absolute;width:300px;height:120px;z-index:50">
                 <div class="sidebar-header-row"></div>
                 <div class="sidebar-brand">Brand</div>
                 <div data-testid="sidebar-header-actions">Sidebar actions</div>
@@ -631,8 +632,12 @@ def test_mac_shell_clearance_renders_with_zoom(
             closedPadding: parseFloat(style('.workspace-tab-strip').paddingLeft),
             sidebarMargin: style('.conversations-sidebar').marginTop,
             brandDisplay: style('.sidebar-brand').display,
-            sidebarActions: style('.conversations-sidebar [data-testid="sidebar-header-actions"]').display,
-            stripActions: style('.electron-sidebar-header-actions [data-testid="sidebar-header-actions"]').display,
+            sidebarActions: style(
+                '.conversations-sidebar [data-testid="sidebar-header-actions"]'
+            ).display,
+            stripActions: style(
+                '.electron-sidebar-header-actions [data-testid="sidebar-header-actions"]'
+            ).display,
             stripPosition: style('.electron-sidebar-header-actions').position,
             toggleDisplay: style('.chat-header-sidebar-toggle').display,
             order: controlOrder(),
@@ -643,9 +648,12 @@ def test_mac_shell_clearance_renders_with_zoom(
         sample.setAttribute('data-sidebar-open', 'true');
         result.openPadding = parseFloat(style('.workspace-tab-strip').paddingLeft);
         root.removeAttribute('data-electron-mac');
-        result.browserRegion = style('.electron-drag-strip').getPropertyValue('-webkit-app-region');
+        result.browserRegion = style('.electron-drag-strip')
+            .getPropertyValue('-webkit-app-region');
         result.browserBrand = style('.sidebar-brand').display;
-        result.browserSidebarActions = style('.conversations-sidebar [data-testid="sidebar-header-actions"]').display;
+        result.browserSidebarActions = style(
+            '.conversations-sidebar [data-testid="sidebar-header-actions"]'
+        ).display;
         result.browserToggle = style('.chat-header-sidebar-toggle').display;
         result.browserStripPosition = style('.electron-sidebar-header-actions').position;
         result.browserPeekRow = style('.is-peek .sidebar-header-row').display;
