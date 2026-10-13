@@ -290,13 +290,23 @@ Scans user messages and LLM prompts for PII patterns (SSN, credit card, email, p
 
 #### `cost_budget`
 
-Gates a session on cumulative LLM spend, at the **request** phase (before the LLM turn, so text-only turns are budgeted too) and the **tool-call** phase. ASKs the first time spend crosses each soft warning threshold. At the hard limit it acts as a **downgrade gate**, not a hard stop: it DENYs (the whole turn on `request`, or each tool call on `tool_call`) only while the session is on an expensive model -- telling the user to switch to a cheaper one with `/model` -- and allows them again once the session has switched.
+Gates a session on cumulative LLM spend at the **request** phase (before the
+LLM turn) and the **tool-call** phase. Soft thresholds ASK for approval when
+spend crosses a checkpoint that has not been approved. By default, reaching
+the hard limit blocks all models. With a non-empty `expensive_models` list,
+the limit blocks only matching models; switching to a cheaper model allows
+work to continue.
+
+The request gate blocks the whole turn; the tool-call gate blocks that tool
+call. Neither interrupts an in-progress model turn, so spend can exceed the
+limit before the next check. If tokens have been consumed but pricing is
+unavailable, the policy asks for approval to continue without cost tracking.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `max_cost_usd` | number | (required) | Hard spend limit in USD. Once reached, the turn / tool calls are blocked while the session is on an expensive model. |
-| `ask_thresholds_usd` | number[] | `null` | Soft warning checkpoints that ASK the first time spend crosses each (each must be < `max_cost_usd`) |
-| `expensive_models` | string[] | Fable + Opus + GPT-5 (excl. `-mini`/`-nano`) | Case-insensitive substring tokens for the model tiers blocked once over budget (e.g. `"opus"` matches any Opus deployment). The default's broad `gpt-5` token matches the whole GPT-5 family except the cheap `-mini`/`-nano` variants; an explicit list is matched literally with no exclusions. `[]` disables the hard limit, leaving only the soft thresholds. |
+| `max_cost_usd` | number | `null` | Positive hard spend limit in USD. Supply this, `ask_thresholds_usd`, or both. Omit it for soft checkpoints only. |
+| `ask_thresholds_usd` | number[] | `null` | Soft warning checkpoints that ASK when crossed. When a hard limit is set, each checkpoint must be below it. |
+| `expensive_models` | string[] | `null` | Omit or pass `[]` to block all models at the hard limit. A non-empty list restricts the gate to case-insensitive substring matches, with no exclusions. |
 
 ```yaml
 budget:
@@ -310,13 +320,10 @@ budget:
 
 #### `user_daily_cost_budget`
 
-Same ASK / downgrade-gate behavior as `cost_budget`, but the budget is the **session owner's cumulative spend across all their sessions for the current UTC day**. The soft-threshold approval is remembered per user+day, so an approved checkpoint won't re-prompt that user again today -- even from a different session. Useful as a server-wide per-user daily cap.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `max_cost_usd` | number | (required) | Hard daily limit in USD. Once the owner's spend for the day reaches it, the turn / tool calls are blocked while on an expensive model. |
-| `ask_thresholds_usd` | number[] | `null` | Soft daily warning checkpoints that ASK the first time the owner's daily spend crosses each (each must be < `max_cost_usd`) |
-| `expensive_models` | string[] | Fable + Opus + GPT-5 (excl. `-mini`/`-nano`) | Case-insensitive substring tokens for the model tiers blocked once over the daily budget. An explicit list is matched literally with no exclusions. `[]` disables the hard limit, leaving only the soft thresholds. |
+Uses the gates and model selection described in [`cost_budget`](#cost_budget)
+for the session owner's spend across all sessions today. Unlike `cost_budget`,
+`max_cost_usd` is required. See [cost budget windows](cost-budget-windows.md)
+for UTC boundaries, approval sharing, and snapshot refresh behavior.
 
 ```yaml
 # server_config.yaml -- a per-user daily cap applied to every session
@@ -326,6 +333,24 @@ daily_budget:
   factory_params:
     max_cost_usd: 25.00
     ask_thresholds_usd: [10.00, 20.00]
+```
+
+#### `user_period_cost_budget`
+
+Uses the same parameters and gates as `user_daily_cost_budget`, with an
+additional required `period`: `day`, `week`, `month`, `quarter`, or `year`.
+Several periods can be configured together. See
+[cost budget windows](cost-budget-windows.md) for date selection and approval
+isolation between periods.
+
+```yaml
+monthly_budget:
+  type: function
+  handler: omnigent.policies.builtins.cost.user_period_cost_budget
+  factory_params:
+    period: month
+    max_cost_usd: 200.00
+    ask_thresholds_usd: [100.00, 150.00]
 ```
 
 ### GitHub
@@ -468,6 +493,42 @@ def my_policy(event: PolicyEvent) -> PolicyResponse | None:
         return {"result": "DENY", "reason": "This tool is blocked."}
     return {"result": "ALLOW"}
 ```
+
+### Response segments and `turn_final`
+
+`response` policies receive assistant text in `event["data"]`. In runner-relayed
+sessions, they run before each nonempty text segment is persisted, including
+progress text before tool calls. Use `event["context"]["turn_final"]` to decide
+whether to perform completion-specific work:
+
+| Value | Meaning |
+|-------|---------|
+| `True` | The final text segment of a successfully completed relayed turn. |
+| `False` | An intermediate segment, or text from a failed, cancelled, or incomplete relayed turn. |
+| `None` | The calling path does not distinguish segments. Also used outside the `response` phase. |
+
+Within a response policy, skip only an explicit `False` to preserve existing
+behavior on callers that supply `None`. `None` does not assert successful
+completion. For example:
+
+```python
+from omnigent.policies.schema import PolicyEvent, PolicyResponse
+
+def count_responses(event: PolicyEvent) -> PolicyResponse | None:
+    if event["type"] != "response":
+        return None
+    if event.get("context", {}).get("turn_final") is False:
+        return None
+    return {
+        "result": "ALLOW",
+        "state_updates": [{"key": "responses", "action": "increment", "value": 1}],
+    }
+```
+
+Content checks should inspect every segment, including those marked `False`.
+The relay skips empty and whitespace-only segments: a turn that ends with a tool
+call and no trailing text has no final response-policy invocation. `turn_final`
+describes the current evaluation; it does not guarantee one callback per turn.
 
 ### Factory form
 

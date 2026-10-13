@@ -22,6 +22,7 @@ from typing import Any
 
 import pytest
 
+from omnigent.db.utils import now_epoch, utc_day
 from omnigent.policies.builtins.cost import user_daily_cost_budget
 from omnigent.policies.schema import USER_DAILY_ASK_APPROVED_STATE_KEY, PolicyEvent
 
@@ -55,13 +56,20 @@ def _tool(
     daily: dict[str, Any] = (
         {} if cost is None else {"cost_usd": cost, "ask_approved_usd": ask_approved}
     )
+    if daily:
+        daily["day_utc"] = utc_day(now_epoch())
     if owner is not None:
         daily["user_id"] = owner
     return {
         "type": "tool_call",
         "target": "sys_os_shell",
         "data": {"name": "sys_os_shell", "arguments": {}},
-        "context": {"actor": {}, "user_daily_cost": daily, "model": model, "harness": harness},
+        "context": {
+            "actor": {},
+            "user_daily_cost": [daily] if daily else [],
+            "model": model,
+            "harness": harness,
+        },
         "session_state": {},
     }
 
@@ -101,7 +109,9 @@ def test_request_phase_over_budget_on_expensive_model_denies() -> None:
         "data": "please run the build",
         "context": {
             "actor": {},
-            "user_daily_cost": {"cost_usd": 6.0, "ask_approved_usd": 0.0},
+            "user_daily_cost": [
+                {"cost_usd": 6.0, "ask_approved_usd": 0.0, "day_utc": utc_day(now_epoch())}
+            ],
             "model": "databricks-claude-opus-4-8",
         },
         "session_state": {},
@@ -129,7 +139,9 @@ def test_request_phase_soft_checkpoint_asks_and_records_daily_key() -> None:
         "data": "please run the build",
         "context": {
             "actor": {},
-            "user_daily_cost": {"cost_usd": 2.0, "ask_approved_usd": 0.0},
+            "user_daily_cost": [
+                {"cost_usd": 2.0, "ask_approved_usd": 0.0, "day_utc": utc_day(now_epoch())}
+            ],
             "model": "databricks-claude-opus-4-8",
         },
         "session_state": {},

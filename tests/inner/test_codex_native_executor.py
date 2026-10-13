@@ -2073,6 +2073,43 @@ def test_run_turn_surfaces_recorded_startup_error(
     assert sleep_calls == 0
 
 
+def test_run_turn_surfaces_coded_startup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    A startup record with a semantic code is surfaced as written, with its
+    code, title and remediation, instead of behind the generic "thread never
+    started" prefix. The runner phrased it for the user already.
+    """
+
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    write_bridge_startup_error(
+        tmp_path,
+        "Codex is waiting for a sign-in in this session's terminal.",
+        code="databricks_sign_in_pending",
+        title="Codex can't start until you sign in to Databricks",
+        remediation="Open https://signin.example.com/device and enter code HQ7M-2KPD.",
+    )
+    executor = CodexNativeExecutor(bridge_dir=tmp_path)
+
+    events = _collect_turn_events(executor, "hello")
+
+    assert len(events) == 1
+    error = events[0]
+    assert isinstance(error, ExecutorError)
+    assert error.message == "Codex is waiting for a sign-in in this session's terminal."
+    assert error.code == "databricks_sign_in_pending"
+    assert error.title == "Codex can't start until you sign in to Databricks"
+    assert error.remediation is not None
+    assert "HQ7M-2KPD" in error.remediation
+    # The message never reached Codex: the sender's queued copy is the record.
+    assert error.undelivered is True
+
+
 def test_bridge_state_wait_preserves_legacy_and_configured_command_contracts(
     tmp_path: Path,
 ) -> None:
@@ -2615,17 +2652,19 @@ def test_interrupt_with_no_active_turn_and_no_pending_mcp_is_noop(
     assert _FakeCodexNativeClient.requests == []
 
 
-def test_interrupt_tolerates_stale_active_turn_mismatch(
+@pytest.mark.parametrize(
+    "message",
+    [
+        "no active turn to interrupt",
+        "expected active turn id turn_gone but found turn_new",
+    ],
+)
+def test_interrupt_tolerates_stale_active_turn_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    message: str,
 ) -> None:
-    """Interrupting a turn a newer one replaced is not a failure.
-
-    Regression: the recorded turn can end or be replaced before Stop lands, so
-    ``turn/interrupt`` gets -32600 "expected active turn id X but found Y". That
-    used to raise and surface as "Harness interrupt failed or timed out"; the
-    turn we targeted is already gone, so the interrupt has nothing left to do.
-    """
+    """Interrupting a turn that ended or was replaced is not a failure."""
 
     class _MismatchInterruptClient(_FakeCodexNativeClient):
         """Reject the recorded-turn interrupt with the mismatch error."""
@@ -2637,7 +2676,7 @@ def test_interrupt_tolerates_stale_active_turn_mismatch(
                 raise CodexAppServerResponseError(
                     {
                         "code": -32600,
-                        "message": "expected active turn id turn_gone but found turn_new",
+                        "message": message,
                     }
                 )
             return {"result": {}}

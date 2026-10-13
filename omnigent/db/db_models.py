@@ -37,7 +37,6 @@ from omnigent.db.compression import CompressedText
 # BINARY(32) there — an exact fit for the digest and fully indexable.
 _CKSUM32 = LargeBinary(32).with_variant(MySQLBinary(32), "mysql")
 
-
 # Hex length of a bare uuid4 id, the canonical Python-side form.
 _UUID_HEX_LEN = 32
 
@@ -312,6 +311,16 @@ class SqlAgent(OmnigentBase):
         # do — kind is included so the seek skips same-named session copies
         # straight to the template row.
         Index("ix_agents_name", "workspace_id", "name", "kind", "id"),
+        # Keyset listing of one user's own agents, newest first: equality on
+        # kind and created_by, order on created_at, primary-key tie-break.
+        Index(
+            "ix_agents_kind_owner_created",
+            "workspace_id",
+            "kind",
+            "created_by",
+            "created_at",
+            "id",
+        ),
     )
 
 
@@ -1447,7 +1456,7 @@ class SqlUserDailyCost(OmnigentBase):
     aggregating the per-session ``conversations.session_usage`` blobs
     on every policy evaluation.
 
-    One row per ``(user_id, day_utc)``. Incremented (UPSERT
+    One row per ``(workspace_id, user_id, day_utc)``. Incremented (UPSERT
     ``cost_usd = cost_usd + delta``) at each turn boundary from the
     cost write sites — but only when the session runs under at least
     one policy, so the table is never touched in deployments that
@@ -1488,6 +1497,25 @@ class SqlUserDailyCost(OmnigentBase):
     cost_usd: Mapped[float] = mapped_column(Float, nullable=False)
     ask_approved_usd: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
     updated_at: Mapped[int] = mapped_column(Integer)
+
+
+class SqlUserPeriodApproval(OmnigentBase):
+    """Highest approved checkpoint per workspace, user, period, and UTC window."""
+
+    __tablename__ = "user_period_approvals"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    user_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    period: Mapped[str] = mapped_column(String(8), primary_key=True)
+    window_start: Mapped[str] = mapped_column(String(10), primary_key=True)
+    ask_approved_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    updated_at: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
 class SqlScheduledTask(OmnigentBase):

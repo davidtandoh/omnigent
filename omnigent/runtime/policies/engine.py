@@ -27,7 +27,7 @@ from omnigent.spec.types import (
     StateUpdate,
     StateUpdateAction,
 )
-from omnigent.stores.conversation_store import ConversationStore
+from omnigent.stores.conversation_store import ConversationStore, DailyCostState
 
 # Number of recent conversation items the engine fetches from
 # the conversation store and threads onto :class:`EvaluationContext`
@@ -112,7 +112,10 @@ class PolicyEngine:
         initial_session_state: dict[str, Any] | None = None,
         initial_usage: dict[str, float] | None = None,
         initial_subtree_usage: dict[str, float] | None = None,
-        initial_user_daily_cost: dict[str, float | str] | None = None,
+        initial_user_daily_cost: list[dict[str, float | str | None]]
+        | list[DailyCostState]
+        | None = None,
+        initial_user_period_approvals: list[dict[str, float | str]] | None = None,
         token_pricing: ModelPricing | None = None,
         initial_model: str | None = None,
         conversation_store: ConversationStore,
@@ -152,12 +155,14 @@ class PolicyEngine:
         self._subtree_usage: dict[str, float] | None = (
             dict(initial_subtree_usage) if initial_subtree_usage is not None else None
         )
-        # The session owner's per-UTC-day cost rollup
-        # ({"cost_usd", "ask_approved_usd"}), seeded at build time ONLY
-        # when a policy needs it (per-user daily cost-budget configured).
-        # ``None`` → not needed → never injected, so no owner/daily lookup
-        # cost for sessions that don't use the daily policy.
+        # The session owner's daily cost records (list of
+        # {cost_usd, ask_approved_usd, day_utc, harness, user_id}), seeded
+        # at build time ONLY when a policy needs it (per-user daily or
+        # period cost-budget configured). For daily budgets, contains only
+        # today's record; for period budgets, contains all days in the period.
+        # ``None`` → not needed → never injected.
         self._user_daily_cost = initial_user_daily_cost
+        self._user_period_approvals = initial_user_period_approvals
         self._token_pricing = token_pricing
         self._model = initial_model
         self._store = conversation_store
@@ -355,6 +360,7 @@ class PolicyEngine:
         ctx = self._inject_model(ctx)
         ctx = self._inject_labels(ctx)
         ctx = self._inject_llm_client(ctx)
+        ctx = self._inject_conversation_id(ctx)
 
         for policy in self.policies:
             if not self._should_fire(policy.spec, ctx):
@@ -553,11 +559,13 @@ class PolicyEngine:
             SESSION_COST_ASK_APPROVED_STATE_KEY,
             SESSION_COST_UNPRICED_APPROVED_KEY,
             USER_DAILY_ASK_APPROVED_STATE_KEY,
+            USER_PERIOD_ASK_APPROVED_STATE_KEY,
         )
 
-        # Two reserved keys are routed off this conversation's session_state:
+        # Three reserved keys are routed off this conversation's session_state:
         # the per-user daily approval goes to the user+day store column (so it
-        # persists across the user's sessions), and the per-SESSION cost
+        # persists across the user's sessions), the per-user monthly approval
+        # goes to the user+month+harness store column, and the per-SESSION cost
         # approval goes to the ROOT conversation (so approving once covers the
         # whole spawn tree — a sub-agent runs as its own conversation, and
         # build_policy_engine seeds the approval from the root). Every other
@@ -566,6 +574,8 @@ class PolicyEngine:
         for op in updates:
             if op.key == USER_DAILY_ASK_APPROVED_STATE_KEY:
                 self._record_user_daily_ask_approved(op.value)
+            elif op.key == USER_PERIOD_ASK_APPROVED_STATE_KEY:
+                self._record_user_period_ask_approved(op.value)
             elif (
                 op.key in (SESSION_COST_ASK_APPROVED_STATE_KEY, SESSION_COST_UNPRICED_APPROVED_KEY)
                 and self._root_conversation_id != self._conversation_id
@@ -629,13 +639,40 @@ class PolicyEngine:
         from omnigent.db.utils import now_epoch, utc_day
 
         with target_account_scope(owner.user_id, owner.generation):
-            self._store.set_daily_ask_approved(owner.user_id, utc_day(now_epoch()), approved)
+            today = utc_day(now_epoch())
+            self._store.set_daily_ask_approved(owner.user_id, today, approved)
         # Keep the in-memory snapshot current so any later evaluate() on
         # this engine sees the approval and doesn't re-ASK the checkpoint
         # the user just approved — mirroring how the session policy's
         # approval stays current via _apply_one(self._session_state, ...).
-        if self._user_daily_cost is not None:
-            self._user_daily_cost["ask_approved_usd"] = approved
+        for record in self._user_daily_cost or []:
+            if record.get("day_utc") == today:
+                record["ask_approved_usd"] = approved
+
+    def _record_user_period_ask_approved(self, value: Any) -> None:
+        """Persist a checkpoint for the period and UTC window that requested it."""
+        if not isinstance(value, dict):
+            raise ValueError("Period approval requires period, window_start, and ask_approved_usd")
+        period = value.get("period")
+        start = value.get("window_start")
+        approved = value.get("ask_approved_usd")
+        if (
+            not isinstance(period, str)
+            or not isinstance(start, str)
+            or not isinstance(approved, int | float)
+        ):
+            raise ValueError("Period approval requires period, window_start, and ask_approved_usd")
+        owner = self._store.get_session_owner_authority(self._conversation_id)
+        if owner is None:
+            return
+        from omnigent.db.account_authority import target_account_scope
+
+        with target_account_scope(owner.user_id, owner.generation):
+            self._store.set_period_ask_approved(owner.user_id, period, start, approved)
+        self._user_period_approvals = self._store.list_period_ask_approvals(
+            owner.user_id,
+            min([start] + [str(r["window_start"]) for r in self._user_period_approvals or []]),
+        )
 
     def record_usage(
         self,
@@ -740,12 +777,15 @@ class PolicyEngine:
         """
         Return a copy of *ctx* with ``user_daily_cost`` populated, when seeded.
 
-        Injects the session owner's per-UTC-day cost rollup (read once at
-        engine-build time) so the per-user daily cost-budget policy can
+        Injects the session owner's daily cost records (read once at
+        engine-build time) so daily and period cost-budget policies can
         read it via ``event["context"]["user_daily_cost"]`` without
-        re-querying the store. When the engine was built without it
-        (``None`` — no policy needs it), *ctx* is returned unchanged so
-        sessions that don't use the daily policy never carry it.
+        re-querying the store. For daily budgets, contains only today's
+        record; for period budgets, contains all days in the period.
+
+        When the engine was built without it (``None`` — no policy needs it),
+        *ctx* is returned unchanged so sessions that don't use cost policies
+        never carry it.
 
         :param ctx: Original :class:`EvaluationContext` from the caller.
         :returns: *ctx* unchanged when no daily-cost was seeded, else a
@@ -753,7 +793,18 @@ class PolicyEngine:
         """
         if self._user_daily_cost is None:
             return ctx
-        return replace(ctx, user_daily_cost=dict(self._user_daily_cost))
+        # Cast needed: dict(d) produces dict[str, object] but the runtime value
+        # is actually dict[str, float | str | None] from DailyCostState
+        from typing import cast
+
+        return replace(
+            ctx,
+            user_period_approvals=[dict(r) for r in self._user_period_approvals or []],
+            user_daily_cost=cast(
+                "list[dict[str, float | str | None]]",
+                [dict(d) for d in self._user_daily_cost],
+            ),
+        )
 
     def _inject_model(self, ctx: EvaluationContext) -> EvaluationContext:
         """
@@ -825,6 +876,23 @@ class PolicyEngine:
             hot cache.
         """
         return replace(ctx, session_state=dict(self._session_state))
+
+    def _inject_conversation_id(self, ctx: EvaluationContext) -> EvaluationContext:
+        """
+        Return a copy of *ctx* with ``conversation_id`` populated.
+
+        Injects the engine's own conversation_id so function policy
+        callables can correlate an event with its session via
+        ``event["context"]["conversation_id"]`` without the caller
+        having to thread it through every :class:`EvaluationContext`
+        it builds.
+
+        :param ctx: Original :class:`EvaluationContext` from the
+            caller.
+        :returns: A new :class:`EvaluationContext` with
+            ``conversation_id`` set to this engine's conversation_id.
+        """
+        return replace(ctx, conversation_id=self._conversation_id)
 
     def _filter_schema_valid(
         self,
