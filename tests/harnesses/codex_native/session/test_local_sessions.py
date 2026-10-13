@@ -355,6 +355,7 @@ def test_run_codex_native_does_not_require_local_codex_binary(
         model: str | None,
         prompt: str | None,
         auto_open_conversation: bool,
+        launch_env: dict[str, str] | None = None,
     ) -> None:
         """
         Record that the remote daemon path was selected.
@@ -371,6 +372,7 @@ def test_run_codex_native_does_not_require_local_codex_binary(
             model,
             prompt,
             auto_open_conversation,
+            launch_env,
         )
         remote_called = True
 
