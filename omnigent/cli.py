@@ -4771,7 +4771,7 @@ def server(
 
 @cli.group("runtime")
 def runtime_commands() -> None:
-    """Inspect the runtime without starting or stopping services."""
+    """Inspect runtime contracts and manage exactly scoped sessions."""
 
 
 @runtime_commands.command("launch-contract")
@@ -4789,6 +4789,62 @@ def runtime_launch_contract(server: str, json_output: bool) -> None:
     except LaunchContractError as exc:
         click.echo(
             canonical_json({"schema_version": 1, "error": {"category": exc.category}}), nl=False
+        )
+        raise click.exceptions.Exit(1) from exc
+    click.echo(canonical_json(receipt), nl=False)
+
+
+@runtime_commands.command("session-contract")
+@click.option("--session", "session_id", required=True)
+@click.option("--json", "json_output", is_flag=True)
+def runtime_session_contract(session_id: str, json_output: bool) -> None:
+    """Read exact custody and reattachment identities for one local session."""
+    from omnigent.native.state_files import canonical_json
+    from omnigent.process_logging import data_dir
+    from omnigent.runner.custody import CustodyError, session_contract
+
+    if not json_output:
+        raise click.UsageError("--json is required")
+    try:
+        receipt = session_contract(data_dir(), session_id)
+    except (CustodyError, OSError, psutil.Error) as exc:
+        category = str(exc) if isinstance(exc, CustodyError) else "unavailable_probe"
+        click.echo(
+            canonical_json({"schema_version": 1, "error": {"category": category}}), nl=False
+        )
+        raise click.exceptions.Exit(1) from exc
+    click.echo(canonical_json(receipt), nl=False)
+
+
+@runtime_commands.command("end-session")
+@click.option("--session", "session_id", required=True)
+@click.option("--owner-generation", required=True)
+@click.option("--host-id", required=True)
+@click.option("--server", required=True)
+@click.option("--json", "json_output", is_flag=True)
+def runtime_end_session(
+    session_id: str, owner_generation: str, host_id: str, server: str, json_output: bool
+) -> None:
+    """End the exact recorded local session and its native resources."""
+    from omnigent.native.state_files import canonical_json
+    from omnigent.process_logging import data_dir
+    from omnigent.runner.custody import CustodyError, end_session, host_config_digest
+
+    if not json_output:
+        raise click.UsageError("--json is required")
+    try:
+        receipt = end_session(
+            data_dir(),
+            session_id,
+            owner_generation=owner_generation,
+            host_id=host_id,
+            endpoint=server.rstrip("/"),
+            config_digest=host_config_digest(),
+        )
+    except (CustodyError, OSError, psutil.Error) as exc:
+        category = str(exc) if isinstance(exc, CustodyError) else "unavailable_probe"
+        click.echo(
+            canonical_json({"schema_version": 1, "error": {"category": category}}), nl=False
         )
         raise click.exceptions.Exit(1) from exc
     click.echo(canonical_json(receipt), nl=False)
@@ -4813,6 +4869,7 @@ def _stop_local_server_and_daemon(*, force: bool) -> bool:
     if local_record is not None:
         # A stubborn daemon shouldn't block stopping the server.
         with contextlib.suppress(click.ClickException):
+            _end_daemon_custodied_sessions(local_record)
             _terminate_daemon(local_record, force=force)
     stop_local_omnigent_server()
     # Also catch an orphan on the canonical port whose pidfile was lost, so
@@ -4891,6 +4948,44 @@ def server_stop(force: bool) -> None:
         click.echo("Stopped the background server.")
     else:
         click.echo("No background server is running.")
+
+
+def _server_maintenance_result(*, start: bool, json_output: bool) -> None:
+    from filelock import Timeout as LockTimeout
+
+    from omnigent.host.local_server import (
+        ServerMaintenanceError,
+        maintenance_start_local_server,
+        maintenance_stop_local_server,
+    )
+    from omnigent.native.state_files import canonical_json
+
+    try:
+        result = maintenance_start_local_server() if start else maintenance_stop_local_server()
+    except (ServerMaintenanceError, LockTimeout, OSError, psutil.Error) as exc:
+        category = str(exc) if isinstance(exc, ServerMaintenanceError) else "unavailable_probe"
+        click.echo(
+            canonical_json({"schema_version": 1, "error": {"category": category}}), nl=False
+        )
+        raise click.exceptions.Exit(1) from exc
+    if json_output:
+        click.echo(canonical_json({"schema_version": 1, **result}), nl=False)
+    else:
+        click.echo(f"Server {result['state']} at {result['endpoint']}; host sessions preserved.")
+
+
+@server.command("maintenance-stop")
+@click.option("--json", "json_output", is_flag=True, help="Emit canonical JSON.")
+def server_maintenance_stop(json_output: bool) -> None:
+    """Detach the API server for maintenance, preserving host and sessions."""
+    _server_maintenance_result(start=False, json_output=json_output)
+
+
+@server.command("maintenance-start")
+@click.option("--json", "json_output", is_flag=True, help="Emit canonical JSON.")
+def server_maintenance_start(json_output: bool) -> None:
+    """Restore the detached API server on its exact endpoint and auth config."""
+    _server_maintenance_result(start=True, json_output=json_output)
 
 
 @server.command("status")
@@ -5017,6 +5112,7 @@ def stop(force: bool) -> None:
         # off-switch doesn't need the graceful per-session HTTP stop that
         # `host stop` does — that keeps teardown quiet and dependency-free.
         try:
+            _end_daemon_custodied_sessions(record)
             _terminate_daemon(record, force=force)
             stopped += 1
         except click.ClickException as exc:
@@ -10546,11 +10642,58 @@ def host_stop(
         stopped = 0
         if not daemon_only and not force:
             stopped = _stop_daemon_sessions(record)
+        if not daemon_only:
+            _end_daemon_custodied_sessions(record)
         _terminate_daemon(record, force=force)
         click.echo(
             f"Stopped {_host_display_url(record.target)} daemon "
             f"pid={record.pid}; sessions_stopped={stopped}."
         )
+
+
+def _end_daemon_custodied_sessions(record: _HostDaemonRecord) -> None:
+    """Preserve intentional stop semantics even while the API is unavailable."""
+    from omnigent.process_logging import data_dir
+    from omnigent.runner.custody import (
+        CustodyError,
+        custody_records,
+        end_session,
+        host_config_digest,
+        verify_resources,
+    )
+
+    endpoint = record.resolved_server_url if record.mode == "local" else record.server_url
+    try:
+        selected = [
+            receipt
+            for receipt in custody_records(data_dir())
+            if receipt.host_id == record.host_id and receipt.endpoint == endpoint
+        ]
+        config_digest = host_config_digest()
+        for receipt in selected:
+            if receipt.config_digest != config_digest:
+                raise CustodyError("config_mismatch")
+            verify_resources(receipt)
+        for receipt in selected:
+            end_session(
+                data_dir(),
+                receipt.session_id,
+                owner_generation=receipt.owner_generation,
+                host_id=receipt.host_id,
+                endpoint=receipt.endpoint,
+                config_digest=config_digest,
+            )
+    except (CustodyError, OSError, psutil.Error) as exc:
+        category = str(exc) if isinstance(exc, CustodyError) else "unavailable_probe"
+        raise click.ClickException(f"Session teardown refused: {category}") from exc
+
+
+@host.command("maintenance-detach")
+@click.option("--server", required=True, help="Exact host endpoint to detach.")
+@click.pass_context
+def host_maintenance_detach(ctx: click.Context, server: str) -> None:
+    """Detach this host attachment while live Codex sessions continue."""
+    ctx.invoke(host_stop, server=server, all_targets=False, daemon_only=True, force=False)
 
 
 @host.command("stop-session")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import os
+import shlex
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -32,6 +33,33 @@ class LaunchContractError(ValueError):
         super().__init__(category)
 
 
+def _launcher_uses_interpreter(launcher: bytes, interpreter: Path) -> bool:
+    """Qualify direct shebangs and the exact uv/distlib shell trampoline."""
+    try:
+        lines = launcher.decode("utf-8").splitlines()
+        if lines[0] == "#!/bin/sh":
+            if len(lines) < 3 or not lines[1].startswith("'''exec' ") or lines[2] != "' '''":
+                return False
+            parts = shlex.split(lines[1][len("'''exec' ") :])
+            if len(parts) != 3 or parts[1:] != ["$0", "$@"]:
+                return False
+            name = parts[0]
+        elif lines[0].startswith("#!"):
+            name = lines[0][2:]
+        else:
+            return False
+        if any(char in name for char in "$`\\\r\n"):
+            return False
+        candidate = Path(name)
+        return (
+            candidate.is_absolute()
+            and candidate.parent == interpreter.parent
+            and candidate.resolve(strict=True) == interpreter.resolve(strict=True)
+        )
+    except (OSError, ValueError, IndexError, UnicodeError):
+        return False
+
+
 def runtime_identity() -> dict[str, object]:
     """Digest the actual executable and loaded package sources, not a version label."""
     import omnigent
@@ -41,9 +69,8 @@ def runtime_identity() -> dict[str, object]:
     digest = hashlib.sha256()
     try:
         launcher = read_regular_file(executable, limit=65536)
-        if (
-            not os.access(executable, os.X_OK)
-            or str(Path(sys.executable).parent).encode() not in launcher.splitlines()[0]
+        if not os.access(executable, os.X_OK) or not _launcher_uses_interpreter(
+            launcher, Path(sys.executable).absolute()
         ):
             raise LaunchContractError("runtime_mismatch")
         digest.update(launcher)
@@ -113,6 +140,7 @@ def launch_contract(endpoint: str, *, probe: bool = True) -> dict[str, object]:
         availability = "ready"
     from omnigent.harness_plugins import harness_capabilities
     from omnigent.native.native_coding_agents import NATIVE_CODING_AGENTS
+    from omnigent.runner.custody import SUPPORTED_HARNESSES
 
     capabilities = harness_capabilities()
     return {
@@ -137,7 +165,7 @@ def launch_contract(endpoint: str, *, probe: bool = True) -> dict[str, object]:
                 "capabilities": capabilities[agent.harness].as_dict()
                 if agent.harness in capabilities
                 else {},
-                "durable_custody": False,
+                "durable_custody": agent.harness in SUPPORTED_HARNESSES,
             }
             for agent in NATIVE_CODING_AGENTS
         ],

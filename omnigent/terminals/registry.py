@@ -303,6 +303,23 @@ class TerminalRegistry:
                     session_key,
                     conversation_id,
                 )
+        from omnigent.runner.custody import current_custody
+
+        custody = current_custody()
+        if custody is not None and custody.record.session_id == conversation_id:
+
+            def _publish_custody() -> None:
+                pane_pid = winning_instance.pane_pid_sync()
+                if pane_pid is None:
+                    raise RuntimeError("unavailable_probe")
+                import psutil
+
+                tmux_pid = psutil.Process(pane_pid).ppid()
+                custody.publish_terminal(
+                    terminal_name, session_key, winning_instance.socket_path, tmux_pid, pane_pid
+                )
+
+            await asyncio.to_thread(_publish_custody)
         return winning_instance
 
     def get_instance_lock(

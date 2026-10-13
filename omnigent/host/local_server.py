@@ -26,13 +26,17 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import click
 import psutil  # type: ignore[import-untyped]
+from filelock import FileLock
+from pydantic import BaseModel, ConfigDict, Field
 
 from omnigent.config import global_config_path
 from omnigent.inner import _proc
-from omnigent.native.state_files import write_regular_file
+from omnigent.native.owner_claim import ProcessIdentity
+from omnigent.native.state_files import read_regular_file, write_regular_file, write_state_file
 from omnigent.process_logging import (
     PROCESS_LOG_FILE_ENV_VAR,
     child_logging_popen_kwargs,
@@ -118,6 +122,8 @@ _LOCAL_SERVER_SIG_PATH = _local_data_dir() / "local_server.sig"
 # server this invocation didn't spawn. Absent for a foreground
 # ``omnigent server`` (its logs stream to the terminal, not a file).
 _LOCAL_SERVER_LOG_REF_PATH = _local_data_dir() / "local_server.logpath"
+_LOCAL_SERVER_OWNER_PATH = _local_data_dir() / "local_server.owner.json"
+_LOCAL_SERVER_MAINTENANCE_PATH = _local_data_dir() / "local_server.maintenance.json"
 
 # Sidecar carrying the normalized base path (one line, "" for root) the
 # running local server was spawned under. Unlike the other signature inputs,
@@ -389,6 +395,117 @@ def _write_local_server_record(
         with contextlib.suppress(OSError):
             _LOCAL_SERVER_LOG_REF_PATH.unlink()
     _atomic_write(_LOCAL_SERVER_PID_PATH, f"{pid}\n{port}\n")
+    try:
+        identity = ProcessIdentity.capture(pid)
+    except (ValueError, psutil.Error):
+        # Maintenance requires an exact receipt even when legacy startup succeeds.
+        return
+    write_state_file(
+        _LOCAL_SERVER_OWNER_PATH,
+        {
+            "schema_version": 1,
+            "process": identity.as_dict(),
+            "port": port,
+            "config_sig": sig,
+            "base_path": base_path,
+        },
+    )
+
+
+class ServerMaintenanceError(ValueError):
+    """A scoped refusal that never includes subprocess output."""
+
+
+class ServerMaintenanceRecord(BaseModel):
+    """Exact process and endpoint needed for a server-only maintenance cycle."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    schema_version: Literal[1]
+    process: ProcessIdentity
+    port: int = Field(gt=0, lt=65536)
+    config_sig: str
+    base_path: str
+
+
+def _server_maintenance_record(path: Path) -> ServerMaintenanceRecord:
+    try:
+        return ServerMaintenanceRecord.model_validate_json(read_regular_file(path, limit=65536))
+    except (OSError, ValueError) as exc:
+        raise ServerMaintenanceError("record_mismatch") from exc
+
+
+def maintenance_stop_local_server() -> dict[str, object]:
+    """Detach only the verified API process, retaining endpoint/config for restart."""
+    with FileLock(str(_LOCAL_SERVER_MAINTENANCE_PATH) + ".lock", timeout=0):
+        record = _server_maintenance_record(_LOCAL_SERVER_OWNER_PATH)
+        existing = _read_local_server_pid_file()
+        try:
+            identity = record.process
+            process = identity.require_live()
+        except (KeyError, TypeError, ValueError, psutil.Error) as exc:
+            raise ServerMaintenanceError("record_mismatch") from exc
+        port = record.port
+        if existing != (identity.pid, port):
+            raise ServerMaintenanceError("record_mismatch")
+        if record.config_sig != server_config_signature():
+            raise ServerMaintenanceError("config_mismatch")
+        if _pid_listening_on_port(port) != identity.pid:
+            raise ServerMaintenanceError("occupied_port")
+        write_state_file(_LOCAL_SERVER_MAINTENANCE_PATH, record.model_dump(mode="json"))
+        process.terminate()
+        try:
+            process.wait(timeout=_STOP_GRACE_S)
+        except psutil.TimeoutExpired as exc:
+            try:
+                stopped = process.status() == psutil.STATUS_ZOMBIE
+            except psutil.NoSuchProcess:
+                stopped = True
+            if not stopped:
+                raise ServerMaintenanceError("process_pending") from exc
+        return {"endpoint": f"http://127.0.0.1:{port}{record.base_path}", "state": "detached"}
+
+
+def maintenance_start_local_server() -> dict[str, object]:
+    """Restore the recorded API endpoint and refuse config or port drift."""
+    with FileLock(str(_LOCAL_SERVER_MAINTENANCE_PATH) + ".lock", timeout=0):
+        record = _server_maintenance_record(_LOCAL_SERVER_MAINTENANCE_PATH)
+        try:
+            record.process.require_live()
+        except psutil.NoSuchProcess:
+            pass
+        except ValueError as exc:
+            if str(exc) != "process_pending":
+                raise ServerMaintenanceError("record_mismatch") from exc
+        except psutil.Error as exc:
+            raise ServerMaintenanceError("unavailable_probe") from exc
+        else:
+            raise ServerMaintenanceError("process_pending")
+        previous_base = os.environ.get("OMNIGENT_WEB_BASE_PATH")
+        previous_port = os.environ.get("OMNIGENT_LOCAL_SERVER_PORT")
+        if previous_base is not None and previous_base != record.base_path:
+            raise ServerMaintenanceError("config_mismatch")
+        if previous_port is not None and previous_port != str(record.port):
+            raise ServerMaintenanceError("config_mismatch")
+        os.environ["OMNIGENT_WEB_BASE_PATH"] = record.base_path
+        os.environ["OMNIGENT_LOCAL_SERVER_PORT"] = str(record.port)
+        try:
+            if server_config_signature() != record.config_sig:
+                raise ServerMaintenanceError("config_mismatch")
+            try:
+                _assert_server_port_bindable("127.0.0.1", record.port)
+            except click.ClickException as exc:
+                raise ServerMaintenanceError("occupied_port") from exc
+            startup = ensure_local_omnigent_server()
+            return {"endpoint": startup.url, "state": "ready"}
+        finally:
+            for name, previous in (
+                ("OMNIGENT_WEB_BASE_PATH", previous_base),
+                ("OMNIGENT_LOCAL_SERVER_PORT", previous_port),
+            ):
+                if previous is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = previous
 
 
 def _read_local_server_log_path() -> Path | None:

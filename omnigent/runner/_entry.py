@@ -1126,6 +1126,7 @@ def _run_parent_death_killer(
     request_shutdown: Callable[[], None],
     *,
     adopted: threading.Event | None = None,
+    owner_alive: Callable[[], bool] | None = None,
     poll_interval_s: float = 0.5,
     grace_s: float = 2.0,
     exit_fn: Callable[[int], None] = os._exit,
@@ -1155,6 +1156,8 @@ def _run_parent_death_killer(
     :param adopted: Event set when the runner has been adopted; once set,
         the watcher returns without requesting shutdown. ``None`` disables
         adoption (watch until parent death).
+    :param owner_alive: Durable session lease probe. When supplied, monitor
+        that lease across threads instead of the replaceable launch parent.
     :param poll_interval_s: Seconds between parent-liveness probes, e.g.
         ``0.5``.
     :param grace_s: Seconds to allow graceful shutdown before the hard
@@ -1163,7 +1166,7 @@ def _run_parent_death_killer(
         injectable so tests can observe it without killing the runner.
     :returns: None.
     """
-    while not _parent_is_orphaned(parent_pid):
+    while owner_alive() if owner_alive is not None else not _parent_is_orphaned(parent_pid):
         if adopted is not None and adopted.is_set():
             return
         time.sleep(poll_interval_s)
@@ -1178,8 +1181,9 @@ def _run_parent_death_killer(
     # exit-reason logging in _run_tunnel_from_env's finally block. The file
     # handler flushes per record, so this lands even though os._exit follows.
     _logger.warning(
-        "runner exiting: parent process died and graceful shutdown did not "
+        "runner exiting: %s and graceful shutdown did not "
         "complete within %.1fs; forcing hard exit",
+        "session custody lost" if owner_alive is not None else "parent process died",
         grace_s,
         extra={"session_id": runner_primary_session_id()},
     )
@@ -1826,6 +1830,9 @@ async def _run_tunnel_from_env() -> None:
             name=f"runner-idle-monitor:{runner_id}",
         )
     if parent_pid is not None:
+        from omnigent.runner.custody import current_custody
+
+        custody = current_custody()
 
         def _request_parent_death_shutdown() -> None:
             """Attribute the exit to parent death, then stop on the loop.
@@ -1835,7 +1842,9 @@ async def _run_tunnel_from_env() -> None:
 
             :returns: None.
             """
-            _record_exit_reason("parent process died")
+            _record_exit_reason(
+                "session custody lost" if custody is not None else "parent process died"
+            )
             loop.call_soon_threadsafe(stop_event.set)
 
         # Orphan guard runs on a dedicated daemon thread, not the event
@@ -1846,7 +1855,10 @@ async def _run_tunnel_from_env() -> None:
         threading.Thread(
             target=_run_parent_death_killer,
             args=(parent_pid, _request_parent_death_shutdown),
-            kwargs={"adopted": adopted_event},
+            kwargs={
+                "adopted": None if custody is not None else adopted_event,
+                "owner_alive": custody.still_owner if custody is not None else None,
+            },
             name=f"runner-parent-killer:{parent_pid}",
             daemon=True,
         ).start()
@@ -2067,6 +2079,31 @@ def main() -> None:
     configure_process_logging("runner", force=True)
     _install_crash_logging()
     _maybe_prewarm_ambient_detection()
+    from omnigent.runner.custody import CUSTODY_ENV_VAR, install_custody
+    from omnigent.runner.identity import get_stable_runner_id
+
+    custody = None
+    raw_custody = os.environ.pop(CUSTODY_ENV_VAR, None)
+    if raw_custody is not None:
+        from omnigent.native.launch_environment import (
+            native_launch_environment,
+            native_launch_environment_digest,
+        )
+        from omnigent.process_logging import data_dir
+
+        if len(raw_custody.encode()) > 65536:
+            raise RuntimeError("record_mismatch")
+        context = json.loads(raw_custody)
+        if (
+            not isinstance(context, dict)
+            or context.get("runner_id") != get_stable_runner_id()
+            or context.get("session_id") != runner_primary_session_id()
+        ):
+            raise RuntimeError("scope_mismatch")
+        actual_environment_digest = native_launch_environment_digest(native_launch_environment())
+        if context.get("environment_digest") != actual_environment_digest:
+            raise RuntimeError("config_mismatch")
+        custody = install_custody(data_dir(), context)
     try:
         asyncio.run(_run_tunnel_from_env())
     except RuntimeError as exc:
@@ -2077,6 +2114,9 @@ def main() -> None:
         _logger.error("runner exiting: %s", exc, extra={"session_id": runner_primary_session_id()})
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(1) from None
+    finally:
+        if custody is not None:
+            custody.finish()
 
 
 if __name__ == "__main__":

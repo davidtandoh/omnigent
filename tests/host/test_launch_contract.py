@@ -87,3 +87,45 @@ def test_harness_commands_are_executable_cli_commands() -> None:
     assert rows["claude-native"]["command"] == "claude"
     for row in rows.values():
         assert row["command"] in cli.commands
+
+
+def test_durable_capability_only_admits_evidenced_harnesses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from omnigent.runner import custody
+
+    monkeypatch.setattr(custody, "SUPPORTED_HARNESSES", frozenset({"codex-native"}))
+    rows = launch_contract("http://127.0.0.1:8123", probe=False)["harnesses"]
+    assert {row["id"] for row in rows if row["durable_custody"]} == {"codex-native"}
+
+
+@pytest.mark.parametrize("form", ["uv_trampoline", "foreign_interpreter", "shell_injection"])
+def test_runtime_qualifies_exact_owned_launcher(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, form: str
+) -> None:
+    import omnigent
+    from omnigent.host import launch_contract as module
+
+    bin_dir = tmp_path / ("long-" + "x" * 140) / "bin"
+    bin_dir.mkdir(parents=True)
+    python = bin_dir / "python3"
+    python.write_text("synthetic interpreter")
+    interpreter = str(python) if form != "foreign_interpreter" else str(bin_dir / "foreign-python")
+    command = f'\'{interpreter}\' "$0" "$@"'
+    if form == "shell_injection":
+        command += " ; exit 0"
+    launcher = bin_dir / "omnigent"
+    launcher.write_text("#!/bin/sh\n'''exec' " + command + "\n' '''\nimport sys\n")
+    launcher.chmod(0o700)
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "__init__.py").write_text("# fixture package\n")
+    monkeypatch.setattr(module.sys, "executable", str(python))
+    monkeypatch.setattr(omnigent, "__file__", str(package / "__init__.py"))
+    if form == "uv_trampoline":
+        receipt = module.runtime_identity()
+        assert receipt["python"] == str(python)
+        assert receipt["executable"] == str(launcher)
+    else:
+        with pytest.raises(LaunchContractError, match="runtime_mismatch"):
+            module.runtime_identity()

@@ -29,7 +29,7 @@ canonical JSON object and exits zero. A refusal exits one and prints
 | Field | Contract |
 | --- | --- |
 | `schema_version` | Integer `1`. Reject unknown schemas. |
-| `runtime.executable` | Absolute, executable console entry point beside the running Python interpreter. Its shebang must name that interpreter's directory. |
+| `runtime.executable` | Absolute, executable console entry point beside the running Python interpreter. A direct shebang or the bounded uv/distlib shell trampoline must resolve to that interpreter in the same runtime directory. The check does not execute shell text. |
 | `runtime.python` | Absolute Python interpreter used by this invocation. |
 | `runtime.generation` | `sha256:` followed by 64 hex characters. Digest of the launcher and sorted package Python paths and bytes. A version label alone is insufficient. |
 | `runtime.package_version` | Installed distribution version. Informational. |
@@ -60,10 +60,14 @@ collection is unavailable. Keep custody of existing sessions. Work exclusion
 keeps content and telemetry off. Enabled exports must use the approved redactor;
 this interface does not authorize a raw-content fallback.
 
-All native wrappers remain listed from the existing registry. None has a
-durable-custody guarantee in this first contract slice. Codex is the first
-survival target. Other harnesses need their own acceptance evidence.
+All native wrappers remain listed from the existing registry. `durable_custody`
+is true only for `codex-native` on macOS. It covers host-launched sessions with
+a durable session ID. Direct wrapper availability does not establish custody.
+Other harnesses and platforms need their own native survival evidence before
+admission. See [session custody](session-custody.md) for the exact owner,
+reattachment and maintenance contract.
 
 The isolated CLI test in `tests/e2e/test_launch_contract_e2e.py` verifies receipt
-availability during a synthetic trace outage. It does not prove live phone
-reattachment, native turn survival, deployment or primary migration.
+availability during a synthetic trace outage. The separate custody end-to-end
+test proves native survival and phone-style reattachment against isolated
+processes. Neither test authorizes deployment or primary migration.

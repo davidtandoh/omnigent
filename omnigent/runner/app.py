@@ -8456,6 +8456,13 @@ def create_runner_app(
             spec_entry=spec_entry,
             bridge_dir=bridge_dir,
         )
+        from omnigent.runner.custody import current_custody
+
+        custody = current_custody()
+        if custody is not None:
+            custody.publish_resource(
+                f"tool_policy_bridge:{session_id}", bridge_dir / "tool_relay.json"
+            )
         # Close last: the new advertisement is already written, and
         # ClaudeNativeToolRelay.close only unlinks a tool_relay.json that
         # still points at the relay being closed, so a shared bridge dir

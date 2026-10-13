@@ -5814,34 +5814,49 @@ async def test_remote_host_retries_connection_refused_past_threshold(
     assert spy.call_count == 5
 
 
+async def test_connected_local_host_preserves_runners_beyond_refusal_horizon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A previously usable local endpoint can return after long maintenance."""
+    monkeypatch.setattr("omnigent.host.connect._RECONNECT_BASE_S", 0.0)
+    refused = _refused_exc()
+    spy = _ConnectSpy([refused] * 101 + [None, asyncio.CancelledError()])
+    _patch_connect(monkeypatch, spy)
+    host = _host("http://127.0.0.1:8123")
+    host._ever_connected = True
+    monkeypatch.setattr("omnigent.host.connect.configured_harness_map", dict)
+    process = Mock()
+    process.poll.return_value = None
+    host._runners["runner_synthetic"] = _RunnerHandle(
+        proc=process,
+        log_path=Path("/tmp/synthetic.log"),
+        session_id="synthetic",
+        durable=True,
+    )
+    await host.run()
+    assert spy.call_count == 103
+    process.terminate.assert_not_called()
+    process.kill.assert_not_called()
+
+
 async def test_accepted_connect_resets_loopback_refused_streak(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A successful connect resets the loopback refused streak.
-
-    Only CONSECUTIVE refusals may kill the host: a streak interrupted by
-    a real connection (server came back, then died again) must start
-    counting from zero, not inherit pre-recovery refusals.
-    """
+    """A successful connect qualifies the endpoint for maintenance retries."""
     monkeypatch.setattr("omnigent.host.connect._RECONNECT_BASE_S", 0.0)
     monkeypatch.setattr("omnigent.host.connect._LOOPBACK_REFUSED_FATAL_ATTEMPTS", 3)
     # The accepted connect sends a real hello; skip its slow CLI probes —
     # only the streak accounting is under test here.
     monkeypatch.setattr("omnigent.host.connect.configured_harness_map", dict)
     refused = _refused_exc()
-    # 2 refusals (one short of fatal), an accepted upgrade (its tunnel
-    # drops on first recv), then refusals repeating until fatal.
-    spy = _ConnectSpy([refused, refused, None, refused])
+    spy = _ConnectSpy(
+        [refused, refused, None, refused, refused, refused, refused, asyncio.CancelledError()]
+    )
     _patch_connect(monkeypatch, spy)
     host = _host("http://localhost:5566")
 
-    with pytest.raises(HostConnectError):
-        await host.run()
-
-    # 6 = 2 refusals + accepted connect + 3 FRESH refusals to reach the
-    # threshold. 5 would mean the accepted connect did not reset the
-    # streak (pre-recovery refusals were counted toward the exit).
-    assert spy.call_count == 6
+    await host.run()
+    assert spy.call_count == 8
 
 
 def test_run_host_process_exits_nonzero_on_fatal(
@@ -8023,3 +8038,70 @@ def test_fs_reader_picks_up_a_repo_created_after_first_request(
 
     assert second.status == "ok", second
     assert [e["path"] for e in second.payload["data"]] == ["zzz/target.jsonnet"], second.payload
+
+
+@pytest.mark.parametrize(
+    "drift,category", [("environment", "config_mismatch"), ("harness", "harness_mismatch")]
+)
+async def test_live_custody_refuses_relaunch_drift_without_replacing_native(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, drift: str, category: str
+) -> None:
+    import hashlib
+
+    from omnigent.native.state_files import canonical_json
+    from omnigent.runner.identity import token_bound_runner_id
+
+    host = _make_host_process()
+    monkeypatch.setattr("omnigent.host.connect.SUPPORTED_HARNESSES", frozenset({"codex-native"}))
+    monkeypatch.setattr(host, "_adopt_custodied_runners", lambda: None)
+    monkeypatch.setattr("omnigent.host.connect.harness_is_configured", lambda harness: False)
+    process = Mock()
+    process.poll.return_value = None
+    handle = _RunnerHandle(
+        proc=process,
+        log_path=tmp_path / "synthetic.log",
+        session_id="conv_synthetic",
+        durable=True,
+    )
+    handle.environment_digest = hashlib.sha256(
+        canonical_json({"SYNTHETIC": "original"}).encode()
+    ).hexdigest()
+    runner_id = token_bound_runner_id("synthetic-binding")
+    host._runners[runner_id] = handle
+    result = await host._handle_launch(
+        HostLaunchRunnerFrame(
+            request_id="repeat",
+            binding_token="synthetic-binding",
+            session_id="conv_synthetic",
+            workspace=str(tmp_path),
+            harness="claude-native" if drift == "harness" else "codex-native",
+            native_env={"SYNTHETIC": "changed"} if drift == "environment" else None,
+        )
+    )
+    assert result.status == "failed" and result.error_code == category
+    assert host._runners[runner_id] is handle
+    process.terminate.assert_not_called()
+    process.kill.assert_not_called()
+    _cleanup_host(host)
+
+
+async def test_ended_custodian_releases_attachment_for_a_new_session_generation(
+    tmp_path: Path,
+) -> None:
+    host = _make_host_process()
+    process = Mock()
+    process.poll.return_value = 0
+    process.returncode = 0
+    attachment = Mock()
+    attachment.__exit__ = Mock()
+    host._custody_attachments["conv_synthetic"] = attachment
+    host._runners["runner_synthetic"] = _RunnerHandle(
+        proc=process,
+        log_path=tmp_path / "owner.log",
+        session_id="conv_synthetic",
+        durable=True,
+    )
+    await host._watch_runner("runner_synthetic")
+    assert "conv_synthetic" not in host._custody_attachments
+    attachment.__exit__.assert_called_once_with(None, None, None)
+    _cleanup_host(host)
