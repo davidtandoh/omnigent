@@ -611,7 +611,8 @@ def test_maintenance_restart_retains_explicit_base_path_without_respawn(
         [
             sys.executable,
             "-c",
-            "from omnigent.host.local_server import ensure_local_omnigent_server; print(ensure_local_omnigent_server())",
+            "from omnigent.host.local_server import ensure_local_omnigent_server; "
+            "print(ensure_local_omnigent_server())",
         ],
         env=env,
         cwd=home,

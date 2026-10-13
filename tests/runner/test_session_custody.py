@@ -470,9 +470,10 @@ async def test_owned_terminal_close_retracts_receipt_before_adoption(
 ) -> None:
     import socket
     import tempfile
+
     from omnigent.inner.terminal import TerminalInstance
-    from omnigent.terminals.registry import TerminalRegistry
     from omnigent.runner import custody
+    from omnigent.terminals.registry import TerminalRegistry
 
     class Terminal(TerminalInstance):
         async def close(self) -> None:
@@ -533,6 +534,7 @@ async def test_app_server_close_retires_helper_receipt(
 ) -> None:
     import asyncio
     import sys
+
     from omnigent.harnesses.codex_native.app_server import CodexNativeAppServer
     from omnigent.runner import custody
 

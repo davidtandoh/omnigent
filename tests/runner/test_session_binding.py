@@ -363,12 +363,13 @@ async def test_shared_bridge_handoff_retires_only_superseded_receipt(
     bound_session, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     import httpx
+
     from omnigent.harnesses.claude_native import bridge
     from tests.runner.test_comment_relay import (
-        _SwitchableServerClient,
         _launch_bridged,
         _spec_without_terminals,
         _switch_app,
+        _SwitchableServerClient,
     )
 
     owner, binding, _ = bound_session
