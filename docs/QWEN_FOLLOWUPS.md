@@ -179,12 +179,12 @@ comments; this is the *what*, not the *how*.)
   transcript is never re-mirrored — qwen sidesteps the double-mirror problem that
   forced goose-native to start fresh.
 
-- [x] **Carry history into qwen on fork / switch-agent (incl. cross-harness).**
-  Forking a session — or switching its agent — into qwen-native now seeds the new
+- [x] **Carry history into qwen on fork (incl. cross-harness).**
+  Forking a session into qwen-native seeds the new
   qwen session with the prior conversation, the same way claude-/codex-/pi-native
   do. qwen-native is registered in `_FORK_HISTORY_NATIVE_HARNESSES`
-  (`server/routes/sessions.py`), so both the fork and switch-agent routes stamp
-  `omnigent.fork.carry_history` and clear `external_session_id` on the clone. On
+  (`omnigent/server/routes/sessions/routes_core.py`), so the fork route stamps
+  `omnigent.fork.carry_history` and clears `external_session_id` on the clone. On
   the clone's first launch, `_auto_create_qwen_terminal` calls
   `_build_qwen_fork_recording`, which fetches the clone's copied Omnigent items
   (`fetch_all_session_items_for_pi_resume` — harness-neutral) and rebuilds qwen's

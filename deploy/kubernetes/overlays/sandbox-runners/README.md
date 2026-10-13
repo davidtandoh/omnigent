@@ -65,13 +65,13 @@ otherwise — the server never emits a mangled or colliding value:
 The classifier is re-derived from the bound agent at every launch and relaunch;
 it is never persisted. Some ordinary UI actions therefore drop it:
 
-- **Fork** and **switch-agent** mint a fresh *session-scoped* clone of the
-  agent. That clone fails the built-in gate, so the forked/switched session's
+- **Fork** mints a fresh *session-scoped* clone of the
+  agent. That clone fails the built-in gate, so the forked session's
   runner gets **no** `omnigent.ai/agent` label — and therefore no
   policy-injected credential.
-- **Switching back does not restore it.** Switch-back takes the same path and
-  mints another session-scoped clone, so a switched session cannot regain the
-  label through the UI. Start a new session on the built-in agent instead.
+- Start a new session on the built-in agent to obtain its classifier label.
+  For the retired in-place switch API, see the
+  [API compatibility reference](../../../../omnigent/server/API.md#retired-in-place-agent-switching).
 - **A running Pod keeps the previous agent's label until it is replaced.** The
   label is a launch-time snapshot; Pods are not relabelled in place. A changed
   value lands on the next runner Pod (a relaunch after the sandbox dies), not on
@@ -109,11 +109,9 @@ by whoever created the Pod**, so before keying anything privileged on it:
   the label: a Pod that loses it also leaves the restricted set, so build
   restrictions as a default-deny base with this label as the allow-exception.
 - **Treat a credential as bound to the Pod, not the session.** A mutating
-  webhook injects at Pod creation, and `switch-agent` keeps the same runner
-  (host and workspace are untouched), so a session that switches from a
-  credentialed agent keeps that credential mounted for the Pod's remaining
-  lifetime while running the new agent. If that matters, avoid switch-agent for
-  credentialed agents or keep the sandbox's idle timeout short.
+  webhook injects at Pod creation. Updating a session or an admission policy
+  does not remove credentials already mounted in a live Pod. Replace that Pod
+  when its credential assignment must change.
 
 ## Prerequisites
 

@@ -8797,8 +8797,8 @@ async def _auto_create_claude_terminal(
     # appended above, so the ``--`` stays first). Identity by default. This is
     # the same resolver the local-CLI native launch uses (see cli_native.py), so
     # both terminal-creation paths honour one config surface.
-    from omnigent.config import load_effective_config  # noqa: FlagLocalImports
-    from omnigent.harness_startup_config import (  # noqa: FlagLocalImports
+    from omnigent.config import load_effective_config
+    from omnigent.harness_startup_config import (
         resolve_harness_args,
         resolve_harness_command,
     )

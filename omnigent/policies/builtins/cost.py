@@ -1,69 +1,8 @@
-"""Built-in cost-budget policy.
+"""Built-in cost gates for session, subagent, daily, and period spend.
 
-A single factory, :func:`cost_budget`, that gates a session on its
-cumulative LLM spend (USD) at the **request** phase (before the LLM
-turn, so text-only turns are budgeted too) and the **tool-call** phase
-(the point a native ``PreToolUse`` hook can block before the action
-runs):
-
-- ``ask_thresholds_usd`` (optional, soft, **request + tool-call
-  phases**): a list of warning checkpoints. The first time the session's
-  ``total_cost_usd`` crosses each checkpoint, the turn (request phase) or
-  the tool call (tool-call phase) is parked for user approval (ASK). Each
-  checkpoint prompts at most once *per approval* — the highest-approved
-  checkpoint is remembered in ``session_state``, so approving lets spend
-  continue to the next checkpoint. A decline blocks that one turn / tool
-  call but does not record the checkpoint, so the next request or tool
-  call over the same threshold re-asks until it is approved. (Both phases
-  have a server-side approval round-trip that applies the ASK's
-  ``state_updates`` only on accept — the request phase parks the whole
-  turn before it reaches the model, so text-only turns are warned too.)
-- ``max_cost_usd`` (required, hard, **request + tool-call phases**): once
-  spend reaches this, the policy forces a model downgrade. Rather than
-  stopping the session, it DENYs **while the session is still on an
-  expensive model** (``expensive_models``) — the whole turn at the
-  request phase, or each tool call — telling the user to switch to a
-  cheaper model with ``/model``. Once the session has switched off an
-  expensive model it is allowed again — the budget becomes a "downgrade
-  gate," not a hard stop.
-
-It reads cumulative spend from
-``event["context"]["usage"]["total_cost_usd"]`` — the running session
-total maintained server-side (token-priced for relay/codex sessions,
-billed directly for claude-native) — and the active model from
-``event["context"]["model"]`` (the conversation's ``model_override`` or
-the agent spec's ``llm.model``, resolved by the policy engine). When a
-model has no catalog pricing, ``total_cost_usd`` is never written to the
-session, so the policy would score the session at ``$0`` and never
-enforce the budget. To prevent unpriced spend silently bypassing the cap,
-the gate **fails closed** when token usage is present but
-``total_cost_usd`` is absent: it returns DENY with a message asking the
-user to switch to a priced model.
-
-On the ``tool_call`` phase a DENY/ASK blocks that specific tool call
-(the native hook returns ``deny`` / parks for approval) rather than
-ending the session. On the ``request`` phase a DENY/ASK blocks the whole
-turn before the model runs — so text-only turns with no tool calls are
-budgeted (DENY) and warned (ASK) too; the verdict is surfaced straight
-to the user via the same server-side approval round-trip. Cost is
-refreshed at turn boundaries, so a single very expensive turn can still
-overshoot before the next check.
-
-YAML usage::
-
-    policies:
-      cost_budget:
-        type: function
-        function:
-          path: omnigent.policies.builtins.cost.cost_budget
-          arguments:
-            max_cost_usd: 5.0
-            ask_thresholds_usd: [1.0, 2.5]
-            expensive_models: ["opus", "gpt-5"]
-
-The factory must be referenced via ``function: {path, arguments}`` with
-a non-empty ``arguments`` block (the registry declares it
-``kind: "factory"``).
+See ``docs/POLICIES.md`` for configuration and gate behavior, and
+``docs/cost-budget-windows.md`` for per-user windows and approval persistence.
+Unknown pricing must require approval before untracked spend can continue.
 """
 
 from __future__ import annotations
@@ -365,8 +304,8 @@ class _ExpensiveModelConfig:
         active. Always ``True`` — including when the caller passes an
         empty ``expensive_models`` list, which means *all* models are
         blocked once over budget (see ``block_all_models``).
-    :param block_all_models: When ``True`` (set only when the caller
-        passes ``expensive_models=[]``) every model — not just a named
+    :param block_all_models: When ``True`` (the caller omits
+        ``expensive_models`` or passes ``[]``) every model — not just a named
         expensive tier — is blocked once the hard limit is reached.
         ``_model_blocked_over_budget`` short-circuits to ``True``
         regardless of the active model id.
@@ -421,16 +360,8 @@ def cost_budget(
 ) -> PolicyCallable:
     """Factory: gate a session on cumulative LLM spend (USD).
 
-    The hard limit (when set) gates BOTH the ``request`` phase (blocking
-    the whole turn before the LLM runs, so text-only turns are budgeted
-    too) and the ``tool_call`` phase: once the limit is reached, DENY
-    while the session is still on an expensive model — telling the user
-    to ``/model`` to a cheaper one. The soft warning checkpoints (ASK
-    "continue?"; recorded on approve so they don't re-prompt, re-asked
-    after a decline) fire on BOTH the ``request`` and ``tool_call``
-    phases — both have a server-side approval round-trip (see
-    ``evaluate``). Abstains (ALLOW) on every other phase and whenever
-    cost is unpriced (``0.0``).
+    Applies at request and tool-call boundaries. See ``docs/POLICIES.md``
+    for hard limits, soft checkpoints, and unpriced usage behavior.
 
     :param max_cost_usd: Optional hard limit in USD. Once cumulative
         session cost reaches this, tool calls are DENYed while the
@@ -586,32 +517,9 @@ def user_daily_cost_budget(
 ) -> PolicyCallable:
     """Factory: gate on the session OWNER's per-UTC-day LLM spend (USD).
 
-    Identical gating logic to :func:`cost_budget`, but the budget is the
-    session owner's **cumulative spend across all their sessions today
-    (UTC)** instead of this one session's spend. It reads
-    ``event["context"]["user_daily_cost"]`` (``cost_usd`` /
-    ``ask_approved_usd``), which the policy engine injects — at
-    engine-build time — only when this policy is configured (from the
-    ``user_daily_cost`` store, attributed to the session owner). The hard
-    limit and the soft warning checkpoints both gate the ``request`` phase
-    (before the LLM turn) and the ``tool_call`` phase (see
-    :func:`cost_budget`).
-
-    - **Soft (`ask_thresholds_usd`)**: the first time the owner's daily
-      spend crosses a checkpoint, the turn (request phase) or tool call
-      (tool-call phase) is parked for approval (ASK). The approval is
-      recorded **per user+day** (in ``user_daily_cost.ask_approved_usd``
-      via a reserved ``state_updates`` key the engine routes to that
-      store), so an approved checkpoint won't re-prompt the user again
-      that day — including from a different session. A decline blocks
-      that one turn / tool call and re-asks next time.
-    - **Hard (`max_cost_usd`)**: once the owner's daily spend reaches
-      the limit, DENY every tool call while the session is on an
-      ``expensive_models`` model (a ``/model`` downgrade gate, not a
-      stop); ALLOW once on a cheaper model.
-
-    Abstains (ALLOW) on every other phase, and whenever the daily cost
-    is ``0.0`` (no spend recorded, no owner, or pricing unavailable).
+    Uses :func:`cost_budget` gate semantics with the owner's daily records.
+    See ``docs/cost-budget-windows.md`` for record selection, approval
+    persistence, and the engine snapshot lifecycle.
 
     :param max_cost_usd: Hard daily limit in USD. Must be ``> 0``.
     :param ask_thresholds_usd: Optional soft daily warning checkpoints
@@ -938,31 +846,9 @@ def user_period_cost_budget(
 ) -> PolicyCallable:
     """Factory: gate on the session OWNER's per-period LLM spend (USD).
 
-    Unified policy that supports different time periods (day, week, month,
-    quarter, year). Identical gating logic to :func:`user_daily_cost_budget`,
-    but configurable for different granularities.
-
-    The budget is the session owner's **cumulative spend across all their
-    sessions for the current period (UTC)** instead of this one session's
-    spend. Each policy filters ``event["context"]["user_daily_cost"]``
-    to its own UTC window. Non-day approvals are read from
-    ``event["context"]["user_period_approvals"]`` by period and window start.
-
-    - **Soft (`ask_thresholds_usd`)**: the first time the owner's period
-      spend crosses a checkpoint, the turn (request phase) or tool call
-      (tool-call phase) is parked for approval (ASK). The approval is
-      recorded **per user+period** (in the appropriate store table via a
-      reserved ``state_updates`` key the engine routes), so an approved
-      checkpoint won't re-prompt the user again that period — including
-      from a different session. A decline blocks that one turn / tool
-      call and re-asks next time.
-    - **Hard (`max_cost_usd`)**: once the owner's period spend reaches
-      the limit, DENY every tool call while the session is on an
-      ``expensive_models`` model (a ``/model`` downgrade gate, not a
-      stop); ALLOW once on a cheaper model.
-
-    Abstains (ALLOW) on every other phase, and whenever the period cost
-    is ``0.0`` (no spend recorded, no owner, or pricing unavailable).
+    Uses :func:`cost_budget` gate semantics with the owner's daily records.
+    See ``docs/cost-budget-windows.md`` for window selection and approval
+    isolation. The ``day`` period shares the daily policy's approval state.
 
     :param period: UTC period: ``"day"``, ``"week"``, ``"month"``,
         ``"quarter"``, or ``"year"``. Multiple periods can coexist.

@@ -377,6 +377,15 @@ session-scoped events on the wire (see "Stream Events" below).
 |---|---|---|
 | Sessions (`/v1/sessions`) | Omnigent (ours) | No external reference. Purpose-built for agent-native workflows: live tail, queued input, interrupt. |
 
+### Retired in-place agent switching
+
+In v0.17.0, `POST /v1/sessions/{session_id}/switch-agent` returns **410 Gone**.
+The path remains reserved and is excluded from OpenAPI. To change agents,
+fork the session with `POST /v1/sessions/{session_id}/fork` and specify the
+target `agent_id`. The fork has a new session ID; it does not change the
+source session. See the [session feature map](../../feature-map/sessions.md#how-to-get-to-it-user-pov)
+for the UI entry points.
+
 ### Session Lifecycle States
 
 A session is always in one of these states:
@@ -639,7 +648,10 @@ already uploaded or registered an agent. The response is the full
     runner has them on the session row before it auto-launches the
     harness. For Codex, process-wide config flags initialize the app-server
     and are reused by the attached terminal UI; terminal-only and thread
-    options remain on the terminal path. The flat-list shape is the security
+    options remain on the terminal path. Codex startup rejects caller-supplied
+    `app-server`, `--listen`, `--remote`, and `--remote-control` transport
+    tokens; the runner owns that wiring. Option values and prompt text after
+    `--` are not treated as transport tokens. The flat-list shape is the security
     boundary — no key for a caller to smuggle launch wiring (bridge
     dir, Omnigent URL, auth), which stay runner-owned. Bounds (count /
     length) are validated server-side; a malformed list returns 400.

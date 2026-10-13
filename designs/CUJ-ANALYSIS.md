@@ -79,8 +79,8 @@ Most server logic lives in the (huge) `omnigent/server/routes/sessions.py` + `st
   `up_to_response_id` truncation), clones agent (optional harness switch resets model if cross-family), drops
   instance-scoped labels (bridge_id, context_tokens). Native target rebuilds transcript from `FORK_CARRY_HISTORY`
   label. ⚠️ can't fork a sub-agent (400); cross-family model invalid → ignored w/ warning.
-- **Switch agent in place** — `POST /sessions/{id}/switch-agent` (`:15012`); **idle-only (409 if running)**;
-  remembers previous for "switch back"; clears native `external_session_id` → next turn rebuilds.
+- **Change agent** — see [retired in-place agent switching](../omnigent/server/API.md#retired-in-place-agent-switching)
+  and the [fork entry points](../feature-map/sessions.md#how-to-get-to-it-user-pov).
 - **Disconnect → reconnect** — stream ends with `[DONE]` on all exit paths; reconnect re-runs snapshot+tail;
   presence `idle` flip via param; `_poll_request_disconnect` (`:1093`) detects hangup.
 - **Close / archive** — `PATCH /sessions/{id}` archived=true (owner-only); `is_session_closed()`
@@ -279,7 +279,7 @@ React app under `web/src/` (note: renamed from `ap-web/` upstream). TUI/REPL und
   inline (`InlineTerminalsSection.tsx`). [→ 2.C]
 - **Subagents rail** — `shell/SubagentsPanel.tsx`, `hooks/useChildSessions.ts`; tree by depth; click to navigate;
   manual create via `AddAgentDialog.tsx`. [→ 2.F]
-- **Switch agent / model / harness** — `SwitchAgentDialog.tsx`; `/model` & `/effort` slash commands
+- **Change model / harness** — `/model` & `/effort` slash commands
   (`SlashCommandMenu.tsx`); harness selector in NewChatDialog (localStorage per agent, `lib/modePreferences.ts`).
 - **Settings** — theme, keyboard shortcuts, account/password (`accounts_enabled`), archived sessions.
 - **Policies page** — `pages/PoliciesPage.tsx` (`/policies`, admin). [→ 2.D]
@@ -460,7 +460,7 @@ in-pane `/effort` back to the session row.
 | Component | REST out | SSE/WS out | SSE/WS in | persists? |
 |---|---|---|---|---|
 | TUI/REPL | `POST /sessions`, `/events`, `GET /sessions/{id}`, control POSTs (interrupt/approval) | — | SSE `/sessions/{id}/stream` | n/a |
-| WebUI | `POST /sessions` `/events` `/fork` `/switch-agent`, `PATCH /sessions/{id}`, `/elicitations/{id}/resolve`, `GET /sessions` `/items` `/projects` `/policy-registry` `/info` `/users/search` | — | SSE `/sessions/{id}/stream`; `WS /sessions/updates`; `WS /health/subscribe` | n/a |
+| WebUI | `POST /sessions` `/events` `/fork`, `PATCH /sessions/{id}`, `/elicitations/{id}/resolve`, `GET /sessions` `/items` `/projects` `/policy-registry` `/info` `/users/search` | — | SSE `/sessions/{id}/stream`; `WS /sessions/updates`; `WS /health/subscribe` | n/a |
 | Runner | callbacks → server: `/events`, `external_*`, `/policies/evaluate`, agent-bundle GET (all over WS tunnel) | turn events over WS tunnel | WS tunnel (forwarded user events) | durable conversation items |
 | Server | — | SSE `response.*` / `session.*`; WS updates + health | client REST + runner tunnel | conversation history (source of truth) |
 | Harness | — | (via runner) | (via runner) | native: reasoning + transcript mirrored; SDK: 100% omni |

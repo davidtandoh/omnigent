@@ -159,11 +159,11 @@ class EventContext(TypedDict, total=False):
         its descendants. Present when subagent cost enforcement is enabled.
     :param user_daily_cost: List of the session owner's daily cost records.
         Each record contains ``cost_usd``, ``ask_approved_usd``, ``day_utc``,
-        and ``user_id``. For daily budgets, this contains a single record
-        (today). For period budgets (week/month/quarter/year), this contains
-        all daily records in the period, which the policy aggregates to
-        compute the period total. Present only when a cost-budget policy is
-        configured; read via ``event["context"]["user_daily_cost"]``.
+        and ``user_id``. This is a shared seed, not a prefiltered total for
+        the receiving policy. See ``docs/cost-budget-windows.md`` for window
+        selection and snapshot refresh behavior.
+    :param user_period_approvals: Non-day approvals keyed by period and
+        window start. See ``docs/cost-budget-windows.md`` for persistence.
     :param model: The model the session is currently using —
         the conversation's ``model_override`` when set (e.g. via a
         mid-session ``/model`` change), else the agent spec's
