@@ -291,6 +291,11 @@ omnigent hermes                      # Hermes Agent (Nous Research)
 omnigent pi                          # Pi
 ```
 
+For machine-readable runtime discovery, see the
+[runtime launch contract](docs/runtime-launch-contract.md). For durable Codex
+launch bindings and exact reattachment, see
+[session custody](docs/session-custody.md#firstmate-launch-binding-and-reattachment).
+
 Claude, Codex, Kiro, and Antigravity can receive explicit variables in the
 native terminal that Omnigent creates:
 
@@ -398,6 +403,10 @@ omnigent start   # starts the local server and registers this machine as a host
 Open the server URL it prints, hit **New Chat**, pick your machine, and go.
 Check status with `omnigent server status`; stop everything with
 `omnigent stop`.
+
+To keep admitted native sessions running during API or host maintenance, use
+the [maintenance operations](docs/session-custody.md#maintenance-and-intentional-end).
+That reference defines the supported scope and distinguishes detach from end.
 
 <a id="fixed-local-backend-port"></a>
 

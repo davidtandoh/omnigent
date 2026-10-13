@@ -2213,6 +2213,11 @@ class CodexNativeAppServer:
 
         :returns: None.
         """
+        from omnigent.runner.custody import current_custody
+
+        custody = current_custody()
+        receipt = custody.record.helpers.get("codex_app_server") if custody is not None else None
+        owned = receipt is not None and self.proc is not None and receipt.pid == self.proc.pid
         if self.proc is not None and self.proc.returncode is None:
             _terminate_process_tree(self.proc)
             try:
@@ -2220,6 +2225,8 @@ class CodexNativeAppServer:
             except asyncio.TimeoutError:
                 _kill_process_tree(self.proc)
                 await self.proc.wait()
+        if owned and custody is not None and receipt is not None:
+            custody.retire_helper("codex_app_server", receipt)
         if self.process_registry_tag is not None:
             unregister_codex_native_process(self.process_registry_tag)
         if self.process_owner_lock is not None:

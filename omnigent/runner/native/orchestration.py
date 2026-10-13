@@ -5201,6 +5201,12 @@ async def _auto_create_codex_terminal(
     app_server.listen_url = codex_ws_url
     await app_server.start()
     _AUTO_CODEX_APP_SERVERS[session_id] = app_server
+    from omnigent.runner.custody import current_custody
+
+    custody = current_custody()
+    if custody is not None and custody.record.session_id == session_id:
+        assert app_server.proc is not None
+        custody.publish_helper("codex_app_server", app_server.proc.pid)
 
     event_client = CodexAppServerClient(
         ws_url=codex_ws_url,
@@ -8462,8 +8468,8 @@ async def _auto_create_claude_terminal(
     # appended above, so the ``--`` stays first). Identity by default. This is
     # the same resolver the local-CLI native launch uses (see cli_native.py), so
     # both terminal-creation paths honour one config surface.
-    from omnigent.config import load_effective_config  # noqa: FlagLocalImports
-    from omnigent.harness_startup_config import (  # noqa: FlagLocalImports
+    from omnigent.config import load_effective_config
+    from omnigent.harness_startup_config import (
         resolve_harness_args,
         resolve_harness_command,
     )

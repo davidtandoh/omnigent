@@ -424,7 +424,8 @@ def run_codex_native(
     prompt: str | None = None,
     auto_open_conversation: bool = False,
     launch_env: dict[str, str] | None = None,
-) -> None:
+    binding_json: bool = False,
+) -> dict[str, object] | None:
     """
     Launch Codex TUI in an Omnigent terminal.
 
@@ -439,7 +440,8 @@ def run_codex_native(
     :param prompt: Optional first prompt to send after launch.
     :param auto_open_conversation: When ``True``, open the
         browser conversation URL after the session is prepared.
-    :returns: None after the terminal attach session ends.
+    :param binding_json: Return a verified binding without attaching a TTY.
+    :returns: The binding in binding mode; otherwise None after attachment ends.
     :raises click.ClickException: If setup fails.
     """
     codex_args = _normalize_extra_args(
@@ -456,7 +458,7 @@ def run_codex_native(
         )
     with TemporaryDirectory(prefix="omnigent-codex-native-") as tmpdir:
         spec_path = _materialize_codex_agent_spec(Path(tmpdir), model=model)
-        _run_with_remote_server(
+        return _run_with_remote_server(
             server.rstrip("/"),
             spec_path,
             session_id=session_id,
@@ -466,7 +468,40 @@ def run_codex_native(
             prompt=prompt,
             auto_open_conversation=auto_open_conversation,
             launch_env=launch_env,
+            binding_json=binding_json,
         )
+
+
+def reattach_codex_binding(binding_path: Path, *, json_output: bool) -> None:
+    from omnigent.native.state_files import canonical_json, read_regular_file
+    from omnigent.process_logging import data_dir
+    from omnigent.runner.custody import CustodyError, SessionBinding, verify_session_binding
+
+    try:
+        expected = SessionBinding.model_validate_json(read_regular_file(binding_path, limit=65536))
+    except (OSError, ValueError) as exc:
+        raise CustodyError("record_mismatch") from exc
+    binding = verify_session_binding(data_dir(), expected)
+    if json_output:
+        click.echo(canonical_json(binding.model_dump(mode="json")), nl=False)
+        return
+    prepared = PreparedCodexTerminal(
+        session_id=binding.session_id,
+        terminal_id=codex_terminal_resource_id(),
+        tmux_socket=Path(binding.terminal.socket),
+        tmux_target="main",
+        bridge_dir=bridge_dir_for_bridge_id(binding.session_id),
+        thread_id=None,
+        app_server_url=None,
+        app_server=None,
+        event_client=None,
+        reattached=True,
+    )
+    asyncio.run(
+        _attach_terminal_resource(
+            base_url=binding.endpoint, headers={}, prepared=prepared, recover=None
+        )
+    )
 
 
 def _record_launch_for_fresh_session(session_id: str) -> None:
@@ -777,7 +812,8 @@ def _run_with_remote_server(
     prompt: str | None,
     auto_open_conversation: bool = False,
     launch_env: dict[str, str] | None = None,
-) -> None:
+    binding_json: bool = False,
+) -> dict[str, object] | None:
     """
     Launch Codex on an Omnigent server via a daemon-spawned runner.
 
@@ -791,7 +827,8 @@ def _run_with_remote_server(
     :param prompt: Optional first prompt.
     :param auto_open_conversation: When ``True``, open the
         browser conversation URL after the session is prepared.
-    :returns: None.
+    :param binding_json: Return a verified binding without attaching a TTY.
+    :returns: The binding in binding mode; otherwise None.
     """
     from omnigent.chat import _bundle_agent, _remote_headers, _server_auth
     from omnigent.cli import _ensure_host_daemon
@@ -811,15 +848,15 @@ def _run_with_remote_server(
             resume_picker=resume_picker,
         )
         if resolved_session_id is None and resume_picker and session_id is None:
-            return
+            return None
         if resolved_session_id is not None:
             _align_working_directory_with_session(resolved_session_id)
 
-        async def _drive() -> None:
+        async def _drive() -> dict[str, object] | None:
             """
             Prepare Codex and attach in a single event loop.
 
-            :returns: None.
+            :returns: The binding in binding mode; otherwise None.
             """
             with runner_startup_progress(initial_message="Preparing Codex...") as progress:
                 _update_startup_progress(progress, "Connecting to local daemon...")
@@ -837,6 +874,28 @@ def _run_with_remote_server(
                     startup_progress=progress,
                     launch_env=launch_env,
                 )
+            if binding_json:
+                from omnigent.process_logging import data_dir
+                from omnigent.runner.custody import CustodyError, session_binding
+
+                binding = session_binding(data_dir(), prepared.session_id)
+                if (
+                    binding.host_id != host_id
+                    or binding.endpoint != base_url
+                    or binding.workspace != str(Path.cwd().resolve())
+                    or str(prepared.tmux_socket) != binding.terminal.socket
+                    or prepared.tmux_target != "main"
+                ):
+                    raise CustodyError("binding_mismatch")
+                if prompt:
+                    await _post_initial_prompt(
+                        base_url=base_url,
+                        headers=headers,
+                        session_id=prepared.session_id,
+                        prompt=prompt,
+                        auth=attach_auth,
+                    )
+                return binding.model_dump(mode="json")
             if resolved_session_id is None:
                 _record_launch_for_fresh_session(prepared.session_id)
             click.echo(f"Web UI: {conversation_url(base_url, prepared.session_id)}", err=True)
@@ -882,8 +941,9 @@ def _run_with_remote_server(
                     ),
                     server=base_url,
                 )
+            return None
 
-        asyncio.run(_drive())
+        return asyncio.run(_drive())
     except httpx.ConnectError as exc:
         raise click.ClickException(
             f"Could not reach the omnigent server at {base_url}. "

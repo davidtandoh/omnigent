@@ -111,6 +111,7 @@ from omnigent.host.identity import HostIdentity, load_or_create_host_identity
 from omnigent.host.maintenance import HostMaintenanceJanitor
 from omnigent.host.runner_zygote import ZygoteManager, ZygoteRunnerProc, ZygoteUnavailable
 from omnigent.inner import _proc
+from omnigent.native.launch_environment import native_launch_environment_digest
 from omnigent.onboarding.harness_auth import (
     adopt_env_credential,
     detect_adoptable_credentials,
@@ -132,6 +133,7 @@ from omnigent.process_logging import (
     PROCESS_LOG_FILE_ENV_VAR,
     child_logging_popen_kwargs,
     configure_process_logging,
+    data_dir,
     display_log_path,
     env_truthy,
     open_process_log_file,
@@ -140,6 +142,18 @@ from omnigent.process_logging import (
     should_log_to_stderr,
 )
 from omnigent.runner._zygote import ZYGOTE_ENABLED_ENV_VAR
+from omnigent.runner.custody import (
+    CUSTODY_ENV_VAR,
+    SUPPORTED_HARNESSES,
+    CustodyError,
+    CustodyProcess,
+    SessionAttachment,
+    custody_records,
+    custody_session_key,
+    host_config_digest,
+    locked_session_owner,
+    make_custody_context,
+)
 from omnigent.runner.identity import (
     RUNNER_CONNECT_MARKER_ENV_VAR,
     RUNNER_DELEGATED_AUTH_ENV_VAR,
@@ -444,9 +458,8 @@ _RECYCLE_PROMPT_MAX_STREAK = 10
 # Fresh hosts get a short auth-retry window for Databricks OAuth refreshes.
 # Established hosts retry auth failures indefinitely to preserve sessions.
 _MAX_CONSECUTIVE_AUTH_ERRORS = 3
-# Consecutive connection-refused failures against a loopback server before the
-# host exits (~5 minutes at the backoff cap). Refused on loopback means no
-# process listens on the port — the local server is gone, not unreachable.
+# Initial loopback connection refusals before the host exits. A previously
+# connected host retries beyond this limit so API maintenance preserves sessions.
 _LOOPBACK_REFUSED_FATAL_ATTEMPTS = 100
 
 # Consecutive post-connect 401/403 (or 404) rejections (~90 s at the backoff
@@ -1061,11 +1074,13 @@ class _RunnerHandle:
         or superseded launches, even after the exit watcher pops them.
     """
 
-    proc: subprocess.Popen[bytes] | ZygoteRunnerProc
+    proc: subprocess.Popen[bytes] | ZygoteRunnerProc | CustodyProcess
     log_path: Path
     session_id: str | None = None
     connect_marker: Path | None = None
     stop_requested: bool = False
+    durable: bool = False
+    environment_digest: str | None = None
 
 
 class HostRetryableConnectionError(Exception):
@@ -1116,6 +1131,11 @@ class HostProcess:
             self._interactive_shells = ["bash"]
         self._harness_tmp_parent = resolve_harness_tmp_parent()
         self._runners: dict[str, _RunnerHandle] = {}
+        import uuid
+
+        self._attachment_generation = uuid.uuid4().hex
+        self._custody_attachments: dict[str, SessionAttachment] = {}
+        self._custody_refusals: dict[str, str] = {}
         from omnigent.host.skills import HostSkillDiscovery
 
         self._skill_discovery = HostSkillDiscovery(self._fetch_skill_bundle)
@@ -1785,6 +1805,59 @@ class HostProcess:
             ``"failed"`` result. Deterministic preflight refusals
             include a machine-readable ``error_code``.
         """
+        durable = IS_POSIX and frame.harness in SUPPORTED_HARNESSES and bool(frame.session_id)
+        if IS_POSIX and frame.session_id:
+            try:
+                self._adopt_custodied_runners()
+            except (CustodyError, OSError, ValueError) as exc:
+                return self._launch_failed(
+                    frame,
+                    "Session custody refused",
+                    error_code=str(exc) if isinstance(exc, CustodyError) else "record_mismatch",
+                )
+            if category := self._custody_refusals.get(custody_session_key(frame.session_id)):
+                return self._launch_failed(frame, "Session custody refused", error_code=category)
+            existing = next(
+                (
+                    handle
+                    for handle in self._runners.values()
+                    if handle.session_id == frame.session_id and handle.durable
+                ),
+                None,
+            )
+            if existing is not None:
+                if not durable:
+                    return self._launch_failed(
+                        frame,
+                        "End the live session before changing its harness",
+                        error_code="harness_mismatch",
+                    )
+                requested = token_bound_runner_id(frame.binding_token)
+                if requested not in self._runners or self._runners[requested] is not existing:
+                    return self._launch_failed(
+                        frame,
+                        "A live session already has a runner binding",
+                        error_code="binding_mismatch",
+                    )
+                if frame.native_env is not None:
+                    try:
+                        digest = native_launch_environment_digest(frame.native_env)
+                    except ValueError:
+                        return self._launch_failed(
+                            frame,
+                            "Native environment identity refused",
+                            error_code="config_mismatch",
+                        )
+                    if digest != existing.environment_digest:
+                        return self._launch_failed(
+                            frame,
+                            "A live native environment cannot be changed",
+                            error_code="config_mismatch",
+                        )
+                return HostLaunchRunnerResultFrame(
+                    request_id=frame.request_id, status="launched", runner_id=requested
+                )
+
         # Refuse to spawn for a harness this machine can't actually run —
         # otherwise the runner starts, the session looks alive, and the
         # first turn dies confusingly inside the executor. ``None`` (an
@@ -1860,6 +1933,29 @@ class HostProcess:
                     frame, f"Cannot install session inference config: {exc}"
                 )
             env["OMNIGENT_INFERENCE_CONFIG"] = str(inference_path)
+        environment_digest = None
+        if durable:
+            assert frame.session_id is not None
+            try:
+                context = make_custody_context(
+                    session_id=frame.session_id,
+                    runner_id=runner_id,
+                    host_id=self._identity.host_id,
+                    endpoint=self._server_url,
+                    workspace=str(workspace),
+                    native_env=frame.native_env or {},
+                    inference_path=Path(env["OMNIGENT_INFERENCE_CONFIG"])
+                    if "OMNIGENT_INFERENCE_CONFIG" in env
+                    else None,
+                )
+                env[CUSTODY_ENV_VAR] = json.dumps(context, sort_keys=True, separators=(",", ":"))
+                environment_digest = str(context["environment_digest"])
+            except (OSError, ValueError):
+                return self._launch_failed(
+                    frame,
+                    "Cannot verify session custody configuration",
+                    error_code="config_mismatch",
+                )
         # The runner serves one primary session (plus any co-located subagents);
         # pass it so runner-level log records can be attributed to that session.
         if frame.session_id:
@@ -1947,6 +2043,8 @@ class HostProcess:
             log_path=log_path,
             session_id=frame.session_id or None,
             connect_marker=_connect_marker_path(log_path),
+            durable=durable,
+            environment_digest=environment_digest,
         )
         watcher = asyncio.create_task(self._watch_runner(runner_id))
         self._watcher_tasks.add(watcher)
@@ -2045,7 +2143,8 @@ class HostProcess:
             # The runner and host watchdog share this per-launch marker.
             env[RUNNER_CONNECT_MARKER_ENV_VAR] = str(_connect_marker_path(log_path))
 
-            zygote = self._ensure_zygote_started()
+            # A durable runner is the session owner, independent of the replaceable zygote.
+            zygote = None if CUSTODY_ENV_VAR in env else self._ensure_zygote_started()
             if zygote is not None:
                 try:
                     # The runner's OS parent will be the zygote, so its
@@ -2108,6 +2207,7 @@ class HostProcess:
                     stdin=subprocess.DEVNULL,
                     stdout=log_fh,
                     stderr=log_fh,
+                    start_new_session=CUSTODY_ENV_VAR in env,
                     **logging_kwargs,
                 )
             return proc, log_path
@@ -2158,19 +2258,52 @@ class HostProcess:
         :param frame: The stop request frame.
         :returns: Result frame with status.
         """
-        handle = self._runners.pop(frame.runner_id, None)
+        handle = self._runners.get(frame.runner_id)
         if handle is None:
             return HostStopRunnerResultFrame(
                 request_id=frame.request_id,
                 status="failed",
                 error=f"unknown runner: {frame.runner_id}",
             )
-        handle.stop_requested = True
-        # The poll/terminate/wait round-trips are lock-free waitpid calls for a
-        # direct-Popen runner, but blocking control-socket exchanges for a
-        # zygote-forked one — run them off the loop so a wedged zygote can't
-        # freeze the daemon's control handler.
-        await self._stop_runner_and_trigger(handle.proc, "runner_stopped")
+        with contextlib.ExitStack() as operation:
+            try:
+                if frame.session_id is not None:
+                    if handle.durable:
+                        from omnigent.native.owner_claim import ProcessIdentity
+
+                        record = operation.enter_context(
+                            locked_session_owner(data_dir(), frame.session_id)
+                        )
+                        if (
+                            record.state == "ended"
+                            or record.runner_id != frame.runner_id
+                            or self._identity is None
+                            or record.host_id != self._identity.host_id
+                            or record.endpoint != self._server_url
+                            or record.owner != ProcessIdentity.capture(handle.proc.pid)
+                        ):
+                            raise CustodyError("scope_mismatch")
+                        if record.config_digest != host_config_digest():
+                            raise CustodyError("config_mismatch")
+                    elif handle.session_id != frame.session_id:
+                        raise CustodyError("scope_mismatch")
+            except (CustodyError, OSError, ValueError, psutil.Error) as exc:
+                return HostStopRunnerResultFrame(
+                    request_id=frame.request_id,
+                    status="failed",
+                    error=str(exc) if isinstance(exc, CustodyError) else "record_mismatch",
+                )
+            self._runners.pop(frame.runner_id)
+            handle.stop_requested = True
+            # The poll/terminate/wait round-trips are lock-free waitpid calls for a
+            # direct-Popen runner, but blocking control-socket exchanges for a
+            # zygote-forked one — run them off the loop so a wedged zygote can't
+            # freeze the daemon's control handler.
+            await self._stop_runner_and_trigger(handle.proc, "runner_stopped")
+        if handle.session_id is not None:
+            attachment = self._custody_attachments.pop(handle.session_id, None)
+            if attachment is not None:
+                attachment.__exit__(None, None, None)
         _logger.info("Stopped runner %s", frame.runner_id)
         print(
             f"  ↓ Runner stopped: {frame.runner_id}",
@@ -2222,7 +2355,7 @@ class HostProcess:
 
     async def _stop_runner_and_trigger(
         self,
-        proc: subprocess.Popen[bytes] | ZygoteRunnerProc,
+        proc: subprocess.Popen[bytes] | ZygoteRunnerProc | CustodyProcess,
         reason: str,
     ) -> None:
         """Finish runner termination before triggering host maintenance."""
@@ -2238,14 +2371,16 @@ class HostProcess:
                 self._trigger_maintenance(reason)
 
     @staticmethod
-    def _stop_runner_proc(proc: subprocess.Popen[bytes] | ZygoteRunnerProc) -> None:
+    def _stop_runner_proc(
+        proc: subprocess.Popen[bytes] | ZygoteRunnerProc | CustodyProcess,
+    ) -> None:
         """Terminate a runner: SIGTERM, brief wait, then SIGKILL. Blocking.
 
         Runs on a worker thread (see :meth:`_handle_stop`) because for a
         zygote-forked runner these are blocking control-socket round-trips, not
         lock-free waitpid calls.
 
-        :param proc: The runner process handle (Popen or zygote shim).
+        :param proc: Child, zygote or verified custody process handle.
         """
         if proc.poll() is not None:
             return
@@ -2297,8 +2432,23 @@ class HostProcess:
         while pending := self._pending_runner_launches.get(frame.runner_id):
             # Shield shared completions from a status request's cancellation.
             await asyncio.shield(asyncio.gather(*pending, return_exceptions=True))
+        if IS_POSIX:
+            try:
+                self._adopt_custodied_runners()
+            except (CustodyError, OSError, ValueError):
+                return HostRunnerStatusResultFrame(request_id=frame.request_id, status="refused")
         handle = self._runners.get(frame.runner_id)
-        if handle is None:
+        if frame.session_id and (
+            custody_session_key(frame.session_id) in self._custody_refusals
+            or (handle is not None and handle.session_id != frame.session_id)
+            or any(
+                runner_id != frame.runner_id and owned.session_id == frame.session_id
+                for runner_id, owned in self._runners.items()
+                if owned.durable
+            )
+        ):
+            status = "refused"
+        elif handle is None:
             status = "unknown"
         else:
             # poll() is a lock-free waitpid for a direct-Popen runner, but a
@@ -2344,6 +2494,10 @@ class HostProcess:
             # an intentional termination, not a crash to report.
             return
         self._runners.pop(runner_id)
+        if handle.session_id is not None:
+            attachment = self._custody_attachments.pop(handle.session_id, None)
+            if attachment is not None:
+                attachment.__exit__(None, None, None)
         self._trigger_maintenance("runner_exited")
         if handle.proc.returncode == 0:
             never_connected = handle.connect_marker is not None and not await asyncio.to_thread(
@@ -3827,6 +3981,13 @@ class HostProcess:
             self._lifecycle_task = asyncio.create_task(
                 self._lifecycle_monitor_loop(), name="host-lifecycle-monitor"
             )
+        if IS_POSIX:
+            try:
+                self._adopt_custodied_runners()
+            except (CustodyError, OSError, ValueError) as exc:
+                if self._lifecycle_lock is not None:
+                    self._lifecycle_lock.release()
+                raise HostConnectError("Session custody adoption refused") from exc
         try:
             self._maintenance_janitor = HostMaintenanceJanitor.for_host(
                 harness_tmp_parent=self._harness_tmp_parent
@@ -3894,12 +4055,14 @@ class HostProcess:
                         # The 404 streak counts CONSECUTIVE restart-window
                         # rejections only, so escalation reflects one outage.
                         self._transient_404_streak = 0
-                    # Refused on loopback is decisive: nothing listens on the
-                    # port and no network path can heal it, so bound the
-                    # retries. Remote refusals retry forever (outages recover).
+                    # Bound an unproven loopback endpoint. A previously connected
+                    # endpoint can recover after maintenance, so retain its runners.
                     if _connection_refused(exc) and _url_is_loopback(self._server_url):
                         self._refused_streak += 1
-                        if self._refused_streak >= _LOOPBACK_REFUSED_FATAL_ATTEMPTS:
+                        if (
+                            not self._ever_connected
+                            and self._refused_streak >= _LOOPBACK_REFUSED_FATAL_ATTEMPTS
+                        ):
                             _logger.error(
                                 "Giving up: %s refused %d consecutive connection "
                                 "attempts — no server is listening there anymore. "
@@ -3914,6 +4077,11 @@ class HostProcess:
                                 "address anymore. Start the server, then run "
                                 f"`{cli_invocation()} host` again."
                             ) from exc
+                        if self._refused_streak == _LOOPBACK_REFUSED_FATAL_ATTEMPTS:
+                            _logger.warning(
+                                "Local endpoint remains unavailable; preserving runners "
+                                "and retrying on bounded backoff"
+                            )
                     else:
                         self._refused_streak = 0
                     # An accepted upgrade that died without one inbound frame
@@ -4075,9 +4243,8 @@ class HostProcess:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await watcher
             self._cleanup_runners()
-            # Final drain: _cleanup_runners has just reaped the tracked
-            # runners via Popen, so any of their still-orphaned tool
-            # grandchildren are now reapable and no tracked pid can be stolen.
+            # Reap orphaned children after stopping attachment-owned runners.
+            # Durable owners retain their live resources.
             self._reap_orphans_once()
             # Stop the runner zygote last: its forked children were just
             # terminated above, and closing its control socket lets it exit.
@@ -4085,9 +4252,8 @@ class HostProcess:
                 with contextlib.suppress(Exception):
                     self._zygote.stop()
                 self._zygote = None
-            # Release ownership only after runner termination. A replacement
-            # daemon starts its cleanup after acquiring this lock, making the
-            # old-host/new-host handoff a deterministic startup-sweep barrier.
+            # Release host ownership after runner cleanup and custody detach.
+            # A replacement daemon acquires this lock before its startup sweep.
             if self._lifecycle_lock is not None:
                 self._lifecycle_lock.release()
 
@@ -4129,20 +4295,92 @@ class HostProcess:
                 transport.abort()
 
     def _cleanup_runners(self) -> None:
-        """Terminate all live runners on shutdown.
+        """Detach durable sessions and terminate attachment-owned runners.
 
         :returns: None.
         """
         for runner_id, handle in self._runners.items():
+            if handle.durable:
+                continue
             if handle.proc.poll() is None:
                 _logger.info("Terminating runner %s on shutdown", runner_id)
                 handle.proc.terminate()
         for handle in self._runners.values():
+            if handle.durable:
+                continue
             try:
                 handle.proc.wait(timeout=5.0)
             except subprocess.TimeoutExpired:
                 handle.proc.kill()
         self._runners.clear()
+        for attachment in self._custody_attachments.values():
+            attachment.__exit__(None, None, None)
+        self._custody_attachments.clear()
+
+    def _adopt_custodied_runners(self) -> None:
+        """Attach once to exact live owners in this host and endpoint scope."""
+        from omnigent.process_logging import data_dir
+
+        base = data_dir()
+        config_digest = host_config_digest()
+        self._custody_refusals.clear()
+        for record in custody_records(base, refusals=self._custody_refusals):
+            if record.host_id != self._identity.host_id or record.endpoint != self._server_url:
+                continue
+            if record.session_id in self._custody_attachments:
+                continue
+            attachment = SessionAttachment(
+                base, record.session_id, generation=self._attachment_generation
+            )
+            try:
+                attachment.__enter__()
+                adopted = attachment.adopt(
+                    host_id=self._identity.host_id,
+                    endpoint=self._server_url,
+                    config_digest=config_digest,
+                )
+                handle = self._runners.get(record.runner_id)
+                if handle is not None:
+                    from omnigent.native.owner_claim import ProcessIdentity
+
+                    if (
+                        not handle.durable
+                        or ProcessIdentity.capture(handle.proc.pid) != adopted.owner
+                    ):
+                        raise CustodyError("binding_mismatch")
+                    if handle.session_id is not None and handle.session_id != record.session_id:
+                        previous = self._custody_attachments.get(handle.session_id)
+                        if previous is not None:
+                            previous.__exit__(None, None, None)
+                            del self._custody_attachments[handle.session_id]
+                    handle.session_id = record.session_id
+                    if isinstance(handle.proc, CustodyProcess):
+                        handle.proc = CustodyProcess(
+                            adopted, record_path=attachment.directory / "session.json"
+                        )
+            except (CustodyError, OSError, ValueError, psutil.Error) as exc:
+                attachment.__exit__(None, None, None)
+                category = str(exc) if isinstance(exc, CustodyError) else "record_mismatch"
+                self._custody_refusals[custody_session_key(record.session_id)] = category
+                _logger.warning("Session %s custody refused: %s", record.session_id, category)
+                continue
+            except BaseException:
+                attachment.__exit__(None, None, None)
+                raise
+            self._custody_attachments[record.session_id] = attachment
+            if record.runner_id not in self._runners:
+                self._runners[record.runner_id] = _RunnerHandle(
+                    proc=CustodyProcess(
+                        adopted, record_path=attachment.directory / "session.json"
+                    ),
+                    log_path=base / "logs" / "runner" / "custodian.log",
+                    session_id=record.session_id,
+                    durable=True,
+                    environment_digest=adopted.environment_digest,
+                )
+                task = asyncio.create_task(self._watch_runner(record.runner_id))
+                self._watcher_tasks.add(task)
+                task.add_done_callback(self._watcher_tasks.discard)
 
     async def _connect_and_serve(self) -> None:
         """Single connection attempt: connect, hello, serve.

@@ -295,7 +295,9 @@ class TerminalRegistry:
 
         if instance_to_close is not None:
             try:
-                await asyncio.wait_for(instance_to_close.close(), timeout=_CLOSE_TIMEOUT_S)
+                await asyncio.wait_for(
+                    self._close_instance(instance_to_close), timeout=_CLOSE_TIMEOUT_S
+                )
             except asyncio.TimeoutError:
                 logger.warning(
                     "Race-loser terminal close timed out for %s:%s in conv %s",
@@ -303,6 +305,23 @@ class TerminalRegistry:
                     session_key,
                     conversation_id,
                 )
+        from omnigent.runner.custody import current_custody
+
+        custody = current_custody()
+        if custody is not None and custody.record.session_id == conversation_id:
+
+            def _publish_custody() -> None:
+                pane_pid = winning_instance.pane_pid_sync()
+                if pane_pid is None:
+                    raise RuntimeError("unavailable_probe")
+                import psutil
+
+                tmux_pid = psutil.Process(pane_pid).ppid()
+                custody.publish_terminal(
+                    terminal_name, session_key, winning_instance.socket_path, tmux_pid, pane_pid
+                )
+
+            await asyncio.to_thread(_publish_custody)
         return winning_instance
 
     def get_instance_lock(
@@ -445,6 +464,16 @@ class TerminalRegistry:
                     f"conversation {target_conversation_id!r}"
                 )
 
+            from omnigent.runner.custody import CustodyError, current_custody
+
+            custody = current_custody()
+            if custody is not None and key == ("codex", "main"):
+                try:
+                    custody.transfer_session(
+                        source_conversation_id, target_conversation_id, instance.socket_path
+                    )
+                except CustodyError as exc:
+                    raise RuntimeError(f"Session custody refused: {exc}") from exc
             source_slot.pop(key)
             if not source_slot:
                 self._by_conversation.pop(source_conversation_id, None)
@@ -453,6 +482,22 @@ class TerminalRegistry:
             lock = self._instance_locks.pop(source_lock_key, None)
             self._instance_locks[target_lock_key] = lock or threading.Lock()
         return True
+
+    async def _close_instance(self, instance: TerminalInstance) -> None:
+        from omnigent.runner.custody import current_custody
+
+        custody = current_custody()
+        receipt = (
+            next(
+                (r for r in custody.record.terminals if r.socket == str(instance.socket_path)),
+                None,
+            )
+            if custody is not None
+            else None
+        )
+        await instance.close()
+        if custody is not None and receipt is not None:
+            custody.retire_terminal(receipt)
 
     async def close(
         self,
@@ -503,7 +548,7 @@ class TerminalRegistry:
         if instance is None:
             return False
         try:
-            await asyncio.wait_for(instance.close(), timeout=_CLOSE_TIMEOUT_S)
+            await asyncio.wait_for(self._close_instance(instance), timeout=_CLOSE_TIMEOUT_S)
         except asyncio.TimeoutError:
             logger.warning(
                 "Terminal close timed out for %s:%s in conv %s",
@@ -545,7 +590,7 @@ class TerminalRegistry:
             return
         for (name, key), instance in slot.items():
             try:
-                await asyncio.wait_for(instance.close(), timeout=_CLOSE_TIMEOUT_S)
+                await asyncio.wait_for(self._close_instance(instance), timeout=_CLOSE_TIMEOUT_S)
             except asyncio.TimeoutError:
                 logger.warning(
                     "cleanup_conversation: close timed out for %s:%s in conv %s",
@@ -580,7 +625,9 @@ class TerminalRegistry:
         for conversation_id, slot in slots:
             for (name, key), instance in slot.items():
                 try:
-                    await asyncio.wait_for(instance.close(), timeout=_CLOSE_TIMEOUT_S)
+                    await asyncio.wait_for(
+                        self._close_instance(instance), timeout=_CLOSE_TIMEOUT_S
+                    )
                 except asyncio.TimeoutError:
                     logger.warning(
                         "shutdown: close timed out for %s:%s in conv %s",
