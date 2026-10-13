@@ -1989,8 +1989,9 @@ class SqlAlchemyConversationStore(ConversationStore):
                     set_={
                         "ask_approved_usd": case(
                             (
-                                SqlUserPeriodApproval.ask_approved_usd < ask_approved_usd,
-                                ask_approved_usd,
+                                SqlUserPeriodApproval.ask_approved_usd
+                                < stmt.excluded.ask_approved_usd,
+                                stmt.excluded.ask_approved_usd,
                             ),
                             else_=SqlUserPeriodApproval.ask_approved_usd,
                         ),

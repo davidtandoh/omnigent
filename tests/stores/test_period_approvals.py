@@ -9,6 +9,22 @@ from omnigent.server.accounts_store import SqlAlchemyAccountStore
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 
 
+@pytest.mark.parametrize("initial,higher,lower", [(50, 75, 25), (0.5, 1.25, 0.25)])
+def test_approval_checkpoint_only_increases(db_uri, initial, higher, lower):
+    store = SqlAlchemyConversationStore(db_uri)
+    reader = SqlAlchemyConversationStore(db_uri)
+    for amount, expected in (
+        (initial, initial),
+        (higher, higher),
+        (lower, higher),
+        (higher, higher),
+    ):
+        store.set_period_ask_approved("alice", "month", "2026-10-01", amount)
+        assert reader.list_period_ask_approvals("alice", "2026-10-01") == [
+            {"period": "month", "window_start": "2026-10-01", "ask_approved_usd": expected}
+        ]
+
+
 def test_approvals_isolate_workspace_user_period_and_window(db_uri):
     store = SqlAlchemyConversationStore(db_uri)
     for workspace in (0, 42):
