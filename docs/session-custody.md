@@ -20,7 +20,8 @@ Replacing an attachment preserves the runner, native process and resources.
 
 The host admits durable custody for `codex-native` on macOS. The session must
 have an exact session ID. Other harnesses and platforms retain their existing
-lifecycle. The [launch receipt](runtime-launch-contract.md) reports this scope
+lifecycle and require their own native survival evidence before custody admission.
+The [launch receipt](runtime-launch-contract.md) reports this scope
 through `harnesses[].durable_custody`.
 
 Before starting native resources, the runner acquires the private session's
@@ -94,7 +95,7 @@ tombstone and does not claim resource liveness.
 | `config_digest` | SHA-256 hex digest of the global config path/bytes and scoped config/data/native-launch path variables. |
 | `environment_digest` | SHA-256 hex digest of canonical validated explicit native environment values. Values are not persisted here. |
 | `config_files` | Array of `{path: string, digest: string}` for retained inference config. Digests use SHA-256. |
-| `state` | String `starting`, `live`, `ended` or `transferred`. `live` follows terminal publication; it is not a claim that a turn is active. |
+| `state` | String `starting`, `live` or `ended`. `live` follows terminal publication; it is not a claim that a turn is active. Stored `transferred` tombstones are refused by this command. |
 | `terminals` | Array of `{name, session_key, socket, device, inode, tmux, pane}`. Names/socket are strings; device/inode are integers; tmux/pane are exact process identities. |
 | `helpers` | Object keyed by helper name. `codex_app_server` identifies the actual native process, with exact PID/start identity. |
 | `resources` | Object keyed by resource name. Values are `{path, digest}` for retained tool/policy bridge config. |

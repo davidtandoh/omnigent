@@ -1096,7 +1096,7 @@ def _spawn_local_server(
                     ),
                 ],
                 env=child_env,
-                **({"cwd": recipe.working_directory} if recipe is not None else {}),
+                cwd=recipe.working_directory if recipe is not None else None,
                 stdout=log_fh,
                 stderr=log_fh,
                 **_proc.spawn_kwargs(),

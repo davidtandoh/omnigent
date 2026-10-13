@@ -444,8 +444,8 @@ def register_native_commands(cli: click.Group) -> None:
           omnigent codex --server https://<app>.databricksapps.com
           omnigent codex --smart-routing           # first message picks the model
         """
-        from omnigent.runner.custody import SUPPORTED_HARNESSES, CustodyError
         from omnigent.native.state_files import canonical_json
+        from omnigent.runner.custody import SUPPORTED_HARNESSES, CustodyError
 
         if reattach_binding is not None:
             if any(
@@ -555,7 +555,7 @@ def register_native_commands(cli: click.Group) -> None:
                     auto_open_conversation=auto_open_conversation,
                     command=resolved_command,
                     launch_env=launch_env,
-                    **({"binding_json": True} if binding_json else {}),
+                    binding_json=binding_json,
                 )
         except (CustodyError, OSError, ValueError, click.ClickException) as exc:
             if not binding_json:

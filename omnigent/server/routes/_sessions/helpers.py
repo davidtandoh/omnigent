@@ -5415,22 +5415,16 @@ async def _query_host_runner_status(
     session_id: str | None = None,
 ) -> str | None:
     """
-    Ask a host whether a runner's process is alive, dead, or unknown.
+    Query host-verified runner liveness and optional session scope.
 
-    The host owns runner-process liveness (it holds the ``Popen``), so it
-    can answer the one question the server's tunnel registry cannot: is an
-    absent-from-the-tunnel runner still coming (booting) or gone for good
-    (stopped, crashed, or lost to a host restart)? Used before the connect
-    grace so the dispatch path waits only for a runner that is coming.
+    Result semantics belong to ``HostRunnerStatusResultFrame``. This helper
+    transports the query without authorizing a launch or binding change.
 
     :param host_conn: Live host connection to query.
     :param host_registry: Registry used to enqueue the outbound frame.
     :param runner_id: Runner to ask about, e.g. ``"runner_abc123..."``.
-    :returns: ``"alive"``, ``"dead"``, or ``"unknown"`` from the host; or
-        ``None`` when the host didn't reply in time, the connection
-        dropped, or the host is too old to support the query. ``None``
-        means "no authoritative answer" — the caller falls back to the
-        plain connect grace, preserving the prior blind-wait behavior.
+    :param session_id: Exact session scope to verify, when supplied.
+    :returns: The host status, or ``None`` if no authoritative reply arrives.
     """
     from omnigent.host.frames import HostRunnerStatusFrame, encode_host_frame
     from omnigent.server.routes import sessions as _facade

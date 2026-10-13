@@ -458,9 +458,8 @@ _RECYCLE_PROMPT_MAX_STREAK = 10
 # Fresh hosts get a short auth-retry window for Databricks OAuth refreshes.
 # Established hosts retry auth failures indefinitely to preserve sessions.
 _MAX_CONSECUTIVE_AUTH_ERRORS = 3
-# Consecutive connection-refused failures against a loopback server before the
-# host exits (~5 minutes at the backoff cap). Refused on loopback means no
-# process listens on the port — the local server is gone, not unreachable.
+# Initial loopback connection refusals before the host exits. A previously
+# connected host retries beyond this limit so API maintenance preserves sessions.
 _LOOPBACK_REFUSED_FATAL_ATTEMPTS = 100
 
 # Consecutive post-connect 401/403 (or 404) rejections (~90 s at the backoff
@@ -2381,7 +2380,7 @@ class HostProcess:
         zygote-forked runner these are blocking control-socket round-trips, not
         lock-free waitpid calls.
 
-        :param proc: The runner process handle (Popen or zygote shim).
+        :param proc: Child, zygote or verified custody process handle.
         """
         if proc.poll() is not None:
             return
@@ -4244,9 +4243,8 @@ class HostProcess:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await watcher
             self._cleanup_runners()
-            # Final drain: _cleanup_runners has just reaped the tracked
-            # runners via Popen, so any of their still-orphaned tool
-            # grandchildren are now reapable and no tracked pid can be stolen.
+            # Reap orphaned children after stopping attachment-owned runners.
+            # Durable owners retain their live resources.
             self._reap_orphans_once()
             # Stop the runner zygote last: its forked children were just
             # terminated above, and closing its control socket lets it exit.
@@ -4254,9 +4252,8 @@ class HostProcess:
                 with contextlib.suppress(Exception):
                     self._zygote.stop()
                 self._zygote = None
-            # Release ownership only after runner termination. A replacement
-            # daemon starts its cleanup after acquiring this lock, making the
-            # old-host/new-host handoff a deterministic startup-sweep barrier.
+            # Release host ownership after runner cleanup and custody detach.
+            # A replacement daemon acquires this lock before its startup sweep.
             if self._lifecycle_lock is not None:
                 self._lifecycle_lock.release()
 
@@ -4351,10 +4348,11 @@ class HostProcess:
                         or ProcessIdentity.capture(handle.proc.pid) != adopted.owner
                     ):
                         raise CustodyError("binding_mismatch")
-                    previous = self._custody_attachments.get(handle.session_id)
-                    if previous is not None and handle.session_id != record.session_id:
-                        previous.__exit__(None, None, None)
-                        del self._custody_attachments[handle.session_id]
+                    if handle.session_id is not None and handle.session_id != record.session_id:
+                        previous = self._custody_attachments.get(handle.session_id)
+                        if previous is not None:
+                            previous.__exit__(None, None, None)
+                            del self._custody_attachments[handle.session_id]
                     handle.session_id = record.session_id
                     if isinstance(handle.proc, CustodyProcess):
                         handle.proc = CustodyProcess(

@@ -440,7 +440,8 @@ def run_codex_native(
     :param prompt: Optional first prompt to send after launch.
     :param auto_open_conversation: When ``True``, open the
         browser conversation URL after the session is prepared.
-    :returns: None after the terminal attach session ends.
+    :param binding_json: Return a verified binding without attaching a TTY.
+    :returns: The binding in binding mode; otherwise None after attachment ends.
     :raises click.ClickException: If setup fails.
     """
     codex_args = _normalize_extra_args(
@@ -826,7 +827,8 @@ def _run_with_remote_server(
     :param prompt: Optional first prompt.
     :param auto_open_conversation: When ``True``, open the
         browser conversation URL after the session is prepared.
-    :returns: None.
+    :param binding_json: Return a verified binding without attaching a TTY.
+    :returns: The binding in binding mode; otherwise None.
     """
     from omnigent.chat import _bundle_agent, _remote_headers, _server_auth
     from omnigent.cli import _ensure_host_daemon
@@ -846,7 +848,7 @@ def _run_with_remote_server(
             resume_picker=resume_picker,
         )
         if resolved_session_id is None and resume_picker and session_id is None:
-            return
+            return None
         if resolved_session_id is not None:
             _align_working_directory_with_session(resolved_session_id)
 
@@ -854,7 +856,7 @@ def _run_with_remote_server(
             """
             Prepare Codex and attach in a single event loop.
 
-            :returns: None.
+            :returns: The binding in binding mode; otherwise None.
             """
             with runner_startup_progress(initial_message="Preparing Codex...") as progress:
                 _update_startup_progress(progress, "Connecting to local daemon...")
@@ -939,6 +941,7 @@ def _run_with_remote_server(
                     ),
                     server=base_url,
                 )
+            return None
 
         return asyncio.run(_drive())
     except httpx.ConnectError as exc:

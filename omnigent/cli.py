@@ -5112,7 +5112,7 @@ def stop(force: bool) -> None:
 
     The off switch, and the counterpart of ``omnigent start``: stops every host
     daemon (local and remote-targeted) and the detached background server.
-    Runners are reaped when their daemon exits. To stop only hosting while
+    Retained session owners are ended before their daemon exits. To stop hosting while
     keeping the local server (web UI / history) up, use ``omnigent host stop``
     instead.
 
@@ -5123,9 +5123,7 @@ def stop(force: bool) -> None:
     stopped = 0
     failures: list[str] = []
     for record in _list_daemon_records():
-        # Terminating the daemon reaps its runners (orphan-watchdog), so the
-        # off-switch doesn't need the graceful per-session HTTP stop that
-        # `host stop` does — that keeps teardown quiet and dependency-free.
+        # End retained owners locally before stopping the host; the API may be down.
         try:
             _end_daemon_custodied_sessions(record)
             _terminate_daemon(record, force=force)

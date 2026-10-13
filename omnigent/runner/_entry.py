@@ -1131,15 +1131,15 @@ def _run_parent_death_killer(
     grace_s: float = 2.0,
     exit_fn: Callable[[int], None] = os._exit,
 ) -> None:
-    """Force the runner to exit once its parent (host daemon) dies.
+    """Exit on custody lease loss, or parent death when no lease is supplied.
 
     Runs on a dedicated daemon thread, NOT the event loop: when the parent
     dies while a harness subprocess is mid-boot, the runner's own teardown
     removes the harness instance dir out from under it and the asyncio
     shutdown wedges the event loop — so an event-loop watchdog would never
     fire and the WS tunnel would stay open, leaving the server seeing the
-    runner online forever. On detecting the parent's death this requests a
-    graceful shutdown, then after *grace_s* hard-exits as a backstop. When
+    runner online forever. On detecting lease loss or parent death, request
+    graceful shutdown, then after *grace_s* hard-exit as a backstop. When
     graceful shutdown wins the race the process is already gone and this
     daemon thread dies with it, so the hard exit is a no-op in practice.
 
@@ -1158,7 +1158,7 @@ def _run_parent_death_killer(
         adoption (watch until parent death).
     :param owner_alive: Durable session lease probe. When supplied, monitor
         that lease across threads instead of the replaceable launch parent.
-    :param poll_interval_s: Seconds between parent-liveness probes, e.g.
+    :param poll_interval_s: Seconds between lease or parent-liveness probes, e.g.
         ``0.5``.
     :param grace_s: Seconds to allow graceful shutdown before the hard
         exit, e.g. ``2.0``.

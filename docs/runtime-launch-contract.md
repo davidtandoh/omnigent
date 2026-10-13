@@ -60,11 +60,10 @@ collection is unavailable. Keep custody of existing sessions. Work exclusion
 keeps content and telemetry off. Enabled exports must use the approved redactor;
 this interface does not authorize a raw-content fallback.
 
-All native wrappers remain listed from the existing registry. `durable_custody`
-is true only for `codex-native` on macOS. It covers host-launched sessions with
-a durable session ID. Direct wrapper availability does not establish custody.
-Other harnesses and platforms need their own native survival evidence before
-admission. See [session custody](session-custody.md) for the exact owner,
+All native wrappers remain listed from the existing registry. For the admitted
+`durable_custody` scope, see [ownership and adoption](session-custody.md#ownership-and-adoption).
+Direct wrapper availability does not establish custody.
+See [session custody](session-custody.md) for the exact owner,
 reattachment and maintenance contract. The same document defines the public
 `omnigent codex --binding-json` launch result and
 `omnigent codex --reattach-binding FILE` attachment command. Consumers must keep
