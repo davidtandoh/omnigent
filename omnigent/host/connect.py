@@ -133,6 +133,7 @@ from omnigent.process_logging import (
     PROCESS_LOG_FILE_ENV_VAR,
     child_logging_popen_kwargs,
     configure_process_logging,
+    data_dir,
     display_log_path,
     env_truthy,
     open_process_log_file,
@@ -150,6 +151,7 @@ from omnigent.runner.custody import (
     custody_records,
     custody_session_key,
     host_config_digest,
+    locked_session_owner,
     make_custody_context,
 )
 from omnigent.runner.identity import (
@@ -2257,19 +2259,48 @@ class HostProcess:
         :param frame: The stop request frame.
         :returns: Result frame with status.
         """
-        handle = self._runners.pop(frame.runner_id, None)
+        handle = self._runners.get(frame.runner_id)
         if handle is None:
             return HostStopRunnerResultFrame(
                 request_id=frame.request_id,
                 status="failed",
                 error=f"unknown runner: {frame.runner_id}",
             )
-        handle.stop_requested = True
-        # The poll/terminate/wait round-trips are lock-free waitpid calls for a
-        # direct-Popen runner, but blocking control-socket exchanges for a
-        # zygote-forked one — run them off the loop so a wedged zygote can't
-        # freeze the daemon's control handler.
-        await self._stop_runner_and_trigger(handle.proc, "runner_stopped")
+        with contextlib.ExitStack() as operation:
+            try:
+                if frame.session_id is not None:
+                    if handle.durable:
+                        from omnigent.native.owner_claim import ProcessIdentity
+
+                        record = operation.enter_context(
+                            locked_session_owner(data_dir(), frame.session_id)
+                        )
+                        if (
+                            record.state == "ended"
+                            or record.runner_id != frame.runner_id
+                            or self._identity is None
+                            or record.host_id != self._identity.host_id
+                            or record.endpoint != self._server_url
+                            or record.owner != ProcessIdentity.capture(handle.proc.pid)
+                        ):
+                            raise CustodyError("scope_mismatch")
+                        if record.config_digest != host_config_digest():
+                            raise CustodyError("config_mismatch")
+                    elif handle.session_id != frame.session_id:
+                        raise CustodyError("scope_mismatch")
+            except (CustodyError, OSError, ValueError, psutil.Error) as exc:
+                return HostStopRunnerResultFrame(
+                    request_id=frame.request_id,
+                    status="failed",
+                    error=str(exc) if isinstance(exc, CustodyError) else "record_mismatch",
+                )
+            self._runners.pop(frame.runner_id)
+            handle.stop_requested = True
+            # The poll/terminate/wait round-trips are lock-free waitpid calls for a
+            # direct-Popen runner, but blocking control-socket exchanges for a
+            # zygote-forked one — run them off the loop so a wedged zygote can't
+            # freeze the daemon's control handler.
+            await self._stop_runner_and_trigger(handle.proc, "runner_stopped")
         if handle.session_id is not None:
             attachment = self._custody_attachments.pop(handle.session_id, None)
             if attachment is not None:

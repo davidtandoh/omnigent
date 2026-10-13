@@ -294,6 +294,7 @@ class HostStopRunnerFrame:
 
     request_id: str
     runner_id: str
+    session_id: str | None
 
 
 @dataclass
@@ -1238,6 +1239,7 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "kind": HostFrameKind.STOP_RUNNER.value,
                 "request_id": frame.request_id,
                 "runner_id": frame.runner_id,
+                "session_id": frame.session_id,
             }
         )
     if isinstance(frame, HostStopRunnerResultFrame):
@@ -1839,9 +1841,12 @@ def _decode_stop_runner(msg: _JsonObject) -> HostStopRunnerFrame:
     :param msg: Decoded frame object.
     :returns: Typed stop-runner frame.
     """
+    if "session_id" not in msg:
+        raise ValueError("stop_runner requires session_id")
     return HostStopRunnerFrame(
         request_id=_required_str(msg, "request_id"),
         runner_id=_required_str(msg, "runner_id"),
+        session_id=_optional_nullable_str(msg, "session_id"),
     )
 
 

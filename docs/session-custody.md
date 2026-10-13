@@ -55,7 +55,11 @@ the same owner generation. The runner, native process, terminals and helpers
 remain alive. Binding, reattachment and end requests for the retired scope
 refuse `scope_mismatch`. The host adopts the current scope through its existing
 adoption path. A shared bridge handoff retires the old relay receipt; later
-cleanup for the old session cannot remove the successor receipt.
+cleanup for the old session cannot remove the successor receipt. Session stop
+and archive requests carry the session ID to the host. The host verifies custody
+while holding the same operation lock used by transfer, before it signals the
+runner. A failed clear-binding request cannot authorize a stop of the successor.
+An explicit host-wide end remains independent of session scope.
 
 The retained runner owns its inference config, MCP relay, policy callbacks,
 native app-server and terminals. Host replacement does not rebuild them. This

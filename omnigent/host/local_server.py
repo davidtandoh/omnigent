@@ -185,7 +185,7 @@ def configured_local_server_port() -> int | None:
     return None
 
 
-def server_config_signature(*, include_features: bool = True) -> str:
+def server_config_signature(*, include_features: bool = True, base_path: str | None = None) -> str:
     """
     Compute a signature of the server-affecting config for one invocation.
 
@@ -247,7 +247,8 @@ def server_config_signature(*, include_features: bool = True) -> str:
         # nothing to key version-drift on, so leave it out of the payload.
         version = ""
 
-    base_path = _resolve_effective_base_path()
+    if base_path is None:
+        base_path = _resolve_effective_base_path()
 
     payload = json.dumps(
         {
@@ -647,7 +648,7 @@ def maintenance_start_local_server() -> dict[str, object]:
         _write_local_server_record(
             spawned.proc.pid,
             record.port,
-            server_config_signature(),
+            server_config_signature(base_path=record.base_path),
             record.base_path,
             log_path=spawned.log_path,
             recipe=recipe,

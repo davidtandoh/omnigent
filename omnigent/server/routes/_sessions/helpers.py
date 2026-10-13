@@ -6970,7 +6970,7 @@ async def _stop_session_host_runner(
     future: asyncio.Future[dict[str, str | None]] = asyncio.get_running_loop().create_future()
     conn.pending_stops[request_id] = future
     stop_frame = encode_host_frame(
-        HostStopRunnerFrame(request_id=request_id, runner_id=runner_id),
+        HostStopRunnerFrame(request_id=request_id, runner_id=runner_id, session_id=session_id),
     )
     try:
         host_registry.send_text(conn, stop_frame)

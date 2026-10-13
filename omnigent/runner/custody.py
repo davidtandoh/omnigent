@@ -9,6 +9,8 @@ import stat
 import subprocess
 import threading
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from types import TracebackType
 from typing import Literal
@@ -684,6 +686,16 @@ def verify_session_binding(base: Path, expected: SessionBinding) -> SessionBindi
     return actual
 
 
+@contextmanager
+def locked_session_owner(base: Path, session_id: str) -> Iterator[CustodyRecord]:
+    directory = _session_dir(base, session_id)
+    lock = _lock(directory / "operation.lock")
+    try:
+        yield _verified_session_record(base, session_id)
+    finally:
+        lock.release()
+
+
 def end_session(
     base: Path,
     session_id: str,
@@ -695,9 +707,7 @@ def end_session(
 ) -> dict[str, object]:
     """End one exactly scoped session owner; keep its receipt as a tombstone."""
     directory = _session_dir(base, session_id)
-    lock = _lock(directory / "operation.lock")
-    try:
-        record = _read_record(directory / "session.json")
+    with locked_session_owner(base, session_id) as record:
         if (
             record.session_id != session_id
             or record.state == "transferred"
@@ -715,9 +725,6 @@ def end_session(
                 "owner_generation": owner_generation,
                 "state": "ended",
             }
-        if record_flock_is_held(directory / "owner.lock") is not True:
-            raise CustodyError("stale_attachment")
-        verify_resources(record)
         process = CustodyProcess(record)
         process.terminate()
         try:
@@ -733,5 +740,3 @@ def end_session(
             "owner_generation": owner_generation,
             "state": "ended",
         }
-    finally:
-        lock.release()

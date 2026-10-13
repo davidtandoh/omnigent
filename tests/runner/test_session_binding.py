@@ -160,10 +160,17 @@ def test_concurrent_executable_binding_requests_preserve_one_owner(bound_session
 async def test_terminal_transfer_retires_binding_and_preserves_native_owner(
     bound_session, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    from types import SimpleNamespace
+
     import httpx
+
+    from omnigent.harnesses.codex_native.forwarder import _create_thread_replacement_session
+    from omnigent.host.frames import HostStopRunnerFrame, decode_host_frame
     from omnigent.host.identity import HostIdentity
     from omnigent.runner import create_runner_app
     from omnigent.runner.resource_registry import SessionResourceRegistry
+    from omnigent.server.routes import sessions
+    from omnigent.server.routes._sessions.orchestration import _archive_stop
     from omnigent.terminals import TerminalRegistry
     from tests.host.test_connect import _cleanup_host, _make_host_process
     from tests.runner.helpers import NullServerClient, make_test_terminal_instance
@@ -192,12 +199,35 @@ async def test_terminal_transfer_retires_binding_and_preserves_native_owner(
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://runner"
         ) as client:
-            response = await client.post(
-                f"/v1/sessions/{binding.session_id}/resources/terminals/terminal_codex_main/transfer",
-                json={"target_session_id": "conv_successor"},
-            )
-            assert response.status_code == 200, response.text
-            assert response.json()["session_id"] == "conv_successor"
+
+            async def server_request(request):
+                if request.method == "GET":
+                    return httpx.Response(
+                        200, json={"agent_id": "codex", "runner_id": binding.runner_id}
+                    )
+                if request.url.path == "/v1/sessions":
+                    return httpx.Response(200, json={"id": "conv_successor"})
+                if request.url.path.endswith("/transfer"):
+                    return await client.post(request.url.path, json=json.loads(request.content))
+                if request.method == "PATCH" and request.url.path.endswith(binding.session_id):
+                    raise httpx.ConnectError(
+                        "API maintenance interrupted clear-binding", request=request
+                    )
+                return httpx.Response(200, json={})
+
+            bridge_dir = tmp_path / "codex-bridge"
+            bridge_dir.mkdir()
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(server_request), base_url="http://api"
+            ) as api:
+                with pytest.raises(httpx.ConnectError, match="maintenance interrupted"):
+                    await _create_thread_replacement_session(
+                        client=api,
+                        old_session_id=binding.session_id,
+                        bridge_dir=bridge_dir,
+                        app_server_url="ws://127.0.0.1:8124",
+                        new_thread_id="successor-thread",
+                    )
         assert registry.get(binding.session_id, "codex", "main") is None
         assert registry.get("conv_successor", "codex", "main") is terminal
         assert owner.still_owner()
@@ -224,6 +254,42 @@ async def test_terminal_transfer_retires_binding_and_preserves_native_owner(
             result = await asyncio.to_thread(CliRunner().invoke, cli.cli, command)
             assert result.exit_code == 1, result.output
             assert json.loads(result.stdout)["error"]["category"] == "scope_mismatch"
+        connection = SimpleNamespace(pending_stops={})
+        stop_frames = []
+
+        async def deliver_stop(payload):
+            frame = decode_host_frame(payload)
+            stop_frames.append(frame)
+            assert isinstance(frame, HostStopRunnerFrame)
+            assert frame.session_id == binding.session_id
+            result = await host._handle_stop(frame)
+            assert result.status == "failed" and result.error == "scope_mismatch"
+            connection.pending_stops.pop(frame.request_id).set_result(
+                {"status": result.status, "error": result.error}
+            )
+
+        host_registry = SimpleNamespace(
+            get=lambda host_id: connection,
+            send_text=lambda conn, payload: asyncio.create_task(deliver_stop(payload)),
+        )
+        assert not await sessions._stop_session_host_runner(
+            binding.session_id,
+            binding.host_id,
+            binding.runner_id,
+            host_registry,
+        )
+        monkeypatch.setattr(sessions, "_best_effort_stop", AsyncMock())
+        store = SimpleNamespace(
+            get_conversation=lambda session_id: SimpleNamespace(
+                archived=True,
+                host_id=binding.host_id,
+                runner_id=binding.runner_id,
+            )
+        )
+        await _archive_stop(binding.session_id, store, None, host_registry)
+        assert len(stop_frames) == 2
+        assert host._runners[binding.runner_id] is original_handle
+        assert not original_handle.stop_requested
         signals.assert_not_called()
         path.write_text(successor.model_dump_json())
         result = await asyncio.to_thread(
@@ -242,6 +308,27 @@ async def test_terminal_transfer_retires_binding_and_preserves_native_owner(
         assert host._runners[binding.runner_id].session_id == "conv_successor"
         assert host._runners[binding.runner_id].proc.identity == binding.owner
         assert [r.session_id for r in custody.custody_records(tmp_path)] == ["conv_successor"]
+
+        stopped = []
+
+        def stop_current(proc):
+            with pytest.raises(custody.CustodyError, match="owner_busy"):
+                owner.transfer_session(
+                    "conv_successor", "conv_third", Path(binding.terminal.socket)
+                )
+            stopped.append(proc.identity)
+
+        monkeypatch.setattr(host, "_stop_runner_proc", stop_current)
+        result = await host._handle_stop(
+            HostStopRunnerFrame(
+                request_id="current-stop",
+                runner_id=binding.runner_id,
+                session_id="conv_successor",
+            )
+        )
+        assert result.status == "stopped"
+        assert stopped == [binding.owner]
+        assert binding.runner_id not in host._runners
     finally:
         host._cleanup_runners()
         _cleanup_host(host)

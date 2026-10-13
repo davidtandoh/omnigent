@@ -574,3 +574,53 @@ def test_local_server_uses_fixed_environment_port(procs: _Procs, tmp_path: Path)
     assert actual_port == port
     assert _pid_alive(pid)
     assert _health_ok(port)
+
+
+def test_maintenance_restart_retains_explicit_base_path_without_respawn(
+    procs: _Procs,
+    tmp_path: Path,
+) -> None:
+    from omnigent.native.owner_claim import ProcessIdentity
+
+    home = tmp_path / "home"
+    home.mkdir()
+    env = _isolated_env(home)
+    for name in list(env):
+        if name.startswith(("OMNIGENT_", "OTEL_", "MLFLOW_", "DATABRICKS_")):
+            env.pop(name)
+    env["OMNIGENT_CONFIG_HOME"] = str(home / ".omnigent")
+    env["OMNIGENT_DATA_DIR"] = str(home / ".omnigent")
+    env["OMNIGENT_SKIP_WEB_UI"] = "true"
+    env["OMNIGENT_SKIP_UPDATE_CHECK"] = "1"
+    env["OMNIGENT_DISABLE_CATALOG_LOOKUP"] = "1"
+    env["OMNIGENT_AUTH_PROVIDER"] = "header"
+    env["OMNIGENT_LOCAL_SINGLE_USER"] = "0"
+    procs.track_pidfile(_pidfile_path(home))
+    procs.track_server_home(home)
+    log = tmp_path / "server.log"
+    server = procs.spawn(["server", "--base-path", "/stable"], env=env, cwd=home, log=log)
+    original_pid, port = _wait_for_pidfile_server(home, server, log)
+    for action in ("maintenance-stop", "maintenance-start"):
+        command_log = tmp_path / f"{action}.log"
+        command = procs.spawn(["server", action, "--json"], env=env, cwd=home, log=command_log)
+        assert command.wait(timeout=45) == 0, command_log.read_text()
+    pid, restarted_port = _read_pidfile(_pidfile_path(home))
+    assert pid != original_pid and restarted_port == port
+    identity = ProcessIdentity.capture(pid)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from omnigent.host.local_server import ensure_local_omnigent_server; print(ensure_local_omnigent_server())",
+        ],
+        env=env,
+        cwd=home,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert _read_pidfile(_pidfile_path(home)) == (pid, port)
+    assert ProcessIdentity.capture(pid) == identity
+    assert _health_ok(port)
+    assert (home / ".omnigent" / "local_server.base_path").read_text().strip() == "/stable"

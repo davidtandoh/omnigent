@@ -1562,7 +1562,7 @@ async def test_watch_runner_silent_on_intentional_stop(
 
     runner_id = token_bound_runner_id("tok_stop")
     stop_result = await host._handle_stop(
-        HostStopRunnerFrame(request_id="req_stop_2", runner_id=runner_id)
+        HostStopRunnerFrame(request_id="req_stop_2", runner_id=runner_id, session_id=None)
     )
     assert stop_result.status == "stopped"
 
@@ -1886,6 +1886,7 @@ async def test_connect_watchdog_silent_on_intentional_stop(
             HostStopRunnerFrame(
                 request_id="req_conn_stop_2",
                 runner_id=token_bound_runner_id("tok_conn_stop"),
+                session_id=None,
             )
         )
         assert stop_result.status == "stopped"
@@ -2966,6 +2967,7 @@ async def test_handle_stop_terminates_process(tmp_path: Path) -> None:
     frame = HostStopRunnerFrame(
         request_id="req_003",
         runner_id="runner_aaa",
+        session_id=None,
     )
     result = await host._handle_stop(frame)
 
@@ -2989,6 +2991,7 @@ async def test_handle_stop_unknown_runner() -> None:
     frame = HostStopRunnerFrame(
         request_id="req_004",
         runner_id="runner_nonexistent",
+        session_id=None,
     )
     result = await host._handle_stop(frame)
 
@@ -6927,7 +6930,9 @@ async def test_stop_frame_never_overtakes_launch(
     )
     host._start_frame_task(
         ws,  # type: ignore[arg-type] — duck-typed ws
-        encode_host_frame(HostStopRunnerFrame(request_id="rq2", runner_id="runner_x")),
+        encode_host_frame(
+            HostStopRunnerFrame(request_id="rq2", runner_id="runner_x", session_id=None)
+        ),
     )
     await asyncio.sleep(0.05)
     # The stop is parked behind the lifecycle lock, not run concurrently.
