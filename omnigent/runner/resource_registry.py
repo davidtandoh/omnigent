@@ -202,6 +202,19 @@ class TerminalExitEvent:
     lifecycle_context: dict[str, str] = field(default_factory=dict)
 
 
+def _terminal_cleanup_error(exc: Exception) -> OmnigentError:
+    from omnigent.runner.custody import CustodyError
+
+    category = (
+        str(exc)
+        if isinstance(exc, CustodyError)
+        else "process_pending"
+        if isinstance(exc, TimeoutError)
+        else "unavailable_probe"
+    )
+    return OmnigentError(f"Terminal cleanup refused: {category}", code=category)
+
+
 def _terminal_lifecycle_context(
     instance: TerminalInstance | None, resource_role: str | None
 ) -> dict[str, str]:
@@ -1912,7 +1925,7 @@ class SessionResourceRegistry:
         if self._terminal_registry is None:
             return False
 
-        for entry in self._terminal_registry.list_for_conversation(
+        for entry in self._terminal_registry.list_for_cleanup(
             session_id,
         ):
             if terminal_resource_id(entry.terminal_name, entry.session_key) == terminal_id:
@@ -1935,11 +1948,15 @@ class SessionResourceRegistry:
                         ),
                     ),
                 )
-                closed = await self._terminal_registry.close(
-                    session_id,
-                    entry.terminal_name,
-                    entry.session_key,
-                )
+                try:
+                    closed = await self._terminal_registry.close(
+                        session_id,
+                        entry.terminal_name,
+                        entry.session_key,
+                        expected=entry.instance,
+                    )
+                except (RuntimeError, OSError, ValueError, psutil.Error) as exc:
+                    raise _terminal_cleanup_error(exc) from exc
                 if closed:
                     with self._lock:
                         self._terminal_roles.pop((session_id, terminal_id), None)
@@ -2054,21 +2071,10 @@ class SessionResourceRegistry:
         :param session_id: Session/conversation identifier.
         """
         if self._terminal_registry is not None:
-            from omnigent.runner.custody import CustodyError
-
             try:
                 await self._terminal_registry.cleanup_conversation(session_id)
             except (RuntimeError, OSError, ValueError, psutil.Error) as exc:
-                category = (
-                    str(exc)
-                    if isinstance(exc, CustodyError)
-                    else "process_pending"
-                    if isinstance(exc, TimeoutError)
-                    else "unavailable_probe"
-                )
-                raise OmnigentError(
-                    f"Terminal cleanup refused: {category}", code=category
-                ) from exc
+                raise _terminal_cleanup_error(exc) from exc
         self._take_session_status_memo(session_id)
         with self._lock:
             self._session_activity_epoch.pop(session_id, None)

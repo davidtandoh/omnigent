@@ -7670,21 +7670,16 @@ def create_runner_app(
             )
 
         async def _reap_native_pane(pane: PaneRef) -> None:
-            try:
-                await resource_registry.close_terminal(pane.conversation_id, pane.terminal_id)
-            finally:
-                # Closing the codex TUI pane leaves its per-session app-server
-                # (and forwarder) running — no-op for other harnesses. Tear it
-                # down in ``finally`` so an idle-reaped codex session can't orphan
-                # a ``codex app-server`` for the runner's lifetime even when the
-                # pane close above partially fails (the very leak this guards).
-                await _native_runtime.teardown_codex_native_app_server(pane.conversation_id)
-                _publish_terminal_deleted_event(
-                    conversation_id=pane.conversation_id,
-                    terminal_name=pane.terminal_name,
-                    session_key="main",
-                    publish_event=_publish_event,
-                )
+            closed = await resource_registry.close_terminal(pane.conversation_id, pane.terminal_id)
+            if not closed:
+                return
+            await _native_runtime.teardown_codex_native_app_server(pane.conversation_id)
+            _publish_terminal_deleted_event(
+                conversation_id=pane.conversation_id,
+                terminal_name=pane.terminal_name,
+                session_key="main",
+                publish_event=_publish_event,
+            )
 
         app.state.native_pane_reaper = NativePaneReaper(
             list_native_panes=_native_panes_for_reaper,

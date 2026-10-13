@@ -890,8 +890,8 @@ async def test_cleanup_conversation_propagates_close_exception(tmp_path: Path) -
     good_instance.close.assert_awaited_once()
 
 
-async def test_shutdown_propagates_incomplete_cleanup_and_can_retry(tmp_path: Path) -> None:
-    """Shutdown preserves unfinished resources and completes on a later retry."""
+async def test_shutdown_attempts_all_terminals_before_propagating_incomplete_cleanup(tmp_path: Path) -> None:
+    """One shutdown pass closes independent terminals and retains failures."""
     reg = TerminalRegistry()
     good = TerminalInstance(
         name="bash",
@@ -914,7 +914,15 @@ async def test_shutdown_propagates_incomplete_cleanup_and_can_retry(tmp_path: Pa
 
     bad.close = _explode  # type: ignore[method-assign]
 
-    reg._by_conversation["conv_a"] = {("bash", "s1"): bad}
+    sibling = TerminalInstance(
+        name="bash",
+        session_key="s2",
+        socket_path=tmp_path / "sibling.sock",
+        private_dir=tmp_path / "sibling",
+        running=True,
+    )
+    sibling.close = AsyncMock()
+    reg._by_conversation["conv_a"] = {("bash", "s1"): bad, ("bash", "s2"): sibling}
     reg._by_conversation["conv_b"] = {("bash", "s1"): good}
     reg._instance_locks[("conv_a", "bash", "s1")] = threading.Lock()
     reg._instance_locks[("conv_b", "bash", "s1")] = threading.Lock()
@@ -922,17 +930,13 @@ async def test_shutdown_propagates_incomplete_cleanup_and_can_retry(tmp_path: Pa
     with pytest.raises(RuntimeError, match="tmux gone"):
         await reg.shutdown()
 
-    assert reg.active_conversation_ids() == ["conv_a", "conv_b"]
+    assert reg.active_conversation_ids() == ["conv_a"]
     assert reg.get("conv_a", "bash", "s1") is bad
     assert reg.get_instance_lock("conv_a", "bash", "s1") is not None
-    assert reg.get_instance_lock("conv_b", "bash", "s1") is not None
-    good.close.assert_not_awaited()
-    bad.close = AsyncMock()
-    await reg.shutdown()
-    assert reg.active_conversation_ids() == []
-    assert reg.get_instance_lock("conv_a", "bash", "s1") is None
+    assert reg.get("conv_a", "bash", "s2") is None
     assert reg.get_instance_lock("conv_b", "bash", "s1") is None
     good.close.assert_awaited_once()
+    sibling.close.assert_awaited_once()
 
 
 def test_multiple_terminals_per_conversation(tmp_path: Path) -> None:

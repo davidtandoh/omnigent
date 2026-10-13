@@ -201,6 +201,8 @@ async def test_terminal_resource_role_is_private_and_cleared_on_close(
         conversation_id: str,
         terminal_name: str,
         session_key: str,
+        *,
+        expected: TerminalInstance | None = None,
     ) -> bool:
         """
         Remove the fake terminal from the registry.
@@ -211,6 +213,8 @@ async def test_terminal_resource_role_is_private_and_cleared_on_close(
         :returns: ``True`` when the fake terminal existed.
         """
         slot = terminal_registry._by_conversation.get(conversation_id, {})
+        if expected is not None and slot.get((terminal_name, session_key)) is not expected:
+            return False
         return slot.pop((terminal_name, session_key), None) is not None
 
     monkeypatch.setattr(terminal_registry, "launch", _fake_launch)

@@ -37,6 +37,7 @@ outside the lock.
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -56,6 +57,8 @@ from omnigent.inner.terminal import TerminalInstance, create_terminal_instance
 # well-behaved tmux to flush and exit, short enough that cleanup
 # doesn't stall.
 _CLOSE_TIMEOUT_S = 5.0
+
+_logger = logging.getLogger(__name__)
 
 
 def conversation_link_for_id(
@@ -441,10 +444,15 @@ class TerminalRegistry:
         :returns: List of :class:`TerminalListEntry`. Empty list when
             the conversation has no terminals.
         """
+        entries = self.list_for_cleanup(conversation_id)
+        for entry in entries:
+            self._verify_usable(conversation_id, entry.instance)
+        return entries
+
+    def list_for_cleanup(self, conversation_id: str) -> list[TerminalListEntry]:
+        """Snapshot owned terminals, including failed launches, for scoped teardown."""
         with self._lock:
             slot = dict(self._by_conversation.get(conversation_id, {}))
-        for instance in slot.values():
-            self._verify_usable(conversation_id, instance)
         return [
             TerminalListEntry(
                 terminal_name=name,
@@ -655,8 +663,16 @@ class TerminalRegistry:
         """
         with self._lock:
             slot = dict(self._by_conversation.get(conversation_id, {}))
+        failure: Exception | None = None
         for (name, key), instance in slot.items():
-            await self.close(conversation_id, name, key, expected=instance)
+            try:
+                await self.close(conversation_id, name, key, expected=instance)
+            except Exception as exc:
+                _logger.exception("Terminal cleanup failed: %s/%s/%s", conversation_id, name, key)
+                if failure is None:
+                    failure = exc
+        if failure is not None:
+            raise failure
 
     async def shutdown(self) -> None:
         """Tear down every registered terminal across all conversations.
@@ -668,8 +684,15 @@ class TerminalRegistry:
         """
         with self._lock:
             conversation_ids = list(self._by_conversation)
+        failure: Exception | None = None
         for conversation_id in conversation_ids:
-            await self.cleanup_conversation(conversation_id)
+            try:
+                await self.cleanup_conversation(conversation_id)
+            except Exception as exc:
+                if failure is None:
+                    failure = exc
+        if failure is not None:
+            raise failure
 
     def active_conversation_ids(self) -> list[str]:
         """Return ids of conversations with at least one registered terminal.

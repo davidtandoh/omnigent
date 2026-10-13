@@ -42,7 +42,12 @@ lock and resources. The registry refuses reuse until explicit cleanup succeeds.
 Session cleanup closes terminals before releasing the primary environment,
 skills or native bridge files. A terminal cleanup failure propagates through
 the resource registry as a named JSON error; the runner does not return
-`cleaned=true`. These rules also apply when durable custody is disabled.
+`cleaned=true`. The terminal DELETE route can retire retained failed launches
+without admitting them for reuse. Native stop and idle cleanup publish deletion
+only after the terminal closes. Failed closure preserves the Codex app-server
+and forwarder. Shutdown attempts every independent terminal once before
+propagating a refusal and retains failed entries. These rules also apply when
+durable custody is disabled.
 
 What refuses today: `omnigent codex --binding-json`, `--reattach-binding`,
 `runtime session-contract` and `runtime end-session` return

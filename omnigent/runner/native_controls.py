@@ -831,20 +831,13 @@ def build_native_controls(
             return
         terminals = [
             (entry.terminal_name, entry.session_key)
-            for entry in terminal_registry.list_for_conversation(conv_id)
+            for entry in terminal_registry.list_for_cleanup(conv_id)
         ]
         for terminal_name, session_key in terminals:
             terminal_id = terminal_resource_id(terminal_name, session_key)
-            try:
-                await resource_registry.close_terminal(conv_id, terminal_id)
-            except (RuntimeError, OSError):
-                _logger.warning(
-                    "Failed to close terminal %s for session %s during stop",
-                    terminal_id,
-                    conv_id,
-                    exc_info=True,
-                    extra={"session_id": conv_id},
-                )
+            closed = await resource_registry.close_terminal(conv_id, terminal_id)
+            if not closed:
+                continue
             _publish_terminal_deleted_event(
                 conversation_id=conv_id,
                 terminal_name=terminal_name,

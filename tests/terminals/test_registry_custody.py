@@ -378,10 +378,15 @@ async def test_ordinary_cleanup_retains_live_terminal_until_retry(
 async def test_failed_start_retains_terminal_until_explicit_cleanup(
     owned_terminal, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    import httpx
+
+    from omnigent.runner import app as runner_app
     from omnigent.runner.resource_registry import (
         CLAUDE_NATIVE_TERMINAL_ROLE,
         SessionResourceRegistry,
     )
+
+    from tests.runner.helpers import NullServerClient
 
     t = owned_terminal
     monkeypatch.setattr(custody, "_current_custody", None)
@@ -411,8 +416,38 @@ async def test_failed_start_retains_terminal_until_explicit_cleanup(
         t.create.assert_called_once()
         with pytest.raises(RuntimeError, match="process_pending"):
             t.registry.get(*t.args[:3])
-    t.spawn.side_effect = None
-    assert await t.registry.close(*t.args[:3])
+    sibling = TerminalInstance(
+        "bash", "other", t.instance.private_dir / "other.sock", t.instance.private_dir / "other"
+    )
+    sibling.close = AsyncMock()
+    t.registry._by_conversation[t.args[0]][("bash", "other")] = sibling
+    app = runner_app.create_runner_app(
+        terminal_registry=t.registry,
+        resource_registry=resources,
+        server_client=NullServerClient(),
+    )
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    path = f"/v1/sessions/{t.args[0]}/resources/terminals/terminal_codex_main"
+    async with httpx.AsyncClient(transport=transport, base_url="http://runner") as client:
+        foreign = await client.delete(
+            "/v1/sessions/foreign/resources/terminals/terminal_codex_main"
+        )
+        assert foreign.status_code == 404
+        healthy = await client.delete(
+            f"/v1/sessions/{t.args[0]}/resources/terminals/terminal_bash_other"
+        )
+        assert healthy.status_code == 200, healthy.text
+        sibling.close.assert_awaited_once()
+        refused = await client.delete(path)
+        assert refused.status_code == 500
+        assert refused.json()["error"]["code"] == "unavailable_probe"
+        assert t.process.poll() is None
+        assert t.instance.private_dir.exists()
+        environment.close.assert_not_called()
+        t.spawn.side_effect = None
+        completed = await client.delete(path)
+        assert completed.status_code == 200, completed.text
+        assert completed.json()["deleted"] is True
     assert t.registry.active_conversation_ids() == []
     assert t.registry.get_instance_lock(*t.args[:3]) is None
     assert t.process.poll() is not None
@@ -504,3 +539,107 @@ async def test_session_cleanup_retains_supporting_resources_until_terminal_exits
             primary.close.assert_called_once()
             cleanup_bridges.assert_awaited_once()
             manager.release.assert_awaited_once()
+
+
+@pytest.mark.parametrize("caller", ["reaper", "reset", "claude-native", "cursor-native"])
+async def test_native_cleanup_refusal_preserves_dependents_and_deletion_events(
+    owned_terminal, monkeypatch: pytest.MonkeyPatch, caller: str
+) -> None:
+    import httpx
+
+    from omnigent.errors import OmnigentError
+    from omnigent.runner import app as runner_app
+    from omnigent.runner import tool_dispatch
+    from omnigent.runner.native import interrupt, orchestration
+    from omnigent.runner.resource_registry import SessionResourceRegistry
+    from omnigent.terminals.pane_reaper import PaneRef
+    from tests.runner.helpers import NullServerClient
+    from tests.runner.test_native_interrupt_runner import _make_runner
+
+    t = owned_terminal
+    await t.registry.launch(*t.args)
+    receipt = t.owner.record_path.read_bytes()
+    instance_lock = t.registry.get_instance_lock(*t.args[:3])
+    resources = SessionResourceRegistry(terminal_registry=t.registry)
+    deleted = Mock()
+    monkeypatch.setattr(tool_dispatch, "_publish_terminal_deleted_event", deleted)
+    app = runner_app.create_runner_app(
+        terminal_registry=t.registry,
+        resource_registry=resources,
+        server_client=NullServerClient(),
+    )
+    app_server = SimpleNamespace(close=AsyncMock())
+    forwarder = asyncio.create_task(asyncio.Event().wait())
+    monkeypatch.setitem(orchestration._AUTO_CODEX_APP_SERVERS, t.args[0], app_server)
+    monkeypatch.setitem(orchestration._AUTO_FORWARDER_TASKS, t.args[0], forwarder)
+    runner, captured = _make_runner(resource_registry=resources)
+    if caller in {"claude-native", "cursor-native"}:
+        import importlib
+
+        bridge = importlib.import_module(
+            f"omnigent.harnesses.{caller.replace('-', '_')}.bridge"
+        )
+        monkeypatch.setattr(bridge, "kill_session", Mock())
+        if caller == "claude-native":
+            monkeypatch.setattr(
+                interrupt, "_claude_native_bridge_id_for_session", AsyncMock(return_value="test")
+            )
+            monkeypatch.setattr(
+                bridge, "bridge_dir_for_bridge_id", lambda _: t.instance.private_dir
+            )
+        else:
+            monkeypatch.setattr(
+                bridge, "bridge_dir_for_session_id", lambda _: t.instance.private_dir
+            )
+
+    async def cleanup() -> None:
+        if caller == "reaper":
+            await app.state.native_pane_reaper._reap(
+                PaneRef(t.args[0], "terminal_codex_main", "codex", t.instance.socket_path)
+            )
+        elif caller == "reset":
+            transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+            async with httpx.AsyncClient(transport=transport, base_url="http://runner") as client:
+                response = await client.post(f"/v1/sessions/{t.args[0]}/reset-state")
+            if t.spawn.side_effect is not None:
+                assert response.status_code == 500
+                assert response.json()["error"]["code"] == "unavailable_probe"
+                assert "reset" not in response.json()
+            else:
+                assert response.status_code == 200, response.text
+        else:
+            response = await runner.stop(caller, t.args[0])
+            assert response.status_code == 204
+
+    try:
+        t.spawn.side_effect = OSError(errno.EAGAIN, "synthetic resource exhaustion")
+        if caller == "reset":
+            await cleanup()
+        else:
+            with pytest.raises(OmnigentError) as refusal:
+                await cleanup()
+            assert refusal.value.code == "unavailable_probe"
+        assert t.registry.get(*t.args[:3]) is t.instance
+        assert t.registry.get_instance_lock(*t.args[:3]) is instance_lock
+        assert t.owner.record_path.read_bytes() == receipt
+        assert t.instance.private_dir.exists()
+        assert t.process.poll() is None
+        assert not forwarder.done()
+        app_server.close.assert_not_awaited()
+        deleted.assert_not_called()
+        assert captured["published"] == []
+        assert captured["wakes"] == []
+
+        t.spawn.side_effect = None
+        await cleanup()
+        assert t.registry.get(*t.args[:3]) is None
+        assert t.registry.get_instance_lock(*t.args[:3]) is None
+        assert t.owner.record.terminals == []
+        assert t.process.poll() is not None
+        deleted.assert_called_once()
+        if caller == "reaper":
+            app_server.close.assert_awaited_once()
+            assert forwarder.cancelled()
+    finally:
+        forwarder.cancel()
+        await asyncio.gather(forwarder, return_exceptions=True)
