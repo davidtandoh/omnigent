@@ -292,6 +292,114 @@ omnigent pi                          # Pi
 omnigent copilot                     # GitHub Copilot (SDK harness, via `omnigent run`)
 ```
 
+Claude, Codex, Kiro, and Antigravity can receive explicit variables in the
+native terminal that Omnigent creates:
+
+```bash
+omnigent codex --env FM_HOME=/opt/firstmate --env FM_TASK_ID=worker-7 \
+  --env COMPACT_ADVISER_DISABLE=1
+omnigent claude --env CLAUDE_CONFIG_DIR=/opt/claude-worker \
+  --env CLAUDE_ACCOUNT=
+```
+
+Repeat `--env KEY=VALUE` for each variable. Omnigent splits at the first `=`.
+An empty value, such as `CLAUDE_ACCOUNT=`, clears an inherited override.
+Duplicate or invalid names fail before launch. The option applies only to a
+new runner. Stop an existing session runner before you change its launch
+environment.
+
+For Codex, Omnigent applies these variables to both the app-server that runs
+tools and the attached terminal UI. The agent's tool shell therefore receives
+the explicit launch environment.
+
+Omnigent sends only the entries that you specify. It does not copy the client
+environment, and it does not store these values in session metadata. The
+values cross the configured Omnigent server and host-daemon control channel.
+Use a trusted server and host. Do not put secrets on a command line because
+shell history and process inspection can expose command-line values.
+
+`omnigent agy` requires agy 1.1.13 or newer. When `GEMINI_API_KEY` is set,
+direct Gemini API authentication takes precedence over agy's saved OAuth login.
+
+Using OpenClaw? See the [OpenClaw integration guide](docs/openclaw.md) to import
+its coding agents or drive a live OpenClaw Gateway session over ACP.
+
+<details>
+<summary>Grok Build and Devin</summary>
+
+Two more coding agents are built in but have no `omnigent <name>` launcher of
+their own, because each ships a CLI that holds its own login. Install the vendor
+CLI, log in with it, then name the harness:
+
+```bash
+# Grok Build (xAI)
+curl -fsSL https://x.ai/cli/install.sh | bash
+grok login --device-auth              # xAI OAuth
+omnigent run --harness grok           # 'grok-build' also works
+
+# Devin (Cognition)
+curl -fsSL https://cli.devin.ai/install.sh | bash
+devin auth login
+omnigent run --harness devin
+```
+
+Both speak the [Agent Client Protocol](https://agentclientprotocol.com) over
+stdio, and Omnigent stores no credential for either — each CLI reads back the
+login it wrote to disk. That also means `--model` is refused rather than
+silently dropped: both run their account-default model. To pin one, configure an
+`acp:` agent whose command passes the vendor's own model flag.
+
+Use the vendor login rather than an API key. A builtin ACP row has no
+`env_passthrough` of its own, and `XAI_API_KEY` is not in the host-to-runner
+credential allowlist, so exporting it in your shell does not reach the agent.
+If you need the key route, pass it explicitly with
+`OMNIGENT_RUNNER_ENV_PASSTHROUGH=XAI_API_KEY`, or configure an `acp:` agent that
+declares the passthrough.
+
+</details>
+
+#### 🐙 Polly and 🟠🔵 Debby
+
+Two example agents ship with the repo, and they make good first sessions:
+
+```bash
+omnigent run examples/polly/
+omnigent run examples/debby/
+omnigent run examples/deep-research/
+
+# ...or on a different harness (sub-agents keep their own):
+omnigent run examples/polly/ --harness <harness>
+omnigent run examples/debby/ --harness <harness>
+```
+
+**🐙 Polly** is a multi-agent coding orchestrator who writes no code herself.
+She's the tech lead: she plans, delegates the work to coding sub-agents
+(Claude Code, Codex, or Pi) in parallel git worktrees, then routes each diff
+to a reviewer from a different vendor than the one that wrote it. You merge.
+
+**🟠🔵 Debby** is a brainstorming partner with two heads, one Claude and one GPT.
+Every question you ask goes to both heads, and she lays the two answers out
+side by side. Type `/debate` and the heads critique each other for a few
+rounds before converging. (She needs both a Claude and an OpenAI credential;
+see step 3.)
+
+**🔎 Deep Research** is a single agent that answers a question with a cited,
+cross-checked report. It plans sub-queries, searches the live web and reads
+full pages through an MCP search server, and verifies each claim across
+independent sources. It's also the simplest example to copy from: one agent
+plus one `tools/mcp/*.yaml` server, no sub-agents.
+
+**Prefer the browser?** One command starts the local server and registers this
+machine as a host:
+
+```bash
+omnigent start   # starts the local server and registers this machine as a host
+```
+
+Open the server URL it prints, hit **New Chat**, pick your machine, and go.
+Check status with `omnigent server status`; stop everything with
+`omnigent stop`.
+
 For machine-readable runtime discovery, see the
 [runtime launch contract](docs/runtime-launch-contract.md). For session custody
 records, launch bindings and exact session end, see

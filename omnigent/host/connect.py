@@ -2411,8 +2411,6 @@ class HostProcess:
                         ):
                             raise CustodyError("scope_mismatch")
                         grace_s = owner_stop_grace_s(record)
-                    elif handle.session_id != frame.session_id:
-                        raise CustodyError("scope_mismatch")
             except (CustodyError, OSError, ValueError, psutil.Error) as exc:
                 return HostStopRunnerResultFrame(
                     request_id=frame.request_id,
@@ -2575,7 +2573,7 @@ class HostProcess:
         handle = self._runners.get(frame.runner_id)
         if frame.session_id and (
             custody_session_key(frame.session_id) in self._custody_refusals
-            or (handle is not None and handle.session_id != frame.session_id)
+            or (handle is not None and handle.durable and handle.session_id != frame.session_id)
             or any(
                 runner_id != frame.runner_id and owned.session_id == frame.session_id
                 for runner_id, owned in self._runners.items()
@@ -4589,7 +4587,6 @@ class HostProcess:
         from omnigent.process_logging import data_dir
 
         base = data_dir()
-        config_digest = host_config_digest()
         self._custody_refusals.clear()
         for record in custody_records(base, refusals=self._custody_refusals):
             if record.host_id != self._identity.host_id or record.endpoint != self._server_url:
@@ -4604,7 +4601,7 @@ class HostProcess:
                 adopted = attachment.adopt(
                     host_id=self._identity.host_id,
                     endpoint=self._server_url,
-                    config_digest=config_digest,
+                    config_digest=host_config_digest(),
                 )
                 handle = self._runners.get(record.runner_id)
                 if handle is not None:

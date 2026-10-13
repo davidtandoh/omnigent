@@ -1889,7 +1889,7 @@ class TerminalInstance:
         # server (or a remain-on-exit pane), so cleanup must not trust that
         # advisory flag before issuing kill-server.
         if self.running or self.socket_path.exists():
-            with contextlib.suppress(RuntimeError):
+            with contextlib.suppress(_TmuxTargetGoneError):
                 await self._tmux("kill-server")
         self.running = False
 

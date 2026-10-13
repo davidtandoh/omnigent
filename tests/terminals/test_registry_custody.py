@@ -141,8 +141,14 @@ async def test_launch_failure_never_exposes_unpublished_terminal(
         with pytest.raises(RuntimeError, match="Session custody refused: process_pending"):
             await t.registry.launch(*t.args)
         t.create.assert_called_once()
-        with pytest.raises(custody.CustodyError):
+        if close_fails and failure in {"publication", "verification"}:
             custody.verify_resources(t.owner.record)
+            assert t.instance.running
+            assert t.instance.socket_path.exists()
+            assert t.instance.private_dir.exists()
+        else:
+            with pytest.raises(custody.CustodyError):
+                custody.verify_resources(t.owner.record)
     else:
         assert t.owner.record.terminals == []
     t.owner.finish()
@@ -213,13 +219,17 @@ async def test_cleanup_retains_evidence_for_missing_receipt(
     t.owner._publish()
     t.spawn.side_effect = OSError(errno.EAGAIN, "private diagnostics")
     if operation == "close":
-        with pytest.raises(custody.CustodyError, match="unavailable_probe"):
+        with pytest.raises(RuntimeError, match="tmux command could not start"):
             await t.registry.close(*t.args[:3])
     elif operation == "cleanup":
         await t.registry.cleanup_conversation(t.args[0])
     else:
         await t.registry.shutdown()
-    assert t.registry.get(*t.args[:3]) is None
+    assert t.registry.active_conversation_ids() == [t.args[0]]
+    assert t.registry.get_instance_lock(*t.args[:3]) is not None
+    assert t.instance.running
+    assert t.instance.private_dir.exists()
+    assert t.process.poll() is None
     assert len(t.owner.record.terminals) == 1
     assert t.owner.record.terminals[0].tmux is None
     t.owner.finish()
@@ -303,3 +313,52 @@ async def test_foreign_terminal_socket_still_refuses_authoritative_operations(
             )
     assert t.owner.record_path.read_bytes() == before
     t.spawn.assert_not_awaited()
+
+
+@pytest.mark.parametrize("operation", ["close", "cleanup", "shutdown"])
+@pytest.mark.parametrize("failure", ["eagain", "command", "timeout"])
+async def test_ordinary_cleanup_retains_live_terminal_until_retry(
+    owned_terminal, monkeypatch: pytest.MonkeyPatch, operation: str, failure: str
+) -> None:
+    t = owned_terminal
+    monkeypatch.setattr(custody, "_current_custody", None)
+    await t.registry.launch(*t.args)
+    instance_lock = t.registry.get_instance_lock(*t.args[:3])
+    environment = Mock()
+    t.instance.os_env = environment
+    if failure == "eagain":
+        t.spawn.side_effect = OSError(errno.EAGAIN, "resource unavailable")
+    elif failure == "command":
+        t.spawn.return_value = SimpleNamespace(
+            returncode=1, communicate=AsyncMock(return_value=(b"", b"permission denied"))
+        )
+    else:
+        t.spawn.side_effect = asyncio.TimeoutError()
+    if operation == "close":
+        with pytest.raises((RuntimeError, asyncio.TimeoutError)):
+            await t.registry.close(*t.args[:3])
+    elif operation == "cleanup":
+        await t.registry.cleanup_conversation(t.args[0])
+    else:
+        await t.registry.shutdown()
+    assert t.registry.get(*t.args[:3]) is t.instance
+    assert t.registry.get_instance_lock(*t.args[:3]) is instance_lock
+    assert t.instance.running
+    assert t.instance.private_dir.exists()
+    assert t.instance.socket_path.exists()
+    assert t.process.poll() is None
+    environment.close.assert_not_called()
+
+    async def killed():
+        t.process.terminate()
+        t.process.wait(timeout=5)
+        return b"", b""
+
+    t.spawn.side_effect = None
+    t.spawn.return_value = SimpleNamespace(returncode=0, communicate=AsyncMock(side_effect=killed))
+    assert await t.registry.close(*t.args[:3])
+    assert t.registry.get(*t.args[:3]) is None
+    assert t.registry.get_instance_lock(*t.args[:3]) is None
+    assert not t.instance.running
+    assert not t.instance.private_dir.exists()
+    environment.close.assert_called_once()

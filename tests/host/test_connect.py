@@ -9129,3 +9129,123 @@ async def test_dead_custodian_status_allows_verified_ended_receipt(monkeypatch, 
         assert owner.record_path.read_bytes() == before
         process.terminate.assert_not_called()
     _cleanup_host(host)
+
+
+async def test_authenticated_successor_status_and_stop_use_retained_runner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    host = _make_host_process()
+    monkeypatch.setattr("omnigent.process_logging.data_dir", lambda: tmp_path)
+    process = Mock()
+    process.poll.return_value = None
+    handle = _RunnerHandle(
+        proc=process, log_path=tmp_path / "runner.log", session_id="launch-session"
+    )
+    host._runners["retained-runner"] = handle
+    try:
+        status = await host._handle_runner_status(
+            HostRunnerStatusFrame(
+                request_id="status", runner_id="retained-runner", session_id="successor"
+            )
+        )
+        assert status.status == "alive"
+        stopped = await host._handle_stop(
+            HostStopRunnerFrame(
+                request_id="stop", runner_id="retained-runner", session_id="successor"
+            )
+        )
+        assert stopped.status == "stopped"
+        process.terminate.assert_called_once()
+        assert "retained-runner" not in host._runners
+    finally:
+        _cleanup_host(host)
+
+
+@pytest.mark.parametrize("scope", ["none", "foreign-host", "foreign-endpoint", "matching"])
+async def test_symlink_config_restricts_only_in_scope_custody_adoption(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scope: str
+) -> None:
+    from omnigent.config import load_global_config
+    from omnigent.runner.custody import SessionCustody, custody_session_key
+    from tests.runner.test_session_custody import context
+
+    config = tmp_path / "actual.yaml"
+    config.write_text("{}\n")
+    link = tmp_path / "config.yaml"
+    link.symlink_to(config)
+    monkeypatch.setattr("omnigent.config.global_config_path", lambda: link)
+    monkeypatch.setattr("omnigent.process_logging.data_dir", lambda: tmp_path)
+    assert load_global_config() == {}
+    host = _make_host_process()
+    common = {**context(), "host_id": host._identity.host_id, "endpoint": host._server_url}
+    if scope == "foreign-host":
+        common["host_id"] = "other-host"
+    elif scope == "foreign-endpoint":
+        common["endpoint"] = "http://other-endpoint:8000"
+    with contextlib.ExitStack() as resources:
+        if scope != "none":
+            owner = resources.enter_context(SessionCustody.create(tmp_path, common))
+            before = owner.record_path.read_bytes()
+        try:
+            host._adopt_custodied_runners()
+            assert not host._runners
+            if scope == "matching":
+                assert host._custody_refusals == {
+                    custody_session_key(str(common["session_id"])): "record_mismatch"
+                }
+            else:
+                assert not host._custody_refusals
+            if scope != "none":
+                assert owner.record_path.read_bytes() == before
+        finally:
+            _cleanup_host(host)
+
+
+@pytest.mark.parametrize("mismatch", ["session", "runner", "host", "endpoint", "process"])
+async def test_custody_stop_retains_exact_scope_checks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mismatch: str
+) -> None:
+    from omnigent.runner.custody import SessionCustody
+    from tests.runner.test_session_custody import context
+
+    host = _make_host_process()
+    monkeypatch.setattr("omnigent.process_logging.data_dir", lambda: tmp_path)
+    monkeypatch.setattr("omnigent.host.connect.host_config_digest", lambda: "a" * 64)
+    common = {**context(), "host_id": host._identity.host_id, "endpoint": host._server_url}
+    if mismatch == "host":
+        common["host_id"] = "foreign-host"
+    elif mismatch == "endpoint":
+        common["endpoint"] = "http://foreign-endpoint:8000"
+    with SessionCustody.create(tmp_path, common) as owner:
+        session = owner.record.session_id
+        runner = owner.record.runner_id
+        if mismatch == "session":
+            session = "foreign-session"
+        elif mismatch == "runner":
+            runner = "foreign-runner"
+        process = Mock(pid=owner.record.owner.pid, poll=Mock(return_value=None))
+        if mismatch == "process":
+            process.pid += 100000000
+        host._runners[runner] = _RunnerHandle(
+            proc=process,
+            log_path=tmp_path / "runner.log",
+            session_id=owner.record.session_id,
+            durable=True,
+        )
+        try:
+            stopped = await host._handle_stop(
+                HostStopRunnerFrame(request_id="stop", runner_id=runner, session_id=session)
+            )
+            assert stopped.status == "failed"
+            process.terminate.assert_not_called()
+            process.kill.assert_not_called()
+            assert runner in host._runners
+            if mismatch in {"session", "runner"}:
+                status = await host._handle_runner_status(
+                    HostRunnerStatusFrame(
+                        request_id="status", runner_id=runner, session_id=session
+                    )
+                )
+                assert status.status == "refused"
+        finally:
+            _cleanup_host(host)

@@ -142,7 +142,7 @@ class TerminalRegistry:
         self._conversation_link_base_url = conversation_link_base_url
         # Two-level dict: conversation_id -> (name, key) -> instance.
         # Per-conversation maps make ``cleanup_conversation`` cheap
-        # (one pop) and ``list_for_conversation`` direct.
+        # and ``list_for_conversation`` direct.
         self._by_conversation: dict[str, dict[tuple[str, str], TerminalInstance]] = {}
         # Per-instance locks keyed by the full (conv_id, name, session_key)
         # triple. Created at launch, removed at close /
@@ -596,9 +596,8 @@ class TerminalRegistry:
             still occupies the key. A caller that wants to retract the
             instance IT published must pass it: the key can have been
             reassigned to a successor in the meantime, and closing by key
-            alone would terminate that successor instead. Compared under
-            the registry lock, so no other writer can swap the instance
-            between the check and the removal.
+            alone would terminate that successor instead. Identity is checked
+            under the registry lock before close and before removal.
         :returns: ``True`` if a live instance was closed, ``False``
             if no live instance was found (already-closed or
             never-launched), or if *expected* no longer occupies the key.
@@ -610,30 +609,20 @@ class TerminalRegistry:
                 return False
             if expected is not None and slot.get(key) is not expected:
                 return False
-            instance = slot.pop(key, None)
-            if not slot:
-                # Drop the empty per-conversation dict so memory
-                # doesn't grow with stale conversation ids.
-                self._by_conversation.pop(conversation_id, None)
-            # Drop the per-instance lock too so subsequent
-            # ``get_instance_lock`` calls return ``None`` for this
-            # closed instance (callers surface a "not running"
-            # error to the LLM).
-            if not _preserve_lock:
-                self._instance_locks.pop((conversation_id, terminal_name, session_key), None)
+            instance = slot.get(key)
         if instance is None:
             return False
-        try:
-            await asyncio.wait_for(
-                self._close_instance(instance, conversation_id), timeout=_CLOSE_TIMEOUT_S
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Terminal close timed out for %s:%s in conv %s",
-                terminal_name,
-                session_key,
-                conversation_id,
-            )
+        await asyncio.wait_for(
+            self._close_instance(instance, conversation_id), timeout=_CLOSE_TIMEOUT_S
+        )
+        with self._lock:
+            slot = self._by_conversation.get(conversation_id)
+            if slot is not None and slot.get(key) is instance:
+                del slot[key]
+                if not slot:
+                    self._by_conversation.pop(conversation_id, None)
+                if not _preserve_lock:
+                    self._instance_locks.pop((conversation_id, terminal_name, session_key), None)
         return True
 
     async def cleanup_conversation(self, conversation_id: str) -> None:
@@ -657,20 +646,10 @@ class TerminalRegistry:
         :param conversation_id: The conversation being torn down.
         """
         with self._lock:
-            slot = self._by_conversation.pop(conversation_id, None)
-            # Drop every per-instance lock owned by this conversation.
-            # Iterate over `slot` (the just-popped per-conv map) for the
-            # canonical (name, key) pairs.
-            if slot:
-                for name, sess in slot:
-                    self._instance_locks.pop((conversation_id, name, sess), None)
-        if not slot:
-            return
+            slot = dict(self._by_conversation.get(conversation_id, {}))
         for (name, key), instance in slot.items():
             try:
-                await asyncio.wait_for(
-                    self._close_instance(instance, conversation_id), timeout=_CLOSE_TIMEOUT_S
-                )
+                await self.close(conversation_id, name, key, expected=instance)
             except asyncio.TimeoutError:
                 logger.warning(
                     "cleanup_conversation: close timed out for %s:%s in conv %s",
@@ -697,31 +676,9 @@ class TerminalRegistry:
         a stuck instance shouldn't block the rest of Omnigent shutdown.
         """
         with self._lock:
-            slots = list(self._by_conversation.items())
-            self._by_conversation.clear()
-            # AP-shutdown clears all instance locks too — every
-            # conversation's terminals are being torn down.
-            self._instance_locks.clear()
-        for conversation_id, slot in slots:
-            for (name, key), instance in slot.items():
-                try:
-                    await asyncio.wait_for(
-                        self._close_instance(instance, conversation_id), timeout=_CLOSE_TIMEOUT_S
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "shutdown: close timed out for %s:%s in conv %s",
-                        name,
-                        key,
-                        conversation_id,
-                    )
-                except Exception:
-                    logger.exception(
-                        "shutdown: close failed for %s:%s in conv %s",
-                        name,
-                        key,
-                        conversation_id,
-                    )
+            conversation_ids = list(self._by_conversation)
+        for conversation_id in conversation_ids:
+            await self.cleanup_conversation(conversation_id)
 
     def active_conversation_ids(self) -> list[str]:
         """Return ids of conversations with at least one registered terminal.
