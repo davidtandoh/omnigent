@@ -304,6 +304,37 @@ async def test_launch_replaces_stale_running_entry(
     assert created.lifecycle_trace.session_id == "conv_x"
 
 
+async def test_sequential_launch_reuses_then_replaces_closed_instance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import Mock
+
+    instances = [
+        TerminalInstance("bash", "s1", tmp_path / f"{index}.sock", tmp_path, running=True)
+        for index in range(2)
+    ]
+    for instance in instances:
+        monkeypatch.setattr(instance, "launch", AsyncMock())
+        monkeypatch.setattr(instance, "is_alive", AsyncMock(return_value=True))
+        monkeypatch.setattr(instance, "close", AsyncMock())
+    create = Mock(side_effect=[TerminalCreateResult(instance, tmp_path) for instance in instances])
+    monkeypatch.setattr(registry_mod, "create_terminal_instance", create)
+    registry = TerminalRegistry()
+    args = ("conv_sequential", "bash", "s1", TerminalEnvSpec(command="bash"))
+    assert await registry.launch(*args) is instances[0]
+    first_lock = registry.get_instance_lock(*args[:3])
+    assert first_lock is not None and not first_lock.locked()
+    assert await registry.launch(*args) is instances[0]
+    create.assert_called_once()
+    assert registry.get_instance_lock(*args[:3]) is first_lock
+    assert await registry.close(*args[:3])
+    instances[0].close.assert_awaited_once()
+    assert registry.get_instance_lock(*args[:3]) is None
+    assert await registry.launch(*args) is instances[1]
+    assert create.call_count == 2
+    assert registry.get_instance_lock(*args[:3]) is not first_lock
+
+
 def test_transfer_moves_terminal_without_closing_tmux(tmp_path: Path) -> None:
     """
     Terminal transfer changes ownership without touching the instance.

@@ -797,3 +797,21 @@ def test_launch_does_not_deliver_idle_messages(
             if isinstance(text, str) and "is idle" in text:
                 idle_message_texts.append(text)
     assert idle_message_texts == [], f"unexpected idle messages from launch: {idle_message_texts}"
+
+
+def test_launch_formats_existing_custody_refusal(registry, ctx, monkeypatch) -> None:
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(
+        registry,
+        "get",
+        Mock(side_effect=RuntimeError("Session custody refused: binding_mismatch")),
+    )
+    launch = Mock()
+    monkeypatch.setattr(registry, "launch", launch)
+    tool = SysTerminalLaunchTool(
+        spec=_make_spec(terminals={"bash": TerminalEnvSpec(command="bash")}), registry=registry
+    )
+    result = json.loads(tool.invoke(json.dumps({"terminal": "bash", "session": "s1"}), ctx))
+    assert result == {"error": "launch failed: Session custody refused: binding_mismatch"}
+    launch.assert_not_called()

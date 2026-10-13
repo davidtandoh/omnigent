@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -85,6 +86,15 @@ def encode_native_launch_environment(values: Mapping[str, object] | None) -> str
         sort_keys=True,
         separators=(",", ":"),
     )
+
+
+def native_launch_environment_digest(values: Mapping[str, object] | None) -> str:
+    """Qualify explicit launch values without storing or returning those values."""
+    from omnigent.native.state_files import canonical_json
+
+    return hashlib.sha256(
+        canonical_json(validate_native_launch_environment(values)).encode()
+    ).hexdigest()
 
 
 _installed_native_launch_environment: dict[str, str] = {}

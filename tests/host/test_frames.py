@@ -1155,7 +1155,8 @@ def test_launch_runner_result_frame_legacy_payload_decodes_error_code_none() -> 
     assert decoded.error_code is None
 
 
-def test_stop_runner_frame_round_trip() -> None:
+@pytest.mark.parametrize("session_id", [None, "conv_exact"])
+def test_stop_runner_frame_round_trip(session_id: str | None) -> None:
     """
     Verify HostStopRunnerFrame survives encode → decode.
 
@@ -1165,11 +1166,14 @@ def test_stop_runner_frame_round_trip() -> None:
     original = HostStopRunnerFrame(
         request_id="req_002",
         runner_id="runner_token_abc",
+        session_id=session_id,
     )
     decoded = decode_host_frame(encode_host_frame(original))
     assert isinstance(decoded, HostStopRunnerFrame)
     assert decoded.request_id == "req_002"
     assert decoded.runner_id == "runner_token_abc"
+
+    assert decoded.session_id == session_id
 
 
 def test_stop_runner_result_frame_round_trip() -> None:
@@ -1236,11 +1240,13 @@ def test_runner_status_frame_round_trip() -> None:
     original = HostRunnerStatusFrame(
         request_id="req_rs_1",
         runner_id="runner_token_abc",
+        session_id="session_abc",
     )
     decoded = decode_host_frame(encode_host_frame(original))
     assert isinstance(decoded, HostRunnerStatusFrame)
     assert decoded.request_id == "req_rs_1"
     assert decoded.runner_id == "runner_token_abc"
+    assert decoded.session_id == "session_abc"
 
 
 def test_runner_status_result_frame_round_trip() -> None:
@@ -1252,7 +1258,7 @@ def test_runner_status_result_frame_round_trip() -> None:
     round-trip would make the server wait when it should relaunch, or
     vice versa.
     """
-    for status in ("alive", "dead", "unknown"):
+    for status in ("alive", "dead", "unknown", "refused"):
         original = HostRunnerStatusResultFrame(
             request_id="req_rs_1",
             status=status,
@@ -2471,3 +2477,8 @@ def test_runner_exit_rejects_non_boolean_connection_evidence(invalid: object) ->
                 }
             )
         )
+
+
+def test_stop_runner_frame_requires_explicit_scope() -> None:
+    with pytest.raises(ValueError, match="session_id"):
+        decode_host_frame('{"kind":"host.stop_runner","request_id":"stop","runner_id":"runner"}')

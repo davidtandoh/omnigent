@@ -5597,24 +5597,20 @@ async def _query_host_runner_status(
     host_conn: HostConnection,
     host_registry: HostRegistry,
     runner_id: str,
+    *,
+    session_id: str | None = None,
 ) -> str | None:
     """
-    Ask a host whether a runner's process is alive, dead, or unknown.
+    Query host-verified runner liveness and optional session scope.
 
-    The host owns runner-process liveness (it holds the ``Popen``), so it
-    can answer the one question the server's tunnel registry cannot: is an
-    absent-from-the-tunnel runner still coming (booting) or gone for good
-    (stopped, crashed, or lost to a host restart)? Used before the connect
-    grace so the dispatch path waits only for a runner that is coming.
+    Result semantics belong to ``HostRunnerStatusResultFrame``. This helper
+    transports the query without authorizing a launch or binding change.
 
     :param host_conn: Live host connection to query.
     :param host_registry: Registry used to enqueue the outbound frame.
     :param runner_id: Runner to ask about, e.g. ``"runner_abc123..."``.
-    :returns: ``"alive"``, ``"dead"``, or ``"unknown"`` from the host; or
-        ``None`` when the host didn't reply in time, the connection
-        dropped, or the host is too old to support the query. ``None``
-        means "no authoritative answer" — the caller falls back to the
-        plain connect grace, preserving the prior blind-wait behavior.
+    :param session_id: Exact session scope to verify, when supplied.
+    :returns: The host status, or ``None`` if no authoritative reply arrives.
     """
     from omnigent.host.frames import HostRunnerStatusFrame, encode_host_frame
     from omnigent.server.routes import sessions as _facade
@@ -5622,7 +5618,9 @@ async def _query_host_runner_status(
     request_id = secrets.token_hex(8)
     future: asyncio.Future[dict[str, str | None]] = asyncio.get_running_loop().create_future()
     host_conn.pending_runner_status[request_id] = future
-    frame = encode_host_frame(HostRunnerStatusFrame(request_id=request_id, runner_id=runner_id))
+    frame = encode_host_frame(
+        HostRunnerStatusFrame(request_id=request_id, runner_id=runner_id, session_id=session_id)
+    )
     try:
         try:
             host_registry.send_text(host_conn, frame)
@@ -5906,9 +5904,8 @@ class _HostLaunchAttempt:
     """
     Outcome of a relaunch ``host.launch_runner`` round-trip.
 
-    :param runner_id: The token-bound runner id minted for this attempt,
-        e.g. ``"runner_token_abc123..."``. Always set (the binding is
-        rotated before the frame is sent), even when the host refused.
+    :param runner_id: The existing token-bound runner id while its owner
+        reconnects, or the new binding minted for a launch attempt.
     :param error_code: Structured failure category from the host's result
         frame, e.g. ``"harness_not_configured"``; ``None`` on a successful
         launch, on a timeout waiting for the result, or when the host sent
@@ -5916,7 +5913,7 @@ class _HostLaunchAttempt:
     :param error: Human-readable failure message from the host, e.g.
         ``"harness 'codex' is not configured on host 'laptop' — run
         `omnigent setup` ..."``; ``None`` when there was no error.
-    :param acknowledged: Whether the host confirmed ``status="launched"``;
+    :param acknowledged: Whether the host confirmed a launch or a live owner;
         timeout and lost-connection attempts remain unconfirmed.
     """
 
@@ -6077,6 +6074,28 @@ async def _launch_runner_on_host_locked(
     from omnigent.runner.identity import token_bound_runner_id
 
     await host_registry.admit_launch(host_conn, conv.id)
+    if conv.runner_id and _resolve_harness(conv) == "codex-native":
+        if conv.host_id is None or host_registry.get(conv.host_id) is not host_conn:
+            return _HostLaunchAttempt(
+                runner_id=conv.runner_id,
+                error_code="host_launch_failed",
+                error="The bound host connection changed; retry after reconnecting.",
+            )
+        status = await _query_host_runner_status(
+            host_conn, host_registry, conv.runner_id, session_id=conv.id
+        )
+        if host_registry.get(conv.host_id) is not host_conn or status not in {
+            "alive",
+            "dead",
+            "unknown",
+        }:
+            return _HostLaunchAttempt(
+                runner_id=conv.runner_id,
+                error_code="host_launch_failed",
+                error="The bound owner status could not be verified; retry after reconnecting.",
+            )
+        if status == "alive":
+            return _HostLaunchAttempt(runner_id=conv.runner_id, acknowledged=True)
     superseded_runner_id = conv.runner_id
     binding_token = secrets.token_urlsafe(32)
     new_runner_id = token_bound_runner_id(binding_token)
@@ -7194,7 +7213,7 @@ async def _stop_session_host_runner(
     future: asyncio.Future[dict[str, str | None]] = asyncio.get_running_loop().create_future()
     conn.pending_stops[request_id] = future
     stop_frame = encode_host_frame(
-        HostStopRunnerFrame(request_id=request_id, runner_id=runner_id),
+        HostStopRunnerFrame(request_id=request_id, runner_id=runner_id, session_id=session_id),
     )
     try:
         try:
