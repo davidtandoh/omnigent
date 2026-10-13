@@ -656,6 +656,12 @@ class PolicyEngine:
         period = value.get("period")
         start = value.get("window_start")
         approved = value.get("ask_approved_usd")
+        if (
+            not isinstance(period, str)
+            or not isinstance(start, str)
+            or not isinstance(approved, int | float)
+        ):
+            raise ValueError("Period approval requires period, window_start, and ask_approved_usd")
         owner = self._store.get_session_owner_authority(self._conversation_id)
         if owner is None:
             return
