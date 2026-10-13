@@ -67,7 +67,7 @@ class CustodyRecord(CustodyContext):
     schema_version: Literal[1] = 1
     owner_generation: str
     owner: ProcessIdentity
-    state: Literal["starting", "live", "ended"] = "starting"
+    state: Literal["starting", "live", "ended", "transferred"] = "starting"
     terminals: list[TerminalReceipt] = Field(default_factory=list)
     helpers: dict[str, ProcessIdentity] = Field(default_factory=dict)
     resources: dict[str, ConfigFile] = Field(default_factory=dict)
@@ -147,6 +147,8 @@ def _require_live(identity: ProcessIdentity) -> psutil.Process:
 
 def verify_resources(record: CustodyRecord) -> None:
     """Verify recorded sockets/processes/config without taking cleanup authority."""
+    if record.state == "transferred":
+        raise CustodyError("scope_mismatch")
     _require_live(record.owner)
     for config in [*record.config_files, *record.resources.values()]:
         try:
@@ -227,22 +229,23 @@ class SessionCustody:
         self.finish()
 
     def still_owner(self) -> bool:
-        try:
-            current = _read_record(self.record_path)
-            info = Path(self._lock.lock_file).lstat()
-            return (
-                self._lock.is_locked
-                and (info.st_dev, info.st_ino) == self._lock_identity
-                and CustodyContext.model_validate(
-                    current.model_dump(include=set(CustodyContext.model_fields))
+        with self._updates:
+            try:
+                current = _read_record(self.record_path)
+                info = Path(self._lock.lock_file).lstat()
+                return (
+                    self._lock.is_locked
+                    and (info.st_dev, info.st_ino) == self._lock_identity
+                    and CustodyContext.model_validate(
+                        current.model_dump(include=set(CustodyContext.model_fields))
+                    )
+                    == self._context
+                    and current.owner == self.record.owner
+                    and current.owner_generation == self.record.owner_generation
+                    and current.state not in {"ended", "transferred"}
                 )
-                == self._context
-                and current.owner == self.record.owner
-                and current.owner_generation == self.record.owner_generation
-                and current.state != "ended"
-            )
-        except (CustodyError, OSError, ValueError):
-            return False
+            except (CustodyError, OSError, ValueError):
+                return False
 
     def _publish(self) -> None:
         if not self.still_owner():
@@ -302,6 +305,58 @@ class SessionCustody:
             if self.record.resources.get(name) == resource:
                 del self.record.resources[name]
                 self._publish()
+
+    def require_session_scope(self, session_id: str) -> None:
+        with self._updates:
+            if session_id == self.record.session_id:
+                return
+            try:
+                directory = _session_dir(self.directory.parent.parent, session_id)
+            except FileNotFoundError:
+                return
+            record = _read_record(directory / "session.json")
+            if record.state == "transferred":
+                raise CustodyError("scope_mismatch")
+
+    def transfer_session(self, source: str, target: str, socket: Path) -> None:
+        with self._updates:
+            if self.record.session_id != source or not self.still_owner():
+                raise CustodyError("scope_mismatch")
+            if not any(
+                (r.name, r.session_key, r.socket) == ("codex", "main", str(socket))
+                for r in self.record.terminals
+            ):
+                raise CustodyError("binding_mismatch")
+            operation = _lock(self.directory / "operation.lock")
+            target_lock = None
+            try:
+                if not self.still_owner():
+                    raise CustodyError("scope_mismatch")
+                verify_resources(self.record)
+                directory = _session_dir(self.directory.parent.parent, target, create=True)
+                if (directory / "session.json").exists():
+                    raise CustodyError("owner_busy")
+                target_lock = _lock(directory / "owner.lock")
+                retired = self.record.model_copy(update={"state": "transferred"})
+                successor = self.record.model_copy(update={"session_id": target}, deep=True)
+                write_state_file(self.record_path, retired.model_dump(mode="json"))
+                write_state_file(directory / "session.json", successor.model_dump(mode="json"))
+                old_lock = self._lock
+                self.directory = directory
+                self.record_path = directory / "session.json"
+                self.record = successor
+                self._lock = target_lock
+                target_lock = None
+                info = Path(self._lock.lock_file).lstat()
+                self._lock_identity = (info.st_dev, info.st_ino)
+                self._context = CustodyContext.model_validate(
+                    successor.model_dump(include=set(CustodyContext.model_fields))
+                )
+                old_lock.release()
+            finally:
+                if target_lock is not None:
+                    target_lock.release()
+                operation.release()
 
     def finish(self) -> None:
         with self._updates:
@@ -561,6 +616,10 @@ def custody_records(base: Path, *, refusals: dict[str, str] | None = None) -> li
                     str(exc) if isinstance(exc, CustodyError) else "record_mismatch"
                 )
             continue
+        if record.state == "transferred":
+            if refusals is not None:
+                refusals[child.name] = "scope_mismatch"
+            continue
         records.append(record)
     return [record for record in records if record.state != "ended"]
 
@@ -568,7 +627,7 @@ def custody_records(base: Path, *, refusals: dict[str, str] | None = None) -> li
 def _verified_session_record(base: Path, session_id: str) -> CustodyRecord:
     directory = _session_dir(base, session_id)
     record = _read_record(directory / "session.json")
-    if record.session_id != session_id:
+    if record.session_id != session_id or record.state == "transferred":
         raise CustodyError("scope_mismatch")
     if record.state != "ended":
         if record_flock_is_held(directory / "owner.lock") is not True:
@@ -641,6 +700,7 @@ def end_session(
         record = _read_record(directory / "session.json")
         if (
             record.session_id != session_id
+            or record.state == "transferred"
             or record.owner_generation != owner_generation
             or record.host_id != host_id
             or record.endpoint != endpoint

@@ -464,6 +464,16 @@ class TerminalRegistry:
                     f"conversation {target_conversation_id!r}"
                 )
 
+            from omnigent.runner.custody import CustodyError, current_custody
+
+            custody = current_custody()
+            if custody is not None and key == ("codex", "main"):
+                try:
+                    custody.transfer_session(
+                        source_conversation_id, target_conversation_id, instance.socket_path
+                    )
+                except CustodyError as exc:
+                    raise RuntimeError(f"Session custody refused: {exc}") from exc
             source_slot.pop(key)
             if not source_slot:
                 self._by_conversation.pop(source_conversation_id, None)

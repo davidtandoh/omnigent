@@ -49,6 +49,14 @@ A missing or invalid session receipt refuses that session. Enumeration continues
 for other sessions. The incomplete directory remains in place and cannot be
 used to create a replacement owner.
 
+When native Codex `/new` transfers the main terminal to another conversation,
+custody retires the old session scope and publishes the new session scope under
+the same owner generation. The runner, native process, terminals and helpers
+remain alive. Binding, reattachment and end requests for the retired scope
+refuse `scope_mismatch`. The host adopts the current scope through its existing
+adoption path. A shared bridge handoff retires the old relay receipt; later
+cleanup for the old session cannot remove the successor receipt.
+
 The retained runner owns its inference config, MCP relay, policy callbacks,
 native app-server and terminals. Host replacement does not rebuild them. This
 approved contract uses “attachment runner” for the replaceable host attachment,
@@ -82,7 +90,7 @@ tombstone and does not claim resource liveness.
 | `config_digest` | SHA-256 hex digest of the global config path/bytes and scoped config/data/native-launch path variables. |
 | `environment_digest` | SHA-256 hex digest of canonical validated explicit native environment values. Values are not persisted here. |
 | `config_files` | Array of `{path: string, digest: string}` for retained inference config. Digests use SHA-256. |
-| `state` | String `starting`, `live` or `ended`. `live` follows terminal publication; it is not a claim that a turn is active. |
+| `state` | String `starting`, `live`, `ended` or `transferred`. `live` follows terminal publication; it is not a claim that a turn is active. |
 | `terminals` | Array of `{name, session_key, socket, device, inode, tmux, pane}`. Names/socket are strings; device/inode are integers; tmux/pane are exact process identities. |
 | `helpers` | Object keyed by helper name. `codex_app_server` identifies the actual native process, with exact PID/start identity. |
 | `resources` | Object keyed by resource name. Values are `{path, digest}` for retained tool/policy bridge config. |

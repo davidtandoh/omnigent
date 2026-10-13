@@ -18,7 +18,7 @@ from omnigent._platform import IS_DARWIN
 from omnigent.runner.custody import CustodyProcess, custody_records, session_contract
 from omnigent.runner.identity import OMNIGENT_INTERNAL_WS_ORIGIN
 from tests.e2e.conftest import configure_mock_llm, release_mock_gate, set_fallback_mock_llm
-from tests.e2e.test_codex_native_terminal_recovery_e2e import _wait_for
+from tests.e2e.test_codex_native_terminal_recovery_e2e import _wait_for, _wait_for_pane_text
 from tests.e2e.test_host_codex_native_e2e import (
     _online_host_id,
     _poll_for_assistant_marker,
@@ -475,19 +475,20 @@ def test_codex_inflight_turn_survives_host_death_and_single_adoption(
     not IS_DARWIN or shutil.which("codex") is None or shutil.which("tmux") is None,
     reason="requires the admitted macOS Codex and tmux platform",
 )
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(240)
+@pytest.mark.parametrize("native_new", [False, True])
 def test_default_local_codex_launch_supports_api_maintenance(
     tmp_path: Path,
     custody_environment: tuple[Path, Path, dict[str, str]],
+    isolated_mock_llm_server_url: str,
+    native_new: bool,
 ) -> None:
     home, config_home, env = custody_environment
     procs = _Procs()
     procs.track_pidfile(config_home / "local_server.pid")
     try:
         launch_log = tmp_path / "local-launch.log"
-        launch = procs.spawn(
-            ["codex", "--binding-json"], env=env, cwd=home, log=launch_log
-        )
+        launch = procs.spawn(["codex", "--binding-json"], env=env, cwd=home, log=launch_log)
         assert launch.wait(timeout=90) == 0, launch_log.read_text()
         binding = next(
             json.loads(line)
@@ -495,13 +496,22 @@ def test_default_local_codex_launch_supports_api_maintenance(
             if line.startswith('{"config_digest":')
         )
         session_id = binding["session_id"]
+        if native_new:
+            marker = "CUSTODY_ROTATION_READY"
+            set_fallback_mock_llm(isolated_mock_llm_server_url, "default", marker)
+            set_fallback_mock_llm(isolated_mock_llm_server_url, "mock-custody", marker)
+            with httpx.Client(base_url=binding["endpoint"], trust_env=False, timeout=30) as client:
+                _send_user_text(
+                    client, session_id=session_id, text="Prepare native conversation transfer"
+                )
+                _poll_for_assistant_marker(
+                    client, session_id=session_id, marker=marker, timeout=60
+                )
         before = session_contract(config_home, session_id)
         assert before["state"] == "live"
         for action in ("maintenance-stop", "maintenance-start"):
             log = tmp_path / f"local-{action}.log"
-            command = procs.spawn(
-                ["server", action, "--json"], env=env, cwd=home, log=log
-            )
+            command = procs.spawn(["server", action, "--json"], env=env, cwd=home, log=log)
             assert command.wait(timeout=45) == 0, log.read_text()
             current = session_contract(config_home, session_id)
             assert current["owner"] == before["owner"]
@@ -524,6 +534,74 @@ def test_default_local_codex_launch_supports_api_maintenance(
         )
         assert attach.wait(timeout=30) == 0, attach_log.read_text()
         assert json.loads(attach_log.read_text()) == binding
+        if native_new:
+            terminal_ws = (
+                binding["endpoint"].replace("http://", "ws://")
+                + f"/v1/sessions/{session_id}/resources/terminals/terminal_codex_main/attach"
+            )
+            with connect(terminal_ws, origin=OMNIGENT_INTERNAL_WS_ORIGIN, open_timeout=10) as tui:
+                tui.recv(timeout=10)
+                tui.send(b"/new")
+                _wait_for_pane_text(binding["terminal"]["socket"], "/new")
+                tui.send(b"\r")
+                successor = _wait_for(
+                    lambda: next(
+                        (r for r in custody_records(config_home) if r.session_id != session_id),
+                        None,
+                    ),
+                    "native /new custody transfer",
+                )
+            assert successor.model_dump(mode="json")["owner"] == before["owner"]
+            assert successor.model_dump(mode="json")["helpers"] == before["helpers"]
+            assert successor.model_dump(mode="json")["terminals"] == before["terminals"]
+            for index, command in enumerate(
+                (
+                    ["codex", "--reattach-binding", str(binding_path), "--binding-json"],
+                    [
+                        "runtime",
+                        "end-session",
+                        "--session",
+                        session_id,
+                        "--owner-generation",
+                        binding["owner_generation"],
+                        "--host-id",
+                        binding["host_id"],
+                        "--server",
+                        binding["endpoint"],
+                        "--json",
+                    ],
+                )
+            ):
+                refusal_log = tmp_path / f"retired-{index}.log"
+                refused = procs.spawn(command, env=env, cwd=home, log=refusal_log)
+                assert refused.wait(timeout=30) == 1, refusal_log.read_text()
+                assert json.loads(refusal_log.read_text())["error"]["category"] == "scope_mismatch"
+            marker = "SUCCESSOR_WEB_TURN_OK"
+            set_fallback_mock_llm(isolated_mock_llm_server_url, "default", marker)
+            set_fallback_mock_llm(isolated_mock_llm_server_url, "mock-custody", marker)
+            with httpx.Client(base_url=binding["endpoint"], trust_env=False, timeout=30) as client:
+                _send_user_text(
+                    client, session_id=successor.session_id, text="Verify successor web turn"
+                )
+                _poll_for_assistant_marker(
+                    client, session_id=successor.session_id, marker=marker, timeout=60
+                )
+            after = session_contract(config_home, successor.session_id)
+            assert after["owner"] == before["owner"]
+            assert f"tool_policy_bridge:{session_id}" not in after["resources"]
+            assert f"tool_policy_bridge:{successor.session_id}" in after["resources"]
+            from omnigent.runner.custody import session_binding
+
+            successor_binding = session_binding(config_home, successor.session_id)
+            binding_path.write_text(successor_binding.model_dump_json())
+            new_attach = procs.spawn(
+                ["codex", "--reattach-binding", str(binding_path), "--binding-json"],
+                env=env,
+                cwd=home,
+                log=attach_log,
+            )
+            assert new_attach.wait(timeout=30) == 0, attach_log.read_text()
+            assert json.loads(attach_log.read_text()) == successor_binding.model_dump(mode="json")
     finally:
         try:
             for record in custody_records(config_home):

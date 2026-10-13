@@ -4311,7 +4311,25 @@ class HostProcess:
                     endpoint=self._server_url,
                     config_digest=config_digest,
                 )
-            except (CustodyError, OSError, ValueError) as exc:
+                handle = self._runners.get(record.runner_id)
+                if handle is not None:
+                    from omnigent.native.owner_claim import ProcessIdentity
+
+                    if (
+                        not handle.durable
+                        or ProcessIdentity.capture(handle.proc.pid) != adopted.owner
+                    ):
+                        raise CustodyError("binding_mismatch")
+                    previous = self._custody_attachments.get(handle.session_id)
+                    if previous is not None and handle.session_id != record.session_id:
+                        previous.__exit__(None, None, None)
+                        del self._custody_attachments[handle.session_id]
+                    handle.session_id = record.session_id
+                    if isinstance(handle.proc, CustodyProcess):
+                        handle.proc = CustodyProcess(
+                            adopted, record_path=attachment.directory / "session.json"
+                        )
+            except (CustodyError, OSError, ValueError, psutil.Error) as exc:
                 attachment.__exit__(None, None, None)
                 category = str(exc) if isinstance(exc, CustodyError) else "record_mismatch"
                 self._custody_refusals[custody_session_key(record.session_id)] = category
