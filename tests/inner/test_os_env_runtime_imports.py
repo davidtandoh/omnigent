@@ -6,6 +6,7 @@ import asyncio
 import shlex
 import shutil
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -82,6 +83,14 @@ def test_tools_repair_broken_checkout_with_normal_shell_imports(
     )
     assert isinstance(env, CallerProcessOSEnvironment)
     python = shlex.quote(sys.executable)
+    spawn_threads: list[threading.Thread] = []
+    start_helper = env._helper._start_locked
+
+    def record_spawn_thread() -> None:
+        start_helper()
+        spawn_threads.append(threading.current_thread())
+
+    monkeypatch.setattr(env._helper, "_start_locked", record_spawn_thread)
 
     async def exercise() -> None:
         if scenario == "restart":
@@ -95,6 +104,11 @@ def test_tools_repair_broken_checkout_with_normal_shell_imports(
 
         source = await env.read("omnigent/__init__.py")
         assert source.get("content") == broken_source, source
+        # Linux parent-death signals follow the spawning thread, not the process.
+        # The helper's owner must survive between requests, including after restart.
+        spawn_threads[-1].join(timeout=0.05)
+        assert spawn_threads[-1].is_alive()
+        helper_proc = env._helper._proc
         broken = await env.shell(f"{python} -c 'import omnigent'")
         assert broken.get("exit_code") != 0, broken
         assert "SyntaxError" in broken.get("stderr", ""), broken
@@ -110,6 +124,7 @@ def test_tools_repair_broken_checkout_with_normal_shell_imports(
         sibling = await env.shell(f"{python} scripts/check.py")
         assert sibling.get("exit_code") == 0, sibling
         assert sibling.get("stdout", "").strip() == "script sibling", sibling
+        assert env._helper._proc is helper_proc
         if scenario == "fork":
             assert module.read_text() == broken_source
 
@@ -117,3 +132,8 @@ def test_tools_repair_broken_checkout_with_normal_shell_imports(
         asyncio.run(exercise())
     finally:
         env.close()
+    for thread in spawn_threads:
+        thread.join(timeout=1)
+        assert not thread.is_alive()
+    env.close()
+    assert "closed" in asyncio.run(env.read("omnigent/__init__.py"))["error"]

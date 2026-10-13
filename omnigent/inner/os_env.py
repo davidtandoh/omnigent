@@ -15,6 +15,7 @@ import tempfile
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeAlias, TypedDict, cast
@@ -418,16 +419,24 @@ class _HelperProcessClient:
         self._egress_handle: EgressProxyHandle | None = None
         self._lock = threading.Lock()
         self._closed = False
+        # Bubblewrap's parent-death signal follows the spawning thread. Keep
+        # that thread alive across requests and helper restarts until close().
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="os-env-helper")
         atexit.register(self.close)
 
     def request(self, payload: OpRequest) -> OpResult:
         with self._lock:
-            return self._request_locked(payload, allow_retry=True)
+            if self._closed:
+                return {"error": "OS environment helper is closed"}
+            return self._executor.submit(self._request_locked, payload, allow_retry=True).result()
 
     def close(self) -> None:
         with self._lock:
             self._closed = True
-            self._stop_locked()
+            try:
+                self._stop_locked()
+            finally:
+                self._executor.shutdown(wait=True)
 
     def _request_locked(
         self,
@@ -435,9 +444,6 @@ class _HelperProcessClient:
         *,
         allow_retry: bool,
     ) -> OpResult:
-        if self._closed:
-            return {"error": "OS environment helper is closed"}
-
         self._ensure_started_locked()
         assert self._proc is not None
         assert self._proc.stdin is not None
