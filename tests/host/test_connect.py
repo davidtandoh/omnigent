@@ -409,8 +409,18 @@ async def test_host_reports_mcp_inventory_failure(monkeypatch: pytest.MonkeyPatc
     assert result.error is not None and "boom" not in result.error
 
 
+@pytest.fixture
+def claude_subscription_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin model-source decoration independently of the host's credentials."""
+    monkeypatch.setattr(
+        "omnigent.host.connect._model_configuration_source_for_harness",
+        lambda harness: {"kind": "subscription", "label": "Subscription", "name": "claude"},
+    )
+
+
 async def test_handle_model_options_serves_the_claude_catalog(
     monkeypatch: pytest.MonkeyPatch,
+    claude_subscription_source: None,
 ) -> None:
     """The launch picker is the harness-probed catalog, resolved on the host.
 
@@ -6529,6 +6539,7 @@ async def test_handle_model_options_serves_codex_probe_rows_and_caches(
 
 async def test_handle_model_options_serves_claude_sdk_endpoint_listing(
     monkeypatch: pytest.MonkeyPatch,
+    claude_subscription_source: None,
 ) -> None:
     """SDK-mode Claude is a pass-through client, so the endpoint listing is
     the harness truth — served in the exact wire spelling the SDK sends."""
@@ -6575,6 +6586,7 @@ async def test_handle_model_options_serves_claude_sdk_endpoint_listing(
 
 async def test_handle_model_options_claude_sdk_rides_the_probe_when_endpoints_list_nothing(
     monkeypatch: pytest.MonkeyPatch,
+    claude_subscription_source: None,
 ) -> None:
     """A subscription SDK launch serves the claude CLI's probed rows.
 
