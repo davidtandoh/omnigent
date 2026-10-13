@@ -37,6 +37,13 @@ What works today for every harness:
 - Truthful terminal teardown: a terminal whose `tmux kill-server` cannot be
   proven is retained, never reported as ended.
 
+A failed launch whose cleanup fails remains in the terminal registry with its
+lock and resources. The registry refuses reuse until explicit cleanup succeeds.
+Session cleanup closes terminals before releasing the primary environment,
+skills or native bridge files. A terminal cleanup failure propagates through
+the resource registry as a named JSON error; the runner does not return
+`cleaned=true`. These rules also apply when durable custody is disabled.
+
 What refuses today: `omnigent codex --binding-json`, `--reattach-binding`,
 `runtime session-contract` and `runtime end-session` return
 `unsupported_custody` or `record_mismatch` because no custody record exists.

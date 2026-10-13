@@ -37,8 +37,6 @@ outside the lock.
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import logging
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -50,8 +48,6 @@ import psutil
 from omnigent.inner.datamodel import OSEnvSpec, TerminalEnvSpec
 from omnigent.inner.os_env import OSEnvironment
 from omnigent.inner.terminal import TerminalInstance, create_terminal_instance
-
-logger = logging.getLogger(__name__)
 
 # Per-instance close timeout. Bounds the cleanup window so a wedged
 # tmux session can't block Omnigent shutdown or workflow finalization
@@ -234,8 +230,9 @@ class TerminalRegistry:
                 custody = None
             with self._lock:
                 existing = self._by_conversation.get(conversation_id, {}).get(key)
+            if existing is not None:
+                self._verify_usable(conversation_id, existing)
             if existing is not None and existing.running:
-                self._verify_custody(conversation_id, existing)
                 if await existing.is_alive():
                     if custody is not None:
                         from omnigent.runner.custody import _require_terminal_live
@@ -329,10 +326,19 @@ class TerminalRegistry:
                 psutil.Error,
                 asyncio.CancelledError,
             ) as exc:
-                with contextlib.suppress(RuntimeError, OSError, ValueError, psutil.Error):
+                try:
                     await asyncio.wait_for(
                         self._close_instance(instance, conversation_id), timeout=_CLOSE_TIMEOUT_S
                     )
+                except BaseException as cleanup_error:
+                    instance.launch_failed = True
+                    with self._lock:
+                        self._by_conversation.setdefault(conversation_id, {})[key] = instance
+                    if isinstance(cleanup_error, CustodyError):
+                        raise RuntimeError(
+                            f"Session custody refused: {cleanup_error}"
+                        ) from cleanup_error
+                    raise
                 if custody is None or isinstance(exc, asyncio.CancelledError):
                     raise
                 category = str(exc) if isinstance(exc, CustodyError) else "unavailable_probe"
@@ -349,7 +355,9 @@ class TerminalRegistry:
                 ) is instance_lock and key not in self._by_conversation.get(conversation_id, {}):
                     self._instance_locks.pop(lock_key)
 
-    def _verify_custody(self, conversation_id: str, instance: TerminalInstance) -> None:
+    def _verify_usable(self, conversation_id: str, instance: TerminalInstance) -> None:
+        if instance.launch_failed:
+            raise RuntimeError("Terminal cleanup refused: process_pending")
         from omnigent.runner.custody import CustodyError, current_custody
 
         custody = current_custody()
@@ -414,7 +422,7 @@ class TerminalRegistry:
                 (terminal_name, session_key)
             )
             if instance is not None:
-                self._verify_custody(conversation_id, instance)
+                self._verify_usable(conversation_id, instance)
             return instance
 
     def list_for_conversation(
@@ -436,7 +444,7 @@ class TerminalRegistry:
         with self._lock:
             slot = dict(self._by_conversation.get(conversation_id, {}))
         for instance in slot.values():
-            self._verify_custody(conversation_id, instance)
+            self._verify_usable(conversation_id, instance)
         return [
             TerminalListEntry(
                 terminal_name=name,
@@ -467,7 +475,7 @@ class TerminalRegistry:
             for conv_id, slot in self._by_conversation.items():
                 for (name, key), instance in slot.items():
                     if key == "main" and name in NATIVE_PANE_TERMINAL_NAMES:
-                        self._verify_custody(conv_id, instance)
+                        self._verify_usable(conv_id, instance)
                         out.append((conv_id, name, instance.socket_path))
         return out
 
@@ -514,6 +522,7 @@ class TerminalRegistry:
         instance = source_slot.get(key)
         if instance is None:
             return False
+        self._verify_usable(source_conversation_id, instance)
         target_slot = self._by_conversation.get(target_conversation_id, {})
 
         from omnigent.runner.custody import CustodyError, current_custody
@@ -640,40 +649,22 @@ class TerminalRegistry:
 
         Each ``instance.close()`` is bounded by ``_CLOSE_TIMEOUT_S``
         via ``asyncio.wait_for`` so a wedged tmux session can't stall
-        cleanup. Timeouts and exceptions are logged and swallowed; the
-        rest of the cleanup proceeds.
+        cleanup. A failed close propagates and retains the terminal and lock.
 
         :param conversation_id: The conversation being torn down.
         """
         with self._lock:
             slot = dict(self._by_conversation.get(conversation_id, {}))
         for (name, key), instance in slot.items():
-            try:
-                await self.close(conversation_id, name, key, expected=instance)
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "cleanup_conversation: close timed out for %s:%s in conv %s",
-                    name,
-                    key,
-                    conversation_id,
-                )
-            except Exception:
-                # We're in a workflow finally block; raising here would
-                # mask the original workflow result. Log and move on.
-                logger.exception(
-                    "cleanup_conversation: close failed for %s:%s in conv %s",
-                    name,
-                    key,
-                    conversation_id,
-                )
+            await self.close(conversation_id, name, key, expected=instance)
 
     async def shutdown(self) -> None:
         """Tear down every registered terminal across all conversations.
 
         Called from the FastAPI server's lifespan shutdown handler.
         Iterates every conversation slot and closes each instance,
-        bounded by ``_CLOSE_TIMEOUT_S`` per instance. Best-effort —
-        a stuck instance shouldn't block the rest of Omnigent shutdown.
+        bounded by ``_CLOSE_TIMEOUT_S`` per instance. Incomplete teardown
+        propagates so callers retain resources needed by surviving terminals.
         """
         with self._lock:
             conversation_ids = list(self._by_conversation)

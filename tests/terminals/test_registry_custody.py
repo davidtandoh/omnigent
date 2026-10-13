@@ -125,20 +125,31 @@ async def test_launch_failure_never_exposes_unpublished_terminal(
 
     with pytest.raises(RuntimeError) as refused:
         await t.registry.launch(*t.args)
-    assert str(refused.value) == f"Session custody refused: {category}"
-    assert t.registry.get(*t.args[:3]) is None
-    assert t.registry.list_for_conversation(t.args[0]) == []
-    assert t.registry.get_instance_lock(*t.args[:3]) is None
+    if close_fails:
+        assert isinstance(refused.value, terminal_module._TmuxProcessStartError)
+    else:
+        assert str(refused.value) == f"Session custody refused: {category}"
+    unresolved = close_fails or failure not in {"publication", "verification"}
+    if unresolved:
+        assert t.registry.active_conversation_ids() == [t.args[0]]
+        assert t.registry.get_instance_lock(*t.args[:3]) is not None
+        with pytest.raises(RuntimeError, match="process_pending"):
+            t.registry.get(*t.args[:3])
+        with pytest.raises(RuntimeError, match="process_pending"):
+            t.registry.list_for_conversation(t.args[0])
+    else:
+        assert t.registry.get(*t.args[:3]) is None
+        assert t.registry.list_for_conversation(t.args[0]) == []
+        assert t.registry.get_instance_lock(*t.args[:3]) is None
     t.spawn.assert_awaited_once()
     assert t.spawn.call_args.args[-1] == "kill-server"
     assert (t.process.poll() is None) == close_fails
 
-    unresolved = close_fails or failure not in {"publication", "verification"}
     if unresolved:
         assert len(t.owner.record.terminals) == 1
         persisted = json.loads(t.owner.record_path.read_bytes())
         assert len(persisted["terminals"]) == 1
-        with pytest.raises(RuntimeError, match="Session custody refused: process_pending"):
+        with pytest.raises(RuntimeError, match="Terminal cleanup refused: process_pending"):
             await t.registry.launch(*t.args)
         t.create.assert_called_once()
         if close_fails and failure in {"publication", "verification"}:
@@ -218,13 +229,13 @@ async def test_cleanup_retains_evidence_for_missing_receipt(
     t.owner.record.terminals.clear()
     t.owner._publish()
     t.spawn.side_effect = OSError(errno.EAGAIN, "private diagnostics")
-    if operation == "close":
-        with pytest.raises(RuntimeError, match="tmux command could not start"):
+    with pytest.raises(terminal_module._TmuxProcessStartError):
+        if operation == "close":
             await t.registry.close(*t.args[:3])
-    elif operation == "cleanup":
-        await t.registry.cleanup_conversation(t.args[0])
-    else:
-        await t.registry.shutdown()
+        elif operation == "cleanup":
+            await t.registry.cleanup_conversation(t.args[0])
+        else:
+            await t.registry.shutdown()
     assert t.registry.active_conversation_ids() == [t.args[0]]
     assert t.registry.get_instance_lock(*t.args[:3]) is not None
     assert t.instance.running
@@ -334,13 +345,13 @@ async def test_ordinary_cleanup_retains_live_terminal_until_retry(
         )
     else:
         t.spawn.side_effect = asyncio.TimeoutError()
-    if operation == "close":
-        with pytest.raises((RuntimeError, asyncio.TimeoutError)):
+    with pytest.raises((RuntimeError, asyncio.TimeoutError)):
+        if operation == "close":
             await t.registry.close(*t.args[:3])
-    elif operation == "cleanup":
-        await t.registry.cleanup_conversation(t.args[0])
-    else:
-        await t.registry.shutdown()
+        elif operation == "cleanup":
+            await t.registry.cleanup_conversation(t.args[0])
+        else:
+            await t.registry.shutdown()
     assert t.registry.get(*t.args[:3]) is t.instance
     assert t.registry.get_instance_lock(*t.args[:3]) is instance_lock
     assert t.instance.running
@@ -362,3 +373,134 @@ async def test_ordinary_cleanup_retains_live_terminal_until_retry(
     assert not t.instance.running
     assert not t.instance.private_dir.exists()
     environment.close.assert_called_once()
+
+
+async def test_failed_start_retains_terminal_until_explicit_cleanup(
+    owned_terminal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.runner.resource_registry import (
+        CLAUDE_NATIVE_TERMINAL_ROLE,
+        SessionResourceRegistry,
+    )
+
+    t = owned_terminal
+    monkeypatch.setattr(custody, "_current_custody", None)
+    t.instance.keep_alive_after_exit = True
+    environment = Mock()
+    t.instance.os_env = environment
+
+    async def exited() -> bool:
+        t.instance.running = False
+        return False
+
+    monkeypatch.setattr(t.instance, "is_alive", exited)
+    t.spawn.side_effect = OSError(errno.EAGAIN, "synthetic resource exhaustion")
+    resources = SessionResourceRegistry(terminal_registry=t.registry)
+    for _attempt in range(2):
+        with pytest.raises(RuntimeError, match="could not start|process_pending"):
+            await resources.launch_required_terminal(
+                *t.args, resource_role=CLAUDE_NATIVE_TERMINAL_ROLE
+            )
+        assert t.registry.active_conversation_ids() == [t.args[0]]
+        assert t.registry.get_instance_lock(*t.args[:3]) is not None
+        assert resources.terminal_resource_role(t.args[0], "terminal_codex_main") is None
+        assert t.instance.private_dir.exists()
+        assert t.instance.socket_path.exists()
+        assert t.process.poll() is None
+        environment.close.assert_not_called()
+        t.create.assert_called_once()
+        with pytest.raises(RuntimeError, match="process_pending"):
+            t.registry.get(*t.args[:3])
+    t.spawn.side_effect = None
+    assert await t.registry.close(*t.args[:3])
+    assert t.registry.active_conversation_ids() == []
+    assert t.registry.get_instance_lock(*t.args[:3]) is None
+    assert t.process.poll() is not None
+    assert not t.instance.private_dir.exists()
+    environment.close.assert_called_once()
+
+
+@pytest.mark.parametrize("route", ["session", "resources"])
+@pytest.mark.parametrize("durable", [False, True])
+async def test_session_cleanup_retains_supporting_resources_until_terminal_exits(
+    owned_terminal, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, route: str, durable: bool
+) -> None:
+    import shutil
+
+    import httpx
+
+    from omnigent.runner import app as runner_app
+    from omnigent.runner.resource_registry import SessionResourceRegistry
+    from tests.runner.helpers import NullServerClient
+
+    t = owned_terminal
+    if not durable:
+        monkeypatch.setattr(custody, "_current_custody", None)
+    await t.registry.launch(*t.args)
+    before = t.owner.record_path.read_bytes()
+    instance_lock = t.registry.get_instance_lock(*t.args[:3])
+    resources = SessionResourceRegistry(terminal_registry=t.registry)
+    primary_dir = tmp_path / "primary"
+    primary_dir.mkdir()
+    (primary_dir / "workspace.txt").write_text("workspace")
+    primary = Mock(close=Mock(side_effect=lambda: shutil.rmtree(primary_dir)))
+    resources._primary_envs[t.args[0]] = primary
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    (bridge_dir / "bridge.json").write_text("{}")
+
+    async def delete_bridges(**_kwargs):
+        shutil.rmtree(bridge_dir)
+
+    cleanup_bridges = AsyncMock(side_effect=delete_bridges)
+    monkeypatch.setattr(runner_app, "_delete_native_bridge_dirs", cleanup_bridges)
+    manager = Mock(release=AsyncMock(), forward_cancel=AsyncMock())
+    app = runner_app.create_runner_app(
+        terminal_registry=t.registry,
+        resource_registry=resources,
+        process_manager=manager,  # type: ignore[arg-type]
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    path = f"/v1/sessions/{t.args[0]}" + ("/resources" if route == "resources" else "")
+    skills_directory = tempfile.TemporaryDirectory(dir=tmp_path)
+    with skills_directory as skills:
+        resources._codex_skills_dirs[t.args[0]] = skills_directory
+        skill = Path(skills) / "SKILL.md"
+        skill.write_text("retained skill")
+        t.spawn.side_effect = OSError(errno.EAGAIN, "synthetic resource exhaustion")
+        transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://runner") as client:
+            refused = await client.delete(path)
+            assert refused.status_code == 500
+            assert refused.json()["error"]["code"] == "unavailable_probe"
+            assert "cleaned" not in refused.json()
+            assert t.registry.get(*t.args[:3]) is t.instance
+            assert t.registry.get_instance_lock(*t.args[:3]) is instance_lock
+            assert resources.has_primary_env(t.args[0])
+            assert (primary_dir / "workspace.txt").exists()
+            assert skill.exists()
+            assert (bridge_dir / "bridge.json").exists()
+            assert t.owner.record_path.read_bytes() == before
+            assert t.instance.private_dir.exists()
+            assert t.process.poll() is None
+            primary.close.assert_not_called()
+            cleanup_bridges.assert_not_awaited()
+            manager.release.assert_not_awaited()
+
+            t.spawn.side_effect = None
+            completed = await client.delete(path)
+            assert completed.status_code == 200, completed.text
+            if route == "resources":
+                assert completed.json()["cleaned"] is True
+            assert t.registry.get(*t.args[:3]) is None
+            assert t.registry.get_instance_lock(*t.args[:3]) is None
+            assert not resources.has_primary_env(t.args[0])
+            assert not primary_dir.exists()
+            assert not skill.exists()
+            assert not bridge_dir.exists()
+            assert t.process.poll() is not None
+            if durable:
+                assert t.owner.record.terminals == []
+            primary.close.assert_called_once()
+            cleanup_bridges.assert_awaited_once()
+            manager.release.assert_awaited_once()

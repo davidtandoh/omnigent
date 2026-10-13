@@ -26,6 +26,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+import psutil
 from cachetools import TTLCache
 
 from omnigent.debug_logging import debug_event, runner_primary_session_id
@@ -40,6 +41,7 @@ from omnigent.entities.session_resources import (
     terminal_resource_id,
     terminal_resource_view,
 )
+from omnigent.errors import OmnigentError
 from omnigent.inner.async_utils import run_sync_cleanup
 from omnigent.inner.sandbox import contained_realpath, containment_prefix
 from omnigent.inner.terminal_lifecycle import lifecycle_log_attributes
@@ -2046,12 +2048,27 @@ class SessionResourceRegistry:
     async def cleanup_session(self, session_id: str) -> None:
         """Close all resources owned by a session.
 
-        Closes the primary OSEnv and delegates terminal cleanup
-        to the terminal registry.  Preserves workspace files for
-        post-mortem inspection per the design.
+        Closes terminals before releasing their supporting resources.
+        Preserves workspace files for post-mortem inspection per the design.
 
         :param session_id: Session/conversation identifier.
         """
+        if self._terminal_registry is not None:
+            from omnigent.runner.custody import CustodyError
+
+            try:
+                await self._terminal_registry.cleanup_conversation(session_id)
+            except (RuntimeError, OSError, ValueError, psutil.Error) as exc:
+                category = (
+                    str(exc)
+                    if isinstance(exc, CustodyError)
+                    else "process_pending"
+                    if isinstance(exc, TimeoutError)
+                    else "unavailable_probe"
+                )
+                raise OmnigentError(
+                    f"Terminal cleanup refused: {category}", code=category
+                ) from exc
         self._take_session_status_memo(session_id)
         with self._lock:
             self._session_activity_epoch.pop(session_id, None)
@@ -2066,16 +2083,6 @@ class SessionResourceRegistry:
             ]
             for key in stale_lifecycle_keys:
                 self._terminal_lifecycles.pop(key, None)
-        if self._terminal_registry is not None:
-            try:
-                await self._terminal_registry.cleanup_conversation(
-                    session_id,
-                )
-            except Exception:
-                _logger.exception(
-                    "Error cleaning up terminals for session=%s",
-                    session_id,
-                )
 
         if primary is not None:
             try:

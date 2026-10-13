@@ -1102,6 +1102,7 @@ class TerminalInstance:
     # longer reaps the server and cascades into ``no server running`` (#540).
     keep_alive_after_exit: bool = False
     running: bool = False
+    launch_failed: bool = field(default=False, init=False, repr=False)
     launch_cwd: str | None = None
     # Owned per-launch egress proxy. ``None`` when the sandbox
     # carries no ``egress_rules`` or the backend doesn't need a

@@ -847,13 +847,8 @@ async def test_close_with_timeout_preserves_registration(tmp_path: Path) -> None
     assert reg.get_instance_lock("conv_a", "bash", "s1") is not None
 
 
-async def test_cleanup_conversation_tolerates_close_exception(tmp_path: Path) -> None:
-    """
-    ``cleanup_conversation`` swallows exceptions from individual
-    ``instance.close()`` calls and continues closing the remaining
-    terminals. This ensures a wedged terminal cannot block cleanup
-    of its siblings.
-    """
+async def test_cleanup_conversation_propagates_close_exception(tmp_path: Path) -> None:
+    """Failed cleanup retains the terminal and refuses session teardown."""
     reg = TerminalRegistry()
     good_instance = TerminalInstance(
         name="bash",
@@ -883,8 +878,8 @@ async def test_cleanup_conversation_tolerates_close_exception(tmp_path: Path) ->
     reg._instance_locks[("conv_a", "bash", "s1")] = threading.Lock()
     reg._instance_locks[("conv_a", "bash", "s2")] = threading.Lock()
 
-    # Should not raise despite bad_instance.close() exploding.
-    await reg.cleanup_conversation("conv_a")
+    with pytest.raises(RuntimeError, match="tmux gone"):
+        await reg.cleanup_conversation("conv_a")
 
     assert reg.active_conversation_ids() == ["conv_a"]
     assert reg.get("conv_a", "bash", "s2") is bad_instance
@@ -895,13 +890,8 @@ async def test_cleanup_conversation_tolerates_close_exception(tmp_path: Path) ->
     good_instance.close.assert_awaited_once()
 
 
-async def test_shutdown_tolerates_close_exception(tmp_path: Path) -> None:
-    """
-    ``shutdown`` swallows exceptions from individual ``instance.close()``
-    calls, just like ``cleanup_conversation``. A stuck instance in one
-    conversation must not prevent cleanup of instances in other
-    conversations.
-    """
+async def test_shutdown_propagates_incomplete_cleanup_and_can_retry(tmp_path: Path) -> None:
+    """Shutdown preserves unfinished resources and completes on a later retry."""
     reg = TerminalRegistry()
     good = TerminalInstance(
         name="bash",
@@ -929,11 +919,18 @@ async def test_shutdown_tolerates_close_exception(tmp_path: Path) -> None:
     reg._instance_locks[("conv_a", "bash", "s1")] = threading.Lock()
     reg._instance_locks[("conv_b", "bash", "s1")] = threading.Lock()
 
-    await reg.shutdown()
+    with pytest.raises(RuntimeError, match="tmux gone"):
+        await reg.shutdown()
 
-    assert reg.active_conversation_ids() == ["conv_a"]
+    assert reg.active_conversation_ids() == ["conv_a", "conv_b"]
     assert reg.get("conv_a", "bash", "s1") is bad
     assert reg.get_instance_lock("conv_a", "bash", "s1") is not None
+    assert reg.get_instance_lock("conv_b", "bash", "s1") is not None
+    good.close.assert_not_awaited()
+    bad.close = AsyncMock()
+    await reg.shutdown()
+    assert reg.active_conversation_ids() == []
+    assert reg.get_instance_lock("conv_a", "bash", "s1") is None
     assert reg.get_instance_lock("conv_b", "bash", "s1") is None
     good.close.assert_awaited_once()
 

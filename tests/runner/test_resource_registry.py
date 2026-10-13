@@ -367,6 +367,7 @@ async def test_auxiliary_terminal_exit_publishes_resource_exit_only(
     await registry.observe_auxiliary_terminal("conv_exit", "sidecar", "s1", instance)
     on_exit = callbacks["on_exit"]
     assert callable(on_exit)
+    instance.running = False
     on_exit()
     await asyncio.wait_for(exit_published.wait(), timeout=1.0)
 
