@@ -57,6 +57,9 @@ async def test_damaged_stop_marker_recovers_parent_delivery(
 
     monkeypatch.setattr(cursor_status, "read_turn_outcome", read_then_append)
     monkeypatch.setattr(fwd, "_discover_store", lambda *a: None)
+    # Rendering the expected 503 traceback must not consume the delivery deadline.
+    log_failure = Mock()
+    monkeypatch.setattr(fwd._logger, "exception", log_failure)
     rig = _Rig("cursor-native")
     store = Mock(spec=ConversationStore)
     results = []
@@ -125,7 +128,7 @@ async def test_damaged_stop_marker_recovers_parent_delivery(
                     poll_interval_s=0.01,
                 )
             )
-            async with asyncio.timeout(2):
+            async with asyncio.timeout(10):
                 while cursor_status.read_posted_count(tmp_path) != 2:
                     await asyncio.sleep(0.01)
             assert [(r["status"], r["output"]) for r in results] == [
@@ -133,6 +136,7 @@ async def test_damaged_stop_marker_recovers_parent_delivery(
                 ("completed", "Next task completed"),
             ]
             assert failure_posts == 2
+            log_failure.assert_called_once()
     finally:
         if task is not None:
             task.cancel()

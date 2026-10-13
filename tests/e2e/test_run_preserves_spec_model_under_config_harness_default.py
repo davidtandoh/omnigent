@@ -12,6 +12,8 @@ import httpx
 import pytest
 import yaml
 
+from tests._helpers.live_server import find_free_port
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 _MODEL = "e2e-selected-model"
@@ -117,6 +119,7 @@ def test_run_preserves_model_under_config_harness_default(
             "HOME": str(home),
             "OMNIGENT_CONFIG_HOME": str(config_home),
             "OMNIGENT_DATA_DIR": str(data_dir),
+            "OMNIGENT_LOCAL_SERVER_PORT": str(find_free_port()),
             "PYTHONPATH": pythonpath,
         }
     )
@@ -143,7 +146,20 @@ def test_run_preserves_model_under_config_harness_default(
         )
     finally:
         subprocess.run(
-            [sys.executable, "-m", "omnigent", "stop"],
+            [sys.executable, "-m", "omnigent", "host", "stop"],
+            capture_output=True,
+            env=env,
+            cwd=tmp_path,
+            timeout=120,
+        )
+        # Stop only this test's recorded server; `omnigent stop` also sweeps 6767.
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from omnigent.host.local_server import stop_local_omnigent_server; "
+                "stop_local_omnigent_server()",
+            ],
             capture_output=True,
             env=env,
             cwd=tmp_path,

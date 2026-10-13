@@ -4,7 +4,7 @@
 // The batch is module state, so it's reset between cases and leftover toasts are
 // dismissed.
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient } from "@tanstack/react-query";
@@ -61,20 +61,19 @@ function mountToaster() {
 }
 
 const show = (ids: string[]) =>
-  act(() =>
+  act(async () => {
     showArchiveUndoToast(
       queryClient,
       convs(...ids),
       navigate as unknown as Parameters<typeof showArchiveUndoToast>[2],
-    ),
-  );
+    );
+    await vi.advanceTimersByTimeAsync(0);
+  });
 
 beforeEach(() => {
-  // Start every test on REAL timers so a fake clock left installed (or
-  // advanced) by a prior test in this file can't leak into this one — the
-  // pill's lifetime math is Date.now()-based, so a carried-over fake clock
-  // would corrupt the elapsed deltas and close the pill early.
-  vi.useRealTimers();
+  // Keep toast expiry and deferred dismissal callbacks independent of CI load.
+  vi.useFakeTimers();
+  vi.setSystemTime(0);
   mocks.undoArchiveConversations.mockReset().mockResolvedValue(undefined);
   mocks.toastDurations.length = 0;
   resetArchiveUndoBatchForTests();
@@ -82,14 +81,14 @@ beforeEach(() => {
   toast.dismiss();
 });
 
-afterEach(() => {
-  // Clear any pending pill/batch before unmounting so a Sonner timer queued
-  // during a fake-timer test can't fire into a torn-down module (where the
-  // mocked `toast` is gone) and surface as an unhandled error.
+afterEach(async () => {
   resetArchiveUndoBatchForTests();
-  toast.dismiss();
+  await act(async () => {
+    toast.dismiss();
+    await vi.runOnlyPendingTimersAsync();
+  });
   cleanup();
-  // Always leave real timers installed so no fake-timer state escapes the file.
+  vi.clearAllTimers();
   vi.useRealTimers();
 });
 
@@ -98,7 +97,7 @@ describe("showArchiveUndoToast", () => {
     mountToaster();
     await show(["a"]);
 
-    expect(await screen.findByText("Archived 1 session")).toBeInTheDocument();
+    expect(screen.getByText("Archived 1 session")).toBeInTheDocument();
     // Never the literal "session(s)".
     expect(screen.queryByText(/session\(s\)/)).not.toBeInTheDocument();
   });
@@ -109,7 +108,7 @@ describe("showArchiveUndoToast", () => {
     await show(["b", "c"]);
 
     // Still a single toast, now covering all three.
-    const titles = await screen.findAllByText(/^Archived \d+ sessions?$/);
+    const titles = screen.getAllByText(/^Archived \d+ sessions?$/);
     expect(titles).toHaveLength(1);
     expect(titles[0]).toHaveTextContent("Archived 3 sessions");
   });
@@ -119,7 +118,7 @@ describe("showArchiveUndoToast", () => {
     await show(["a"]);
     await show(["a", "b"]);
 
-    expect(await screen.findByText("Archived 2 sessions")).toBeInTheDocument();
+    expect(screen.getByText("Archived 2 sessions")).toBeInTheDocument();
   });
 
   it("undoes the whole merged batch and dismisses the toast", async () => {
@@ -127,7 +126,7 @@ describe("showArchiveUndoToast", () => {
     await show(["a"]);
     await show(["b", "c"]);
 
-    await screen.findByText("Archived 3 sessions");
+    screen.getByText("Archived 3 sessions");
     act(() => {
       fireEvent.click(screen.getByRole("button", { name: "Undo" }));
     });
@@ -135,24 +134,30 @@ describe("showArchiveUndoToast", () => {
     expect(mocks.undoArchiveConversations).toHaveBeenCalledTimes(1);
     expect(mocks.undoArchiveConversations).toHaveBeenCalledWith(queryClient, convs("a", "b", "c"));
     // The toast dismisses on Undo (sonner animates it out, so wait for removal).
-    await waitFor(() => expect(screen.queryByText(/^Archived/)).not.toBeInTheDocument());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(screen.queryByText(/^Archived/)).not.toBeInTheDocument();
   });
 
   it("starts a fresh batch after an Undo", async () => {
     mountToaster();
     await show(["a", "b"]);
-    await screen.findByText("Archived 2 sessions");
+    screen.getByText("Archived 2 sessions");
     act(() => {
       fireEvent.click(screen.getByRole("button", { name: "Undo" }));
     });
     expect(mocks.undoArchiveConversations).toHaveBeenLastCalledWith(queryClient, convs("a", "b"));
     // Let the dismissed toast finish animating out before reusing the toast id.
-    await waitFor(() => expect(screen.queryByText(/^Archived/)).not.toBeInTheDocument());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(screen.queryByText(/^Archived/)).not.toBeInTheDocument();
 
     // A later archive is its own batch, not appended to the undone one: it reads
     // "1 session" and undoing again restores only the new id.
     await show(["x"]);
-    await screen.findByText("Archived 1 session");
+    screen.getByText("Archived 1 session");
     act(() => {
       fireEvent.click(screen.getByRole("button", { name: "Undo" }));
     });
@@ -163,7 +168,7 @@ describe("showArchiveUndoToast", () => {
     mountToaster();
     await show(["a"]);
 
-    await screen.findByText("Archived 1 session");
+    screen.getByText("Archived 1 session");
     act(() => {
       fireEvent.click(screen.getByRole("button", { name: "View archived" }));
     });
@@ -180,64 +185,39 @@ describe("showArchiveUndoToast", () => {
     // DOM close time: whether sonner restarts its own timer when a toast is
     // updated in place is an implementation detail (and races under fake
     // timers), while the shrinking `duration` is exactly what we control.
-    vi.useFakeTimers();
-    vi.setSystemTime(0);
-    try {
-      await show(["a"]); // t=0
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(2000);
-      });
-      await show(["b"]); // t=2s
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(2000);
-      });
-      await show(["c"]); // t=4s
+    await show(["a"]); // t=0
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    await show(["b"]); // t=2s
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    await show(["c"]); // t=4s
 
-      // First archive gets the full single-archive duration; merges shrink
-      // toward the 5s absolute deadline and never reset to a fresh 3s:
-      //   t=0 → min(3000, 5000-0)    = 3000
-      //   t=2 → min(3000, 5000-2000) = 3000
-      //   t=4 → min(3000, 5000-4000) = 1000  (closes at t=5s, not t=4+3=7s)
-      expect(mocks.toastDurations).toEqual([3000, 3000, 1000]);
-    } finally {
-      resetArchiveUndoBatchForTests();
-      toast.dismiss();
-      await act(async () => {
-        await vi.runOnlyPendingTimersAsync();
-      });
-      vi.useRealTimers();
-    }
+    // First archive gets the full single-archive duration; merges shrink
+    // toward the 5s absolute deadline and never reset to a fresh 3s:
+    //   t=0 → min(3000, 5000-0)    = 3000
+    //   t=2 → min(3000, 5000-2000) = 3000
+    //   t=4 → min(3000, 5000-4000) = 1000  (closes at t=5s, not t=4+3=7s)
+    expect(mocks.toastDurations).toEqual([3000, 3000, 1000]);
   });
 
   it("starts a fresh batch for an archive after the deadline", async () => {
     // An archive arriving past the deadline must not resurrect the old batch's
     // pill; it begins its own window.
-    vi.useFakeTimers();
-    vi.setSystemTime(0);
-    try {
-      mountToaster();
-      await show(["old"]);
-      // Advance past the 5s deadline so the old batch is finished.
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(6000);
-      });
-      await show(["new"]);
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      expect(screen.getByText("Archived 1 session")).toBeInTheDocument();
-      act(() => {
-        fireEvent.click(screen.getByRole("button", { name: "Undo" }));
-      });
-      // Only the fresh id, never the expired "old".
-      expect(mocks.undoArchiveConversations).toHaveBeenLastCalledWith(queryClient, convs("new"));
-    } finally {
-      resetArchiveUndoBatchForTests();
-      toast.dismiss();
-      await act(async () => {
-        await vi.runOnlyPendingTimersAsync();
-      });
-      vi.useRealTimers();
-    }
+    mountToaster();
+    await show(["old"]);
+    // Advance past the 5s deadline so the old batch is finished.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+    await show(["new"]);
+    expect(screen.getByText("Archived 1 session")).toBeInTheDocument();
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    });
+    // Only the fresh id, never the expired "old".
+    expect(mocks.undoArchiveConversations).toHaveBeenLastCalledWith(queryClient, convs("new"));
   });
 });
