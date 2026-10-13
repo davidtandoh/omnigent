@@ -8105,3 +8105,42 @@ async def test_ended_custodian_releases_attachment_for_a_new_session_generation(
     assert "conv_synthetic" not in host._custody_attachments
     attachment.__exit__.assert_called_once_with(None, None, None)
     _cleanup_host(host)
+
+
+async def test_stale_custody_does_not_block_healthy_adoption_or_allow_relaunch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from omnigent.runner.custody import SessionCustody
+    from tests.runner.test_session_custody import context
+
+    host = _make_host_process()
+    monkeypatch.setattr("omnigent.process_logging.data_dir", lambda: tmp_path)
+    monkeypatch.setattr("omnigent.host.connect.host_config_digest", lambda: "a" * 64)
+    monkeypatch.setattr("omnigent.host.connect.SUPPORTED_HARNESSES", frozenset({"codex-native"}))
+    common = {**context(), "host_id": host._identity.host_id, "endpoint": host._server_url}
+    stale = SessionCustody.create(
+        tmp_path, {**common, "session_id": "stale", "runner_id": "stale_runner"}
+    )
+    stale._lock.release()
+    stale_before = stale.record_path.read_bytes()
+    with SessionCustody.create(
+        tmp_path, {**common, "session_id": "healthy", "runner_id": "healthy_runner"}
+    ):
+        host._adopt_custodied_runners()
+        assert host._runners["healthy_runner"].session_id == "healthy"
+        assert host._custody_refusals == {"stale": "stale_attachment"}
+        result = await host._handle_launch(
+            HostLaunchRunnerFrame(
+                request_id="stale-relaunch",
+                binding_token="synthetic-binding",
+                session_id="stale",
+                workspace=str(tmp_path),
+                harness="codex-native",
+            )
+        )
+        assert result.status == "failed" and result.error_code == "stale_attachment"
+        assert stale.record_path.read_bytes() == stale_before
+        assert "healthy_runner" in host._runners
+        host._cleanup_runners()
+    _cleanup_host(host)

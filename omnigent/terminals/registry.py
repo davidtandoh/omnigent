@@ -295,7 +295,9 @@ class TerminalRegistry:
 
         if instance_to_close is not None:
             try:
-                await asyncio.wait_for(instance_to_close.close(), timeout=_CLOSE_TIMEOUT_S)
+                await asyncio.wait_for(
+                    self._close_instance(instance_to_close), timeout=_CLOSE_TIMEOUT_S
+                )
             except asyncio.TimeoutError:
                 logger.warning(
                     "Race-loser terminal close timed out for %s:%s in conv %s",
@@ -471,6 +473,22 @@ class TerminalRegistry:
             self._instance_locks[target_lock_key] = lock or threading.Lock()
         return True
 
+    async def _close_instance(self, instance: TerminalInstance) -> None:
+        from omnigent.runner.custody import current_custody
+
+        custody = current_custody()
+        receipt = (
+            next(
+                (r for r in custody.record.terminals if r.socket == str(instance.socket_path)),
+                None,
+            )
+            if custody is not None
+            else None
+        )
+        await instance.close()
+        if custody is not None and receipt is not None:
+            custody.retire_terminal(receipt)
+
     async def close(
         self,
         conversation_id: str,
@@ -520,7 +538,7 @@ class TerminalRegistry:
         if instance is None:
             return False
         try:
-            await asyncio.wait_for(instance.close(), timeout=_CLOSE_TIMEOUT_S)
+            await asyncio.wait_for(self._close_instance(instance), timeout=_CLOSE_TIMEOUT_S)
         except asyncio.TimeoutError:
             logger.warning(
                 "Terminal close timed out for %s:%s in conv %s",
@@ -562,7 +580,7 @@ class TerminalRegistry:
             return
         for (name, key), instance in slot.items():
             try:
-                await asyncio.wait_for(instance.close(), timeout=_CLOSE_TIMEOUT_S)
+                await asyncio.wait_for(self._close_instance(instance), timeout=_CLOSE_TIMEOUT_S)
             except asyncio.TimeoutError:
                 logger.warning(
                     "cleanup_conversation: close timed out for %s:%s in conv %s",
@@ -597,7 +615,9 @@ class TerminalRegistry:
         for conversation_id, slot in slots:
             for (name, key), instance in slot.items():
                 try:
-                    await asyncio.wait_for(instance.close(), timeout=_CLOSE_TIMEOUT_S)
+                    await asyncio.wait_for(
+                        self._close_instance(instance), timeout=_CLOSE_TIMEOUT_S
+                    )
                 except asyncio.TimeoutError:
                     logger.warning(
                         "shutdown: close timed out for %s:%s in conv %s",

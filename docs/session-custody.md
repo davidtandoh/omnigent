@@ -38,8 +38,9 @@ adoption by the same attachment is idempotent. Concurrent adoption refuses
 
 The retained runner owns its inference config, MCP relay, policy callbacks,
 native app-server and terminals. Host replacement does not rebuild them. This
-contract does not replace the session runner itself or promise survival of a
-runner crash. An operating-system reboot requires recovery; it cannot preserve
+approved contract uses “attachment runner” for the replaceable host attachment,
+not the stable session owner. Replacement of that owner and owner-crash survival
+are outside this contract. An operating-system reboot requires recovery; it cannot preserve
 the same live process.
 
 ## Read the session receipt
@@ -79,6 +80,57 @@ are owned by the local user with mode 0700. Receipts use private atomic writes
 and bounded regular-file reads. Refusal does not remove records or signal
 foreign processes. Ended tombstones remain available for diagnosis.
 
+## Firstmate launch binding and reattachment
+
+Use the public Codex command on the admitted macOS host. Run it from the exact
+workspace with the approved config/data environment:
+
+```sh
+omnigent codex --server URL --binding-json > session-binding.json
+omnigent codex --reattach-binding session-binding.json --binding-json
+omnigent codex --reattach-binding session-binding.json
+```
+
+1. The first command creates one session through the existing Codex launch path.
+   It emits the verified durable binding and exits without attaching a TTY.
+   `--env KEY=VALUE`, `--model` and `--prompt` retain their launch meanings.
+   Binding mode rejects `--resume`, `--session` and `--smart-routing`.
+2. The second command validates an existing binding and returns the same binding
+   as canonical JSON. It does not start a backend, native owner or terminal.
+3. The third command performs the same validation, then attaches the existing
+   local tmux terminal through the typed Codex terminal attachment interface.
+   Detaching that TTY leaves the native turn running. Host/API recovery uses the
+   maintenance operations below; this command does not start those services.
+
+A successful machine command exits zero and emits one canonical JSON object
+on stdout. Launch progress goes to stderr. The binding schema is:
+
+| Field | Meaning |
+| --- | --- |
+| `schema_version` | Integer `1`. Unknown fields or schema versions refuse. |
+| `session_id`, `runner_id`, `harness` | Exact session and runner binding; harness is `codex-native`. |
+| `owner_generation`, `owner` | Stable owner generation and exact process identity. |
+| `host_id`, `endpoint`, `workspace` | Exact launch scope, without aliases or workspace rebinding. |
+| `config_digest`, `environment_digest` | Exact configuration and explicit native environment digests. No secret values. |
+| `native` | Exact Codex app-server process identity. |
+| `terminal` | The single `codex/main` terminal receipt, with the fields defined above. The typed attachment uses tmux target `main`. |
+
+The binding is a projection of the durable custody receipt. Firstmate stores
+that binding alongside its own task ID; Omnigent has no Firstmate task store.
+Reattachment reads at most 65,536 bytes from a regular binding file. It compares
+all binding identities, checks current host configuration and verifies the live
+lease, native process, terminal socket and retained resources. A changed owner,
+foreign scope, duplicate native terminal, stale lease or missing resource refuses.
+There is no resume, launch, rebind, teardown or record-deletion fallback.
+Repeated and concurrent validation returns the same binding. Multiple terminal
+viewers can attach; they do not acquire or replace the session owner's lease.
+
+Refusal exits one with `{"schema_version":1,"error":{"category":"..."}}`.
+Categories are `record_mismatch`, `scope_mismatch`, `config_mismatch`,
+`binding_mismatch`, `stale_attachment`, `foreign_socket`, `unsupported_custody`
+and `unavailable_probe`. Fresh-launch failures also use `launch_unavailable`.
+Invalid command option combinations use Click's usage error and exit two.
+
 ## Maintenance and intentional end
 
 Run these commands only within the existing configured endpoint and ownership
@@ -90,6 +142,21 @@ scope. They preserve the configured data paths and routes.
 | API maintenance start | `omnigent server maintenance-start --json` restores the recorded fixed port, base path and auth/config. A live previous API, occupied port or config drift refuses. Returns `schema_version=1`, `endpoint`, `state=ready`. |
 | Host maintenance detach | `omnigent host maintenance-detach --server URL` detaches the exact selected host, preserving admitted session owners. Start `omnigent host --server URL --no-open --non-interactive` to reattach. |
 | End one session | `omnigent runtime end-session --session ID --owner-generation GENERATION --host-id HOST --server URL --json` verifies the exact scope and resources, signals only that owner, waits for intentional resource cleanup and retains the tombstone. Returns `schema_version=1`, `session_id`, `owner_generation`, `state=ended`. Repeating the same exact end is idempotent. |
+
+API maintenance currently qualifies only header authentication, absolute local
+SQLite database and artifact paths, and an optional regular config file. The
+schema-2 maintenance receipt records these effective paths, the working directory,
+the exact single-user
+marker and configuration/environment digests. It never records secrets or raw
+launch arguments. The restart uses this bounded recipe and checks the new API
+process's receipt after readiness. Package version remains part of normal runtime
+reuse detection but is absent from maintenance configuration identity.
+
+Non-header authentication, nonlocal databases, relative artifact paths and
+a separate conversation database, execution-timeout or agent CLI overrides
+refuse `unsupported_restart` before shutdown. Old unqualified receipts also
+refuse. Config-file or environment drift refuses before stop or start. Restore
+the approved inputs before retrying; no generic launch replay is supported.
 
 Normal `host stop` and combined `server stop` retain intentional session teardown.
 The maintenance commands provide the distinct detach operation. They do not
@@ -108,7 +175,8 @@ Custody commands use `owner_busy`, `scope_mismatch`, `config_mismatch`,
 `unavailable_probe`. Internal creation can also refuse `unsupported_custody`.
 Host relaunch adds `binding_mismatch` and `harness_mismatch`. API maintenance
 uses `record_mismatch`, `config_mismatch`, `occupied_port`, `process_pending`
-and `unavailable_probe`. Errors do not include raw process output or environment
+and `unavailable_probe`, plus `unsupported_restart` for unqualified launch recipes.
+Errors do not include raw process output or environment
 values. Refusals preserve existing receipts and resources.
 
 ## Isolated evidence and remaining acceptance
@@ -117,7 +185,8 @@ values. Refusals preserve existing receipts and resources.
 HOME/config/data, a private API/host and a synthetic gated model. It proves
 the same native PID/start identity and in-flight turn across host SIGKILL,
 graceful host detach, repeated reattachment and API outages of 0 and at least
-65 seconds. It also checks helper terminal operation, a framework-approved
+65 seconds. It also checks public launch bindings, concurrent consumer reattachment,
+closed-helper receipt removal, retained helper terminal operation, a framework-approved
 native MCP call, native policy denial, phone-style terminal read/input,
 no duplicate input, and intentional native/socket teardown.
 

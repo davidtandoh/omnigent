@@ -1133,6 +1133,7 @@ class HostProcess:
 
         self._attachment_generation = uuid.uuid4().hex
         self._custody_attachments: dict[str, SessionAttachment] = {}
+        self._custody_refusals: dict[str, str] = {}
         from omnigent.host.skills import HostSkillDiscovery
 
         self._skill_discovery = HostSkillDiscovery(self._fetch_skill_bundle)
@@ -1812,6 +1813,8 @@ class HostProcess:
                     "Session custody refused",
                     error_code=str(exc) if isinstance(exc, CustodyError) else "record_mismatch",
                 )
+            if category := self._custody_refusals.get(frame.session_id):
+                return self._launch_failed(frame, "Session custody refused", error_code=category)
             existing = next(
                 (
                     handle
@@ -4278,6 +4281,7 @@ class HostProcess:
 
         base = data_dir()
         config_digest = host_config_digest()
+        self._custody_refusals.clear()
         for record in custody_records(base):
             if record.host_id != self._identity.host_id or record.endpoint != self._server_url:
                 continue
@@ -4286,13 +4290,19 @@ class HostProcess:
             attachment = SessionAttachment(
                 base, record.session_id, generation=self._attachment_generation
             )
-            attachment.__enter__()
             try:
+                attachment.__enter__()
                 adopted = attachment.adopt(
                     host_id=self._identity.host_id,
                     endpoint=self._server_url,
                     config_digest=config_digest,
                 )
+            except (CustodyError, OSError, ValueError) as exc:
+                attachment.__exit__(None, None, None)
+                category = str(exc) if isinstance(exc, CustodyError) else "record_mismatch"
+                self._custody_refusals[record.session_id] = category
+                _logger.warning("Session %s custody refused: %s", record.session_id, category)
+                continue
             except BaseException:
                 attachment.__exit__(None, None, None)
                 raise

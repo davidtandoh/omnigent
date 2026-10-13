@@ -73,6 +73,23 @@ class CustodyRecord(CustodyContext):
     resources: dict[str, ConfigFile] = Field(default_factory=dict)
 
 
+class SessionBinding(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    schema_version: Literal[1] = 1
+    session_id: str
+    runner_id: str
+    harness: Literal["codex-native"]
+    owner_generation: str
+    host_id: str
+    endpoint: str
+    workspace: str
+    config_digest: str
+    environment_digest: str
+    owner: ProcessIdentity
+    native: ProcessIdentity
+    terminal: TerminalReceipt
+
+
 class AttachmentRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     schema_version: Literal[1] = 1
@@ -257,6 +274,24 @@ class SessionCustody:
         with self._updates:
             self.record.resources[name] = resource
             self._publish()
+
+    def retire_terminal(self, receipt: TerminalReceipt) -> None:
+        with self._updates:
+            if receipt in self.record.terminals:
+                self.record.terminals.remove(receipt)
+                self._publish()
+
+    def retire_helper(self, name: str, identity: ProcessIdentity) -> None:
+        with self._updates:
+            if self.record.helpers.get(name) == identity:
+                del self.record.helpers[name]
+                self._publish()
+
+    def retire_resource(self, name: str, resource: ConfigFile) -> None:
+        with self._updates:
+            if self.record.resources.get(name) == resource:
+                del self.record.resources[name]
+                self._publish()
 
     def finish(self) -> None:
         with self._updates:
@@ -509,7 +544,7 @@ def custody_records(base: Path) -> list[CustodyRecord]:
     return [record for record in records if record.state != "ended"]
 
 
-def session_contract(base: Path, session_id: str) -> dict[str, object]:
+def _verified_session_record(base: Path, session_id: str) -> CustodyRecord:
     directory = _session_dir(base, session_id)
     record = _read_record(directory / "session.json")
     if record.session_id != session_id:
@@ -518,6 +553,12 @@ def session_contract(base: Path, session_id: str) -> dict[str, object]:
         if record_flock_is_held(directory / "owner.lock") is not True:
             raise CustodyError("stale_attachment")
         verify_resources(record)
+    return record
+
+
+def session_contract(base: Path, session_id: str) -> dict[str, object]:
+    record = _verified_session_record(base, session_id)
+    directory = _session_dir(base, session_id)
     attachment_path = directory / "attachment.json"
     attachment = None
     if attachment_path.exists() or attachment_path.is_symlink():
@@ -528,6 +569,39 @@ def session_contract(base: Path, session_id: str) -> dict[str, object]:
         except (OSError, ValueError) as exc:
             raise CustodyError("record_mismatch") from exc
     return {**record.model_dump(mode="json"), "reattachment": attachment}
+
+
+def session_binding(base: Path, session_id: str) -> SessionBinding:
+    if "codex-native" not in SUPPORTED_HARNESSES:
+        raise CustodyError("unsupported_custody")
+    record = _verified_session_record(base, session_id)
+    if record.state != "live":
+        raise CustodyError("stale_attachment")
+    terminals = [r for r in record.terminals if (r.name, r.session_key) == ("codex", "main")]
+    native = record.helpers.get("codex_app_server")
+    if len(terminals) != 1 or native is None:
+        raise CustodyError("binding_mismatch")
+    fields = set(SessionBinding.model_fields) - {"native", "terminal"}
+    return SessionBinding(
+        **{field: getattr(record, field) for field in fields}, native=native, terminal=terminals[0]
+    )
+
+
+def verify_session_binding(base: Path, expected: SessionBinding) -> SessionBinding:
+    actual = session_binding(base, expected.session_id)
+    for field in ("session_id", "runner_id", "host_id", "endpoint", "workspace", "harness"):
+        if getattr(actual, field) != getattr(expected, field):
+            raise CustodyError("scope_mismatch")
+    if (
+        actual.config_digest != expected.config_digest
+        or actual.environment_digest != expected.environment_digest
+    ):
+        raise CustodyError("config_mismatch")
+    if actual.config_digest != host_config_digest():
+        raise CustodyError("config_mismatch")
+    if actual != expected:
+        raise CustodyError("binding_mismatch")
+    return actual
 
 
 def end_session(

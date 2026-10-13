@@ -460,3 +460,112 @@ def test_public_session_contract_cli_reads_live_private_lease(tmp_path: Path) ->
         assert receipt["reattachment"] is None
         assert owner.record_path.read_bytes() == before
         assert owner.still_owner()
+
+
+@pytest.mark.parametrize("operation", ["close", "cleanup", "shutdown"])
+async def test_owned_terminal_close_retracts_receipt_before_adoption(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    import socket
+    import tempfile
+    from omnigent.inner.terminal import TerminalInstance
+    from omnigent.terminals.registry import TerminalRegistry
+    from omnigent.runner import custody
+
+    class Terminal(TerminalInstance):
+        async def close(self) -> None:
+            self.socket_path.unlink()
+            self.running = False
+
+    with tempfile.TemporaryDirectory(dir="/tmp", prefix="custody-close-") as short:
+        socket_path = Path(short) / "tmux.sock"
+        with (
+            socket.socket(socket.AF_UNIX) as sock,
+            SessionCustody.create(tmp_path, context()) as owner,
+        ):
+            sock.bind(str(socket_path))
+            owner.publish_terminal("bash", "helper", socket_path, os.getpid(), os.getpid())
+            monkeypatch.setattr(custody, "_current_custody", owner)
+            registry = TerminalRegistry()
+            terminal = Terminal(
+                name="bash",
+                session_key="helper",
+                socket_path=socket_path,
+                private_dir=Path(short),
+                running=True,
+            )
+            registry._by_conversation["conv_synthetic"] = {("bash", "helper"): terminal}
+            if operation == "close":
+                assert await registry.close("conv_synthetic", "bash", "helper", expected=terminal)
+            elif operation == "cleanup":
+                await registry.cleanup_conversation("conv_synthetic")
+            else:
+                await registry.shutdown()
+            with SessionAttachment(tmp_path, "conv_synthetic", generation="new") as attachment:
+                record = attachment.adopt(
+                    host_id="host_synthetic",
+                    endpoint="http://127.0.0.1:8123",
+                    config_digest="a" * 64,
+                )
+                assert record.terminals == []
+            assert not socket_path.exists()
+
+
+def test_resource_retirement_cannot_remove_successor(tmp_path: Path) -> None:
+    resource = tmp_path / "relay.json"
+    resource.write_text("first")
+    with SessionCustody.create(tmp_path, context()) as owner:
+        owner.publish_resource("relay", resource)
+        first = owner.record.resources["relay"]
+        resource.write_text("successor")
+        owner.publish_resource("relay", resource)
+        owner.retire_resource("relay", first)
+        assert owner.record.resources["relay"] != first
+        owner.retire_resource("relay", owner.record.resources["relay"])
+        assert not owner.record.resources
+
+
+async def test_app_server_close_retires_helper_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+    import sys
+    from omnigent.harnesses.codex_native.app_server import CodexNativeAppServer
+    from omnigent.runner import custody
+
+    with SessionCustody.create(tmp_path, context()) as owner:
+        monkeypatch.setattr(custody, "_current_custody", owner)
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            "import time; time.sleep(60)",
+            start_new_session=True,
+        )
+        app_server = CodexNativeAppServer(
+            codex_path=sys.executable,
+            socket_path=tmp_path / "app.sock",
+            codex_home=tmp_path,
+            env={},
+            config_overrides=[],
+            cwd=tmp_path,
+            bridge_dir=tmp_path,
+            proc=proc,
+        )
+        owner.publish_helper("codex_app_server", proc.pid)
+        try:
+            await app_server.close()
+            assert proc.returncode is not None
+            with SessionAttachment(tmp_path, "conv_synthetic", generation="new") as attachment:
+                record = attachment.adopt(
+                    host_id="host_synthetic",
+                    endpoint="http://127.0.0.1:8123",
+                    config_digest="a" * 64,
+                )
+                assert record.helpers == {}
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()

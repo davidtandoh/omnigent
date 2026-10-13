@@ -5062,8 +5062,8 @@ def create_runner_app(
         _session_tool_schemas.pop(session_id, None)
         _instruction_delivery_warned.pop(session_id, None)
         _session_sub_agent_resolved.pop(session_id, None)
-        if _binding := _session_comment_relays.pop(session_id, None):
-            _binding.relay.close()
+        if _binding := _session_comment_relays.get(session_id):
+            _discard_comment_relay(session_id, _binding.relay)
         _session_histories.pop(session_id, None)
         _last_server_item_id.pop(session_id, None)
         _session_event_queues.pop(session_id, None)
@@ -8286,8 +8286,15 @@ def create_runner_app(
         binding = _session_comment_relays.get(session_id)
         if binding is None or binding.relay is not relay:
             return
+        from omnigent.runner.custody import current_custody
+
+        custody = current_custody()
+        name = f"tool_policy_bridge:{session_id}"
+        resource = custody.record.resources.get(name) if custody is not None else None
         del _session_comment_relays[session_id]
         relay.close()
+        if custody is not None and resource is not None:
+            custody.retire_resource(name, resource)
 
     async def _ensure_comment_relay_started(
         session_id: str,

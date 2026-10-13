@@ -20,7 +20,6 @@ from omnigent.runner.identity import OMNIGENT_INTERNAL_WS_ORIGIN
 from tests.e2e.conftest import configure_mock_llm, release_mock_gate, set_fallback_mock_llm
 from tests.e2e.test_codex_native_terminal_recovery_e2e import _wait_for
 from tests.e2e.test_host_codex_native_e2e import (
-    _codex_native_agent_id,
     _online_host_id,
     _poll_for_assistant_marker,
     _poll_for_terminal_resource,
@@ -51,6 +50,7 @@ def test_codex_inflight_turn_survives_host_death_and_single_adoption(
     config_home.mkdir()
     model = "mock-custody"
     config = {
+        "host": {"host_id": "a" * 32, "name": "Synthetic custody host"},
         "providers": {
             "synthetic": {
                 "kind": "gateway",
@@ -109,16 +109,22 @@ def test_codex_inflight_turn_survives_host_death_and_single_adoption(
             log=tmp_path / "host.log",
         )
         host_id = _online_host_id(client, timeout=60)
-        create = client.post(
-            "/v1/sessions",
-            json={
-                "agent_id": _codex_native_agent_id(client),
-                "host_id": host_id,
-                "workspace": str(home),
-            },
+        launch_log = tmp_path / "launch-binding.log"
+        launch = procs.spawn(
+            ["codex", "--server", str(client.base_url).rstrip("/"), "--binding-json"],
+            env=env,
+            cwd=home,
+            log=launch_log,
         )
-        create.raise_for_status()
-        session_id = create.json()["id"]
+        assert launch.wait(timeout=90) == 0, launch_log.read_text()
+        binding = next(
+            json.loads(line)
+            for line in launch_log.read_text().splitlines()
+            if line.startswith('{"config_digest":')
+        )
+        session_id = binding["session_id"]
+        binding_path = tmp_path / "session-binding.json"
+        binding_path.write_text(json.dumps(binding))
         _poll_for_terminal_resource(
             client, session_id=session_id, resource_id="terminal_codex_main", timeout=60
         )
@@ -126,6 +132,14 @@ def test_codex_inflight_turn_survives_host_death_and_single_adoption(
             client, session_id, "sys_terminal_launch", {"terminal": "bash", "session": "proof"}
         )
         assert "error" not in json.loads(launched), launched
+        closed_helper = _mcp(
+            client, session_id, "sys_terminal_launch", {"terminal": "bash", "session": "closed"}
+        )
+        assert "error" not in json.loads(closed_helper)
+        closed = _mcp(
+            client, session_id, "sys_terminal_close", {"terminal": "bash", "session": "closed"}
+        )
+        assert "error" not in json.loads(closed)
         policy = client.post(
             f"/v1/sessions/{session_id}/policies",
             json={
@@ -148,6 +162,8 @@ def test_codex_inflight_turn_survives_host_death_and_single_adoption(
         assert receipt["state"] == "live"
         assert "codex_app_server" in receipt["helpers"]
         native_before = receipt["helpers"]["codex_app_server"]
+        assert binding["native"] == native_before
+        assert binding["host_id"] == host_id
         terminal_before = receipt["terminals"]
         runner_before = receipt["owner"]
         from omnigent.native.owner_claim import ProcessIdentity
@@ -262,6 +278,19 @@ def test_codex_inflight_turn_survives_host_death_and_single_adoption(
             cwd=home,
             log=tmp_path / "reattachment.log",
         )
+        reattachments = [
+            procs.spawn(
+                ["codex", "--reattach-binding", str(binding_path), "--binding-json"],
+                env=env,
+                cwd=home,
+                log=tmp_path / f"consumer-reattach-{index}.log",
+            )
+            for index in range(2)
+        ]
+        for index, process in enumerate(reattachments):
+            assert process.wait(timeout=30) == 0
+            result = json.loads((tmp_path / f"consumer-reattach-{index}.log").read_text())
+            assert result == binding
         second_attach = _wait_for(reattached, "maintenance host reattachment")
         assert second_attach["owner"] == runner_before
         assert second_attach["helpers"]["codex_app_server"] == native_before

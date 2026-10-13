@@ -4246,6 +4246,7 @@ def _adopt_cli_runner_process(proc: subprocess.Popen[bytes]) -> None:
         "with or without the prefix. Default: served at the origin root."
     ),
 )
+@click.option("--managed-local", is_flag=True, hidden=True)
 @click.pass_context
 def server(
     ctx: click.Context,
@@ -4261,6 +4262,7 @@ def server(
     admin_password: str | None,
     background: bool,
     base_path: str | None,
+    managed_local: bool = False,
 ) -> None:
     """Start the Omnigent server, or manage the background server.
 
@@ -4323,6 +4325,8 @@ def server(
         _run_background_server()
         return
 
+    if managed_local and host != "127.0.0.1":
+        raise click.UsageError("Managed local servers require the loopback interface.")
     port_source = ctx.get_parameter_source("port")
     port_was_explicit = port_source is click.core.ParameterSource.COMMANDLINE
     if port_was_explicit:
@@ -4685,15 +4689,26 @@ def server(
     # Advertise this server in the shared pidfile so the run/host
     # daemon discovers and reuses it (loopback only). Cleared on exit so
     # a clean shutdown doesn't leave a stale record.
-    if _is_canonical_local_server:
+    if _is_canonical_local_server or managed_local:
         from omnigent.host.local_server import (
             register_local_server,
+            qualify_server_restart,
         )
 
         # Stamp the same config signature host/run compute so they reuse
         # this foreground server instead of tearing it down on a spurious
         # sig mismatch.
-        register_local_server(port)
+        register_local_server(
+            port,
+            recipe=qualify_server_restart(
+                database_uri=db_uri,
+                artifact_location=art_loc,
+                config_path=config_path,
+                unsupported_options=bool(
+                    conv_db_uri or execution_timeout is not None or agent_dirs
+                ),
+            ),
+        )
 
     class _ShutdownSignalingServer(uvicorn.server.Server):
         """uvicorn.Server that signals active SSE subscribers before the
@@ -4763,7 +4778,7 @@ def server(
         # a Ctrl-C exit doesn't print Click's "Aborted!" or exit non-zero.
         pass
     finally:
-        if _is_canonical_local_server:
+        if _is_canonical_local_server or managed_local:
             from omnigent.host.local_server import clear_local_server_record
 
             clear_local_server_record()
@@ -9387,8 +9402,19 @@ def _selected_daemon_records(
     if all_targets or (server is None and default_all):
         return _list_daemon_records()
     target = _normalize_daemon_target(_resolve_host_server(server))
-    record = _find_daemon_record(target)
-    return [] if record is None else [record]
+    records = [
+        record
+        for record in _list_daemon_records()
+        if record.target == target
+        or (
+            record.mode == "local"
+            and record.resolved_server_url is not None
+            and record.resolved_server_url.rstrip("/") == target
+        )
+    ]
+    if len(records) > 1:
+        raise click.ClickException("Ambiguous host endpoint; refusing to select a daemon.")
+    return records
 
 
 # Per-process header cache keyed on base_url. _remote_headers() resolves

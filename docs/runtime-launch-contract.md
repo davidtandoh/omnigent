@@ -65,7 +65,10 @@ is true only for `codex-native` on macOS. It covers host-launched sessions with
 a durable session ID. Direct wrapper availability does not establish custody.
 Other harnesses and platforms need their own native survival evidence before
 admission. See [session custody](session-custody.md) for the exact owner,
-reattachment and maintenance contract.
+reattachment and maintenance contract. The same document defines the public
+`omnigent codex --binding-json` launch result and
+`omnigent codex --reattach-binding FILE` attachment command. Consumers must keep
+that exact session binding and use it when reconnecting a retained owner.
 
 The isolated CLI test in `tests/e2e/test_launch_contract_e2e.py` verifies receipt
 availability during a synthetic trace outage. The separate custody end-to-end
