@@ -335,6 +335,74 @@ async def test_sequential_launch_reuses_then_replaces_closed_instance(
     assert registry.get_instance_lock(*args[:3]) is not first_lock
 
 
+@pytest.mark.parametrize("first_operation", ["launch", "close"])
+async def test_close_and_relaunch_share_exclusion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first_operation: str
+) -> None:
+    from unittest.mock import Mock
+
+    registry = TerminalRegistry()
+    args = ("conv_race", "bash", "s1", TerminalEnvSpec(command="bash"))
+    stale = TerminalInstance("bash", "s1", tmp_path / "old.sock", tmp_path / "old")
+    replacement = TerminalInstance(
+        "bash", "s1", tmp_path / "new.sock", tmp_path / "new", running=True
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def close_stale() -> None:
+        entered.set()
+        await release.wait()
+
+    stale.close = AsyncMock(side_effect=close_stale)
+    replacement.launch = AsyncMock()
+    replacement.is_alive = AsyncMock(return_value=True)
+    create = Mock(return_value=TerminalCreateResult(replacement, tmp_path))
+    monkeypatch.setattr(registry_mod, "create_terminal_instance", create)
+    lock = threading.Lock()
+    registry._by_conversation[args[0]] = {("bash", "s1"): stale}
+    registry._instance_locks[args[:3]] = lock
+    operation = asyncio.create_task(
+        registry.launch(*args)
+        if first_operation == "launch"
+        else registry.close(*args[:3], expected=stale)
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        assert lock.locked()
+        with pytest.raises(RuntimeError, match="owner_busy"):
+            await registry.close(*args[:3], expected=stale)
+        with pytest.raises(RuntimeError, match="owner_busy"):
+            await registry.launch(*args)
+        assert registry.get_instance_lock(*args[:3]) is lock
+        create.assert_not_called()
+    finally:
+        release.set()
+        await operation
+    assert not lock.locked()
+    stale.close.assert_awaited_once()
+    assert await registry.launch(*args) is replacement
+    create.assert_called_once()
+    assert registry.get(*args[:3]) is replacement
+    assert not await registry.close(*args[:3], expected=stale)
+
+    import json
+
+    from omnigent.tools.base import ToolContext
+    from omnigent.tools.builtins.sys_terminal import SysTerminalCloseTool
+
+    replacement.close = AsyncMock()
+    result = await asyncio.to_thread(
+        SysTerminalCloseTool(registry).invoke,
+        json.dumps({"terminal": "bash", "session": "s1"}),
+        ToolContext(task_id="test", agent_id="test", workspace=tmp_path, conversation_id=args[0]),
+    )
+    assert json.loads(result)["status"] == "closed"
+    assert registry.get_instance_lock(*args[:3]) is None
+    replacement.close.assert_awaited_once()
+
+
+
 def test_transfer_moves_terminal_without_closing_tmux(tmp_path: Path) -> None:
     """
     Terminal transfer changes ownership without touching the instance.

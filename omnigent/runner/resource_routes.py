@@ -846,6 +846,17 @@ def register_resource_routes(
         session_id: str,
         terminal_id: str,
     ) -> JSONResponse:
+        terminal_registry = resource_registry.terminal_registry
+        failed_codex_launch = (
+            terminal_id == terminal_resource_id("codex", "main")
+            and terminal_registry is not None
+            and any(
+                entry.terminal_name == "codex"
+                and entry.session_key == "main"
+                and entry.instance.launch_failed
+                for entry in terminal_registry.list_for_cleanup(session_id)
+            )
+        )
         closed = await resource_registry.close_terminal(
             session_id,
             terminal_id,
@@ -860,6 +871,10 @@ def register_resource_routes(
                     }
                 },
             )
+        if failed_codex_launch:
+            from omnigent.runner.native.orchestration import teardown_codex_native_app_server
+
+            await teardown_codex_native_app_server(session_id)
         return JSONResponse(
             status_code=200,
             content={

@@ -417,7 +417,6 @@ async def test_auto_create_codex_terminal_keeps_loop_responsive_during_profile_r
         "version",
         "permission_args",
         "retain_subscription",
-        "cancel_launch",
         "use_envelope",
         "provider_profile",
     ),
@@ -426,10 +425,9 @@ async def test_auto_create_codex_terminal_keeps_loop_responsive_during_profile_r
             version,
             permission_args,
             retain_subscription,
-            cancel_launch,
             use_envelope,
             None,
-            id=f"{version}-{'cancel' if cancel_launch else 'launch'}-"
+            id=f"{version}-"
             f"{'envelope' if use_envelope else 'legacy'}",
         )
         for version, permission_args, retain_subscription in [
@@ -437,22 +435,22 @@ async def test_auto_create_codex_terminal_keeps_loop_responsive_during_profile_r
             ((0, 154, 0), [], True),
             (None, [], True),
         ]
-        for cancel_launch in (False, True)
         for use_envelope in (False, True)
     ]
     + [
         pytest.param(
-            (0, 154, 0), [], True, False, True, "configured-workspace", id="configured-provider"
+            (0, 154, 0), [], True, True, "configured-workspace", id="configured-provider"
         )
     ],
 )
+@pytest.mark.parametrize("launch_outcome", ["success", "cancelled", "retained"])
 async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     version: tuple[int, int, int] | None,
     permission_args: list[str],
     retain_subscription: bool,
-    cancel_launch: bool,
+    launch_outcome: str,
     use_envelope: bool,
     provider_profile: str | None,
     caplog: pytest.LogCaptureFixture,
@@ -472,7 +470,14 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     :param monkeypatch: Pytest monkeypatch fixture.
     :returns: None.
     """
+    import errno
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+
     import omnigent.harness_startup_config as startup_config_mod
+    from omnigent.inner.terminal import TerminalCreateResult, TerminalInstance
+    from omnigent.terminals import TerminalRegistry
+    from omnigent.terminals import registry as registry_mod
     import omnigent.harnesses.codex_native.app_server as codex_app_mod
     from omnigent.runner import app as runner_app_mod
 
@@ -659,7 +664,7 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     retained_client = _RetainedClient()
     launched_specs: list[Any] = []
 
-    class _FakeResourceRegistry:
+    class _FakeResourceRegistry(SessionResourceRegistry):
         """Resource registry that records the launched terminal spec."""
 
         async def launch_auxiliary_terminal(
@@ -694,8 +699,17 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
             assert preloaded_state is not None
             assert preloaded_state.thread_id == thread_id
             launched_specs.append(spec)
-            if cancel_launch:
+            if launch_outcome == "cancelled":
                 raise asyncio.CancelledError
+            if launch_outcome == "retained":
+                return await super().launch_auxiliary_terminal(
+                    session_id=session_id,
+                    terminal_name=terminal_name,
+                    session_key=session_key,
+                    spec=spec,
+                    resource_role=resource_role,
+                    parent_os_env=parent_os_env,
+                )
             return SessionResourceView(
                 id="terminal_codex_main",
                 type="terminal",
@@ -779,8 +793,77 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
         ),
     )
 
+    terminal_registry = TerminalRegistry()
+    resources = _FakeResourceRegistry(terminal_registry=terminal_registry)
+    if launch_outcome == "retained":
+        private_dir = tmp_path / "terminal"
+        private_dir.mkdir()
+        instance = TerminalInstance("codex", "main", private_dir / "tmux.sock", private_dir)
+
+        async def cancelled_after_start(**_kwargs: Any) -> None:
+            instance.running = True
+            raise asyncio.CancelledError
+
+        instance.launch = cancelled_after_start
+        monkeypatch.setattr(
+            registry_mod, "create_terminal_instance",
+            Mock(return_value=TerminalCreateResult(instance, tmp_path)),
+        )
+        spawn = AsyncMock(side_effect=OSError(errno.EAGAIN, "synthetic exhaustion"))
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+
     try:
-        if cancel_launch:
+        if launch_outcome == "retained":
+            with pytest.raises(RuntimeError, match="could not start"):
+                await _auto_create_codex_terminal(
+                    session_id, resources,
+                    lambda _sid, event: published_events.append(event),
+                    agent_spec=agent_spec,
+                    server_client=_SnapshotServerClient(),
+                    session_init=session_init,
+                )
+            assert instance.launch_failed
+            assert instance.running
+            assert private_dir.exists()
+            assert terminal_registry.list_for_cleanup(session_id)[0].instance is instance
+            assert not app_server.closed
+            assert runner_app_mod._AUTO_CODEX_APP_SERVERS[session_id] is app_server
+            assert not forward_calls
+            assert not published_events
+            with pytest.raises(RuntimeError, match="process_pending"):
+                await _auto_create_codex_terminal(
+                    session_id, resources, lambda *_: None,
+                    agent_spec=agent_spec, server_client=_SnapshotServerClient(),
+                    session_init=session_init,
+                )
+            assert len(build_calls) == 1
+            app = create_runner_app(
+                server_client=NullServerClient(),
+                terminal_registry=terminal_registry,
+                resource_registry=resources,
+            )
+            monkeypatch.setattr(runner_app_mod, "_delete_native_bridge_dirs", AsyncMock())
+            path = f"/v1/sessions/{session_id}/resources"
+            if not use_envelope:
+                path += "/terminals/terminal_codex_main"
+            transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+            async with httpx.AsyncClient(transport=transport, base_url="http://runner") as client:
+                refused = await client.delete(path)
+                assert refused.status_code == 500
+                assert refused.json()["error"]["code"] == "unavailable_probe"
+                assert not app_server.closed
+                spawn.side_effect = None
+                spawn.return_value = SimpleNamespace(
+                    returncode=0, communicate=AsyncMock(return_value=(b"", b""))
+                )
+                completed = await client.delete(path)
+                assert completed.status_code == 200, completed.text
+            assert terminal_registry.list_for_cleanup(session_id) == []
+            assert not private_dir.exists()
+            assert app_server.closed
+            assert session_id not in runner_app_mod._AUTO_CODEX_APP_SERVERS
+            return
+        if launch_outcome == "cancelled":
             with pytest.raises(asyncio.CancelledError):
                 await _auto_create_codex_terminal(
                     session_id,

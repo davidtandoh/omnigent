@@ -3323,6 +3323,7 @@ def create_runner_app(
                 await turn_task
         await mcp_execution_registry.cancel_session(session_id)
         await resource_registry.cleanup_session(session_id)
+        await _native_runtime.teardown_codex_native_app_server(session_id)
         _session_message_buffers.pop(session_id, None)
         _live_response_id.pop(session_id, None)
         # Clear all desync/turn state so a recreated same-id session starts clean.
@@ -7398,6 +7399,7 @@ def create_runner_app(
         session_id: str,
     ) -> JSONResponse:
         await resource_registry.cleanup_session(session_id)
+        await _native_runtime.teardown_codex_native_app_server(session_id)
         _required_terminal_exit_errors.pop(session_id, None)
         _codex_terminal_ensure_locks.pop(session_id, None)
         _claude_terminal_ensure_locks.pop(session_id, None)
@@ -7441,6 +7443,7 @@ def create_runner_app(
         _repl_terminal_ensure_locks.pop(session_id, None)
         await _teardown_session_terminals(session_id)
         await resource_registry.cleanup_session(session_id)
+        await _native_runtime.teardown_codex_native_app_server(session_id)
         if process_manager is not None:
             await process_manager.release(session_id)
         _clear_session_agent_caches(session_id, _session_agent_ids.get(session_id))

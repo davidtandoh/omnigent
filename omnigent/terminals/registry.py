@@ -620,6 +620,7 @@ class TerminalRegistry:
             never-launched), or if *expected* no longer occupies the key.
         """
         key = (terminal_name, session_key)
+        lock_key = (conversation_id, terminal_name, session_key)
         with self._lock:
             slot = self._by_conversation.get(conversation_id)
             if slot is None:
@@ -627,20 +628,30 @@ class TerminalRegistry:
             if expected is not None and slot.get(key) is not expected:
                 return False
             instance = slot.get(key)
-        if instance is None:
-            return False
-        await asyncio.wait_for(
-            self._close_instance(instance, conversation_id), timeout=_CLOSE_TIMEOUT_S
-        )
-        with self._lock:
-            slot = self._by_conversation.get(conversation_id)
-            if slot is not None and slot.get(key) is instance:
-                del slot[key]
-                if not slot:
-                    self._by_conversation.pop(conversation_id, None)
-                if not _preserve_lock:
-                    self._instance_locks.pop((conversation_id, terminal_name, session_key), None)
-        return True
+            if instance is None:
+                return False
+            instance_lock = self._instance_locks.setdefault(lock_key, threading.Lock())
+            if not _preserve_lock and not instance_lock.acquire(blocking=False):
+                raise RuntimeError("Session custody refused: owner_busy")
+        try:
+            await asyncio.wait_for(
+                self._close_instance(instance, conversation_id), timeout=_CLOSE_TIMEOUT_S
+            )
+            with self._lock:
+                slot = self._by_conversation.get(conversation_id)
+                if slot is not None and slot.get(key) is instance:
+                    del slot[key]
+                    if not slot:
+                        self._by_conversation.pop(conversation_id, None)
+            return True
+        finally:
+            if not _preserve_lock:
+                with self._lock:
+                    instance_lock.release()
+                    if self._instance_locks.get(
+                        lock_key
+                    ) is instance_lock and key not in self._by_conversation.get(conversation_id, {}):
+                        self._instance_locks.pop(lock_key)
 
     async def cleanup_conversation(self, conversation_id: str) -> None:
         """Close every terminal owned by *conversation_id*.

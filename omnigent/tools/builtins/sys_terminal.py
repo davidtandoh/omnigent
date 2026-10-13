@@ -55,15 +55,6 @@ def _has_meaningful_cwd(cwd: str | None) -> bool:
     return cwd not in _PLACEHOLDER_CWDS
 
 
-class _CloseFailed(Exception):
-    """
-    Internal flag for ``SysTerminalCloseTool`` — surfacing a tmux
-    teardown failure across the lock-acquisition boundary without
-    leaking the original ``RuntimeError`` / ``OSError`` past the
-    structured JSON envelope the caller expects.
-    """
-
-
 @dataclass(frozen=True)
 class _ValidatedLaunchArgs:
     """Validated launch-tool arguments ready to drive ``TerminalRegistry.launch``.
@@ -1063,32 +1054,12 @@ class SysTerminalCloseTool(Tool):
         terminal_name = parsed["terminal"]
         session_key = parsed["session"]
 
-        # Acquire the per-instance lock BEFORE asking the registry
-        # to close. This serializes against any in-flight send/read
-        # holding the same lock, so the actual ``instance.close()``
-        # never races with a tmux op already in progress. ``None``
-        # means the instance was already closed (or never launched);
-        # registry.close() returns False in that case anyway.
-        lock = self._registry.get_instance_lock(conversation_id, terminal_name, session_key)
-
-        def _do_close() -> bool:
-            try:
-                return asyncio.run(
-                    self._registry.close(conversation_id, terminal_name, session_key)
-                )
-            except (RuntimeError, OSError) as exc:
-                # tmux teardown can raise when the server is already
-                # gone — surface but don't propagate.
-                _logger.exception("sys_terminal_close failed")
-                raise _CloseFailed(str(exc)) from exc
-
         try:
-            if lock is not None:
-                with lock:
-                    closed = _do_close()
-            else:
-                closed = _do_close()
-        except _CloseFailed as exc:
+            closed = asyncio.run(
+                self._registry.close(conversation_id, terminal_name, session_key)
+            )
+        except (RuntimeError, OSError) as exc:
+            _logger.exception("sys_terminal_close failed")
             return json.dumps({"error": f"close failed: {exc}"})
 
         return json.dumps(

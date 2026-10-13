@@ -43,7 +43,11 @@ Session cleanup closes terminals before releasing the primary environment,
 skills or native bridge files. A terminal cleanup failure propagates through
 the resource registry as a named JSON error; the runner does not return
 `cleaned=true`. The terminal DELETE route can retire retained failed launches
-without admitting them for reuse. Native stop and idle cleanup publish deletion
+without admitting them for reuse. A retained failed Codex launch also retains
+its app-server. Terminal deletion or session cleanup releases that app-server
+only after terminal termination succeeds. Close and launch use the same
+per-instance lock; concurrent operations refuse with `owner_busy`.
+Native stop and idle cleanup publish deletion
 only after the terminal closes. Failed closure preserves the Codex app-server
 and forwarder. Shutdown attempts every independent terminal once before
 propagating a refusal and retains failed entries. These rules also apply when

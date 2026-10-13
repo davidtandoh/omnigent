@@ -4837,6 +4837,10 @@ async def _auto_create_codex_terminal(
     )
     from omnigent.inner.codex_executor import codex_extended_catalog_env
 
+    terminal_registry = getattr(resource_registry, "terminal_registry", None)
+    if terminal_registry is not None:
+        terminal_registry.get(session_id, "codex", "main")
+
     launch_config = await _codex_native_launch_config(
         session_id=session_id,
         server_client=server_client,
@@ -5523,9 +5527,16 @@ async def _auto_create_codex_terminal(
     except BaseException:
         with contextlib.suppress(Exception):
             await event_client.close()
-        with contextlib.suppress(Exception):
-            await app_server.close()
-        _AUTO_CODEX_APP_SERVERS.pop(session_id, None)
+        retained = terminal_registry is not None and any(
+            entry.terminal_name == "codex"
+            and entry.session_key == "main"
+            and entry.instance.launch_failed
+            for entry in terminal_registry.list_for_cleanup(session_id)
+        )
+        if not retained:
+            with contextlib.suppress(Exception):
+                await app_server.close()
+            _AUTO_CODEX_APP_SERVERS.pop(session_id, None)
         raise
 
     # Known-thread resumes publish bridge state before the terminal starts;
