@@ -241,17 +241,23 @@ async def _cancel_auto_forwarder_task(
     if session_id not in _AUTO_CODEX_APP_SERVERS:
         launch_session_ids.append(session_id)
     for launch_session_id in launch_session_ids:
-        task = _AUTO_FORWARDER_TASKS.pop(launch_session_id, None)
-        if task is None or task.done():
-            continue
-        task.cancel(refusal)
-        _done, pending = await asyncio.wait({task}, timeout=_AUTO_FORWARDER_CANCEL_TIMEOUT_S)
-        if pending:
-            _logger.warning(
-                "Cancelled transcript forwarder for %s did not finish within %.0fs",
-                launch_session_id,
-                _AUTO_FORWARDER_CANCEL_TIMEOUT_S,
-            )
+        await _cancel_registered_auto_forwarder_task(launch_session_id, refusal=refusal)
+
+
+async def _cancel_registered_auto_forwarder_task(
+    launch_session_id: str, *, refusal: OmnigentError | None = None
+) -> None:
+    task = _AUTO_FORWARDER_TASKS.pop(launch_session_id, None)
+    if task is None or task.done():
+        return
+    task.cancel(refusal)
+    _done, pending = await asyncio.wait({task}, timeout=_AUTO_FORWARDER_CANCEL_TIMEOUT_S)
+    if pending:
+        _logger.warning(
+            "Cancelled transcript forwarder for %s did not finish within %.0fs",
+            launch_session_id,
+            _AUTO_FORWARDER_CANCEL_TIMEOUT_S,
+        )
 
 
 async def teardown_codex_native_app_server(session_id: str) -> None:
@@ -273,15 +279,18 @@ async def teardown_codex_native_app_server(session_id: str) -> None:
     :param session_id: Session/conversation id, e.g. ``"conv_abc123"``.
     :returns: None.
     """
-    launch_session_ids = _codex_native_launch_session_ids(session_id)
-    if not launch_session_ids:
-        return
-    await _cancel_auto_forwarder_task(session_id)
-    for launch_session_id in launch_session_ids:
-        leftover_app_server = _AUTO_CODEX_APP_SERVERS.pop(launch_session_id, None)
-        if leftover_app_server is not None:
-            with contextlib.suppress(Exception):
-                await leftover_app_server.close()
+    for launch_session_id in _codex_native_launch_session_ids(session_id):
+        await _teardown_codex_native_launch(launch_session_id)
+
+
+async def _teardown_codex_native_launch(launch_session_id: str) -> None:
+    await _cancel_registered_auto_forwarder_task(launch_session_id)
+    leftover_app_server = _AUTO_CODEX_APP_SERVERS.pop(launch_session_id, None)
+    if leftover_app_server is not None:
+        with contextlib.suppress(Exception):
+            await leftover_app_server.close()
+        await _shutdown_session_router_async(launch_session_id)
+        await _shutdown_session_turn_router_async(launch_session_id)
 
 
 async def teardown_all_codex_native_app_servers() -> None:
@@ -307,7 +316,7 @@ async def teardown_all_codex_native_app_servers() -> None:
     """
     for session_id in list(_AUTO_CODEX_APP_SERVERS):
         with contextlib.suppress(Exception):
-            await teardown_codex_native_app_server(_codex_native_active_session_id(session_id))
+            await _teardown_codex_native_launch(session_id)
 
 
 async def teardown_opencode_native_server(session_id: str) -> None:

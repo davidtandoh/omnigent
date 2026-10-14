@@ -45,8 +45,10 @@ that session's dependencies only after its terminal cleanup succeeds. A shutdown
 refusal reaches the session's forwarder through its existing cancellation path
 before the event loop exits. Both Codex forwarder cleanup paths preserve the
 app-server and routers when cancellation carries that named refusal. After a
-Codex rotation, shutdown resolves the owning launch through the existing bridge
-record. OpenCode also preserves its server when cancellation carries a refusal.
+Codex rotation, shutdown matches terminals to their app-server using the
+`CODEX_HOME` supplied at launch. It closes that app-server only after registry
+cleanup succeeds for every matching terminal. A stale bridge label cannot
+authorize cleanup. OpenCode also preserves its server when cancellation carries a refusal.
 A helper terminal left in the launch session cannot authorize cleanup of the
 rotated terminal's dependencies. Nested cleanup and repeated cancellation retain
 the named refusal. Successful terminal shutdown still closes the associated

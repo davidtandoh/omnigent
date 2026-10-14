@@ -1608,20 +1608,42 @@ def create_app(
             await _pane_reaper.shutdown()
         # Host shutdown skips per-session deletion, so close native servers here.
         from omnigent.runner.native import (
-            _cancel_auto_forwarder_task,
             teardown_all_codex_native_app_servers,
             teardown_all_opencode_native_servers,
-            teardown_codex_native_app_server,
             teardown_opencode_native_server,
         )
-
+        from omnigent.runner.native import orchestration
         from omnigent.runner.resource_registry import _terminal_cleanup_error
 
+        terminal_dependencies = [
+            (session_id, entry.instance.env.get("CODEX_HOME"))
+            for session_id in _terminal_registry.active_conversation_ids()
+            for entry in _terminal_registry.list_for_cleanup(session_id)
+        ]
+        closed_sessions: set[str] = set()
+
         async def preserve_dependents(session_id: str, refusal: Exception) -> None:
-            await _cancel_auto_forwarder_task(session_id, refusal=_terminal_cleanup_error(refusal))
+            named_refusal = _terminal_cleanup_error(refusal)
+            for launch_id, server in list(orchestration._AUTO_CODEX_APP_SERVERS.items()):
+                if (session_id, str(server.codex_home)) in terminal_dependencies:
+                    await orchestration._cancel_registered_auto_forwarder_task(
+                        launch_id, refusal=named_refusal
+                    )
+            if session_id not in orchestration._AUTO_CODEX_APP_SERVERS:
+                await orchestration._cancel_registered_auto_forwarder_task(
+                    session_id, refusal=named_refusal
+                )
 
         async def close_dependents(session_id: str) -> None:
-            await teardown_codex_native_app_server(session_id)
+            closed_sessions.add(session_id)
+            for launch_id, server in list(orchestration._AUTO_CODEX_APP_SERVERS.items()):
+                dependents = {
+                    owner
+                    for owner, home in terminal_dependencies
+                    if home == str(server.codex_home)
+                }
+                if dependents and dependents <= closed_sessions:
+                    await orchestration._teardown_codex_native_launch(launch_id)
             await teardown_opencode_native_server(session_id)
             await pm.release(session_id)
 
