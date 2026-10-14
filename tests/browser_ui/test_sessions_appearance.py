@@ -150,10 +150,10 @@ def test_reset_button_has_rendered_top_margin(page: Page, appearance_url: str) -
     _open_appearance(page, appearance_url)
     gap = page.get_by_test_id("reset-appearance-button").evaluate(
         """button => {
-            const wrapper = button.closest('div');
-            const controls = wrapper.previousElementSibling;
-            if (!controls) throw new Error('controls column sibling not found');
-            return wrapper.getBoundingClientRect().top - controls.getBoundingClientRect().bottom;
+            const group = button.closest('[data-testid="settings-group-data"]');
+            const controls = group?.previousElementSibling;
+            if (!group || !controls) throw new Error('appearance groups not found');
+            return group.getBoundingClientRect().top - controls.getBoundingClientRect().bottom;
         }"""
     )
     assert gap >= 24, f"Reset button margin is only {gap:.0f}px; expected at least 24px"
@@ -535,3 +535,158 @@ def test_collapsing_the_rail_sticks_across_reload_and_new_sessions(
     page.get_by_role("button", name="Expand right panel").click()
     expect(page.get_by_role("complementary", name="Workspace")).to_be_visible()
     assert _stored_default(page) == "open", "reopening the rail did not record the open state"
+
+
+@pytest.mark.parametrize("saved_size", [None, 11, 18])
+def test_mobile_typography_and_settings_header_render(
+    page: Page, appearance_url: str, saved_size: int | None
+) -> None:
+    page.set_viewport_size({"width": 390, "height": 844})
+    if saved_size is not None:
+        page.add_init_script(f"localStorage.setItem('omnigent:ui-font-size', '{saved_size}')")
+    _open_appearance(page, appearance_url)
+    size = saved_size if saved_size is not None else 14
+    expect(page.get_by_test_id("ui-font-size-input")).to_have_value(str(size))
+    expect(page.locator("body")).to_have_css("font-size", f"{size}px")
+    sizes = page.evaluate("""() => {
+        const sample = document.createElement('div');
+        document.body.append(sample);
+        const sizes = ['text-sm', 'text-ui', 'text-base', 'text-lg', 'text-xl', 'text-2xl']
+            .map(className => {
+                sample.className = className;
+                return parseFloat(getComputedStyle(sample).fontSize);
+            });
+        sample.remove();
+        return sizes;
+    }""")
+    assert sizes == pytest.approx([size * factor for factor in (0.9, 1, 1, 1.125, 1.25, 1.5)])
+    title = page.get_by_role("heading", name="Appearance", exact=True)
+    expect(title).to_have_css("position", "fixed")
+    expect(title).to_have_css("text-align", "center")
+    bounds = title.bounding_box()
+    assert bounds is not None
+    assert bounds["x"] + bounds["width"] / 2 == pytest.approx(195)
+    assert bounds["y"] == 0
+    header_bounds = page.locator(".settings-mobile-header").bounding_box()
+    assert header_bounds is not None
+    assert bounds["height"] == header_bounds["height"]
+    fade = page.locator(".settings-mobile-header").evaluate("""header => {
+        const style = getComputedStyle(header, '::before');
+        return {height: style.height, background: style.backgroundImage};
+    }""")
+    assert fade["height"] == "80px"
+    assert fade["background"].startswith("linear-gradient(")
+    assert "48px" in fade["background"] and "80px" in fade["background"]
+
+
+@pytest.mark.parametrize("zoom", [1, 1.5])
+def test_mac_shell_clearance_renders_with_zoom(
+    page: Page, appearance_url: str, zoom: float
+) -> None:
+    page.set_viewport_size({"width": 1280, "height": 900})
+    _open_appearance(page, appearance_url)
+    geometry = page.evaluate(
+        """zoom => {
+        const root = document.documentElement;
+        root.setAttribute('data-electron-mac', 'true');
+        root.style.setProperty('--omnigent-electron-zoom', String(zoom));
+        const sample = document.createElement('div');
+        sample.className = 'app-shell';
+        sample.style.cssText = 'position:fixed;inset:0;z-index:9999';
+        sample.innerHTML = `
+            <div class="electron-drag-strip"></div>
+            <div class="conversations-sidebar"
+                style="position:absolute;width:300px;height:120px;z-index:50">
+                <div class="sidebar-header-row"></div>
+                <div class="sidebar-brand">Brand</div>
+                <div data-testid="sidebar-header-actions">Sidebar actions</div>
+            </div>
+            <div class="electron-sidebar-header-actions">
+                <div data-testid="sidebar-header-actions" style="display:flex">
+                    <button>Search</button><button>Settings</button><button>Collapse</button>
+                </div>
+            </div>
+            <button class="chat-header-sidebar-toggle">Open sidebar</button>
+            <div class="conversations-sidebar is-peek" style="position:fixed">
+                <div class="sidebar-header-row"></div>
+            </div>
+            <div class="settings-sidebar-header"></div>
+            <aside aria-label="Workspace" data-maximized="true">
+                <div class="workspace-tab-strip"></div>
+            </aside>`;
+        document.body.append(sample);
+        const style = selector => getComputedStyle(sample.querySelector(selector));
+        const controls = [...sample.querySelectorAll('.electron-sidebar-header-actions button')];
+        const controlOrder = () => [...controls]
+            .sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left)
+            .map(button => button.textContent);
+        const collapse = controls[2].getBoundingClientRect();
+        const strip = sample.querySelector('.electron-drag-strip').getBoundingClientRect();
+        const result = {
+            strip: {x: strip.x, y: strip.y, width: strip.width, height: strip.height},
+            region: style('.electron-drag-strip').getPropertyValue('-webkit-app-region'),
+            rowHeight: parseFloat(style('.sidebar-header-row').height),
+            peekTop: parseFloat(style('.is-peek').top),
+            peekRow: style('.is-peek .sidebar-header-row').display,
+            settingsTop: parseFloat(style('.settings-sidebar-header').paddingTop),
+            closedPadding: parseFloat(style('.workspace-tab-strip').paddingLeft),
+            sidebarMargin: style('.conversations-sidebar').marginTop,
+            brandDisplay: style('.sidebar-brand').display,
+            sidebarActions: style(
+                '.conversations-sidebar [data-testid="sidebar-header-actions"]'
+            ).display,
+            stripActions: style(
+                '.electron-sidebar-header-actions [data-testid="sidebar-header-actions"]'
+            ).display,
+            stripPosition: style('.electron-sidebar-header-actions').position,
+            toggleDisplay: style('.chat-header-sidebar-toggle').display,
+            order: controlOrder(),
+            controlsAboveSidebar: document.elementFromPoint(
+                collapse.x + collapse.width / 2, collapse.y + collapse.height / 2
+            ) === controls[2],
+        };
+        sample.setAttribute('data-sidebar-open', 'true');
+        result.openPadding = parseFloat(style('.workspace-tab-strip').paddingLeft);
+        root.removeAttribute('data-electron-mac');
+        result.browserRegion = style('.electron-drag-strip')
+            .getPropertyValue('-webkit-app-region');
+        result.browserBrand = style('.sidebar-brand').display;
+        result.browserSidebarActions = style(
+            '.conversations-sidebar [data-testid="sidebar-header-actions"]'
+        ).display;
+        result.browserToggle = style('.chat-header-sidebar-toggle').display;
+        result.browserStripPosition = style('.electron-sidebar-header-actions').position;
+        result.browserPeekRow = style('.is-peek .sidebar-header-row').display;
+        result.browserSettingsTop = style('.settings-sidebar-header').paddingTop;
+        result.browserOrder = controlOrder();
+        sample.remove();
+        root.style.removeProperty('--omnigent-electron-zoom');
+        return result;
+    }""",
+        zoom,
+    )
+    height = 48 / zoom
+    assert geometry["strip"] == pytest.approx({"x": 0, "y": 0, "width": 1280, "height": height})
+    assert geometry["region"] == "drag"
+    assert geometry["browserRegion"] == "none"
+    assert geometry["rowHeight"] == pytest.approx(height)
+    assert geometry["peekTop"] == pytest.approx(height + 8)
+    assert geometry["peekRow"] == "none"
+    assert geometry["settingsTop"] == pytest.approx(height + 8)
+    assert geometry["closedPadding"] == pytest.approx(88 / zoom + 80, abs=0.01)
+    assert geometry["openPadding"] == 0
+    assert geometry["sidebarMargin"] == "0px"
+    assert geometry["brandDisplay"] == "none"
+    assert geometry["sidebarActions"] == "none"
+    assert geometry["stripActions"] != "none"
+    assert geometry["stripPosition"] == "absolute"
+    assert geometry["toggleDisplay"] == "none"
+    assert geometry["order"] == ["Collapse", "Search", "Settings"]
+    assert geometry["controlsAboveSidebar"] is True
+    assert geometry["browserBrand"] != "none"
+    assert geometry["browserSidebarActions"] != "none"
+    assert geometry["browserToggle"] != "none"
+    assert geometry["browserStripPosition"] == "static"
+    assert geometry["browserPeekRow"] != "none"
+    assert geometry["browserSettingsTop"] == "0px"
+    assert geometry["browserOrder"] == ["Search", "Settings", "Collapse"]

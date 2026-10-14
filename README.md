@@ -574,6 +574,9 @@ and they're in. Signup is invite-only.
 
 - **Share a live session.** Hit **Share** in the web UI and send the link;
   teammates watch your agent work and chat with it in real time.
+- **Share with everyone who can sign in.** Admins can allow public Edit in
+  **Settings > Sharing > Maximum public permission**. Owners then choose
+  **Share > General access > Edit**. The default stays Read.
 - **Leave a shared session.** Done with a session someone shared with you?
   Pick **Leave session** from its sidebar row menu to drop it from your
   sidebar. Nothing is deleted — the owner keeps it and can share it again.
@@ -679,6 +682,23 @@ Run it with:
 ```bash
 omnigent run path/to/my_agent.yaml
 ```
+
+On a shared server, follow the
+[uploaded-agent tool restrictions](docs/AGENT_YAML_SPEC.md#uploaded-agent-compatibility-in-0180)
+before uploading the bundle.
+
+To keep an agent in the new-session picker without starting a session, install
+it on your configured server:
+
+```bash
+omnigent agent add path/to/my_agent.yaml
+omnigent agent list
+omnigent agent remove my_agent
+```
+
+Installed agents belong to your account and appear on every host you use.
+Removal asks for confirmation if sessions still use the agent; those sessions
+must be forked into another agent to continue after removal.
 
 The same file can declare sub-agents and reviewers. For a fuller example, see
 Polly at [`examples/polly/`](https://github.com/omnigent-ai/omnigent/tree/main/examples/polly/), and the

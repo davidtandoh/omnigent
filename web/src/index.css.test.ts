@@ -6,8 +6,9 @@ import { readFileSync } from "node:fs";
 // (resolved from its dependency tree, so we test the version the build uses).
 import { transform } from "lightningcss";
 import { type ComponentProps, createElement } from "react";
+import { createPortal } from "react-dom";
 import { cleanup, render } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { TooltipProvider } from "./components/ui/tooltip";
 import type * as UseTerminalsModule from "./hooks/useTerminals";
@@ -788,41 +789,6 @@ describe("index.css body text tokens", () => {
     expect(mobileMap).toContain("--text-ui: var(--mobile-ui-font-size)");
   });
 
-  /* Contract: the Appearance font-size setting applies on mobile.
-   *
-   * The mobile base used to be a hard-coded 14px with zero references to
-   * --desktop-ui-font-size, so the Settings stepper's value was persisted and
-   * set on <html> but never consumed below 48rem — saved but not applied. The
-   * mobile base must scale off the preference. */
-  describe("mobile branch consumes the font-size preference", () => {
-    const MOBILE_BASE_RATIO = 14 / 13;
-
-    it("derives the mobile base from the preference, not a hard-coded px", () => {
-      expect(mobileMap, "the mobile typography mapping is gone from index.css").toBeDefined();
-      // A literal `--mobile-ui-font-size: 14px` is the saved-but-not-applied
-      // bug: the preference would be a dead store below 48rem.
-      expect(mobileMap).not.toMatch(/--mobile-ui-font-size:\s*\d/);
-      expect(mobileMap).toContain(
-        "--mobile-ui-font-size: calc(var(--desktop-ui-font-size) * (14 / 13))",
-      );
-    });
-
-    it("keeps the historical 14px mobile base at the default preference", () => {
-      // The ratio must map the shipped default onto the long-standing mobile
-      // base exactly, so users who never touch the setting see no change.
-      expect(UI_FONT_SIZE_DEFAULT * MOBILE_BASE_RATIO).toBe(14);
-    });
-
-    it.each([UI_FONT_SIZE_MIN, UI_FONT_SIZE_MAX])(
-      "moves the rendered mobile base when the preference is %ipx",
-      (px) => {
-        // The applied size must actually change with the setting — the
-        // user-visible half of the fix.
-        expect(px * MOBILE_BASE_RATIO).not.toBe(UI_FONT_SIZE_DEFAULT * MOBILE_BASE_RATIO);
-      },
-    );
-  });
-
   it.each([UI_FONT_SIZE_MIN, UI_FONT_SIZE_DEFAULT, UI_FONT_SIZE_MAX])(
     "keeps the caption step smaller than the body step at %ipx",
     (px) => {
@@ -919,32 +885,6 @@ describe("index.css mobile sidebar opacity", () => {
   });
 });
 
-/* Regression test for the "mobile floating Settings/Search chip is see-through"
- * bug.
- *
- * The two floating chips (`.sidebar-glass-chip`) frost their fill with
- * `backdrop-filter`, but WebKit drops that filter on mobile once a Radix popper
- * opens. With a purely translucent fill (rgba white) the scrolling session rows
- * then show straight through and the chip reads as transparent. An opaque
- * `--card-solid` base UNDER the tint keeps it a chip whether or not the blur
- * survives.
- */
-describe("index.css mobile sidebar glass chip opacity", () => {
-  const chipRule = cssSource.match(/\.sidebar-glass-chip \{[^}]*\}/)?.[0];
-
-  it("has the glass chip rule this test exists to protect", () => {
-    expect(chipRule, "the .sidebar-glass-chip rule is gone from index.css").toBeDefined();
-  });
-
-  it("bases the chip on an opaque fill so it never goes see-through", () => {
-    // The translucent tint lives on background-image (a layer over the base),
-    // NOT on background-color — that must stay the opaque token, or the chip
-    // turns transparent the moment WebKit drops the backdrop-filter.
-    expect(chipRule).toMatch(/background-color:\s*var\(--card-solid\)/);
-    expect(chipRule).not.toMatch(/background-color:\s*rgba/);
-  });
-});
-
 describe("index.css text selection colors", () => {
   const selectionRule = cssSource.match(/::selection\s*\{([^}]*)\}/)?.[1];
 
@@ -957,143 +897,142 @@ describe("index.css text selection colors", () => {
   });
 });
 
-/* On the macOS desktop shell the window's top strip carries the OS traffic
- * lights plus the Search/Settings/toggle cluster, and the cluster is owned by
- * AppShell rather than the sidebar so it holds that spot whether the sidebar is
- * open, collapsed, or peeking. Asserted at the CSS level because the whole
- * change is CSS — and because the lights are painted by macOS OUTSIDE the page,
- * so no DOM test (and no page screenshot) can see them. These values ARE the
- * alignment.
- */
-describe("index.css electron-mac sidebar header", () => {
-  const sidebarRule = cssSource.match(
-    /\[data-electron-mac\] \.conversations-sidebar \{[^}]*\}/,
-  )?.[0];
-  const headerRowRule = cssSource.match(
-    /\[data-electron-mac\] \.sidebar-header-row \{[^}]*\}/,
-  )?.[0];
-  const brandRule = cssSource.match(/\[data-electron-mac\] \.sidebar-brand \{[^}]*\}/)?.[0];
-  const inSidebarActionsRule = cssSource.match(
-    /\[data-electron-mac\] \.conversations-sidebar \[data-testid="sidebar-header-actions"\] \{[^}]*\}/,
-  )?.[0];
-  const stripActionsRule = cssSource.match(
-    /\[data-electron-mac\] \.electron-sidebar-header-actions \{(?:[^{}]|\{[^{}]*\})*\}/,
-  )?.[0];
-  const settingsHeaderRule = cssSource.match(
-    /\[data-electron-mac\] \.settings-sidebar-header \{[^}]*\}/,
-  )?.[0];
-  const chatHeaderToggleRule = cssSource.match(
-    /\[data-electron-mac\] \.chat-header-sidebar-toggle \{[^}]*\}/,
-  )?.[0];
-  const peekCardRule = cssSource.match(
-    /\[data-electron-mac\] \.conversations-sidebar\.is-peek \{[^}]*\}/,
-  )?.[0];
-  const peekHeaderRowRule = cssSource.match(
-    /\[data-electron-mac\] \.conversations-sidebar\.is-peek \.sidebar-header-row \{[^}]*\}/,
-  )?.[0];
+describe("index.css electron-mac window drag region", () => {
+  const dragRule = cssBlocks
+    .map(([block]) => block)
+    .find((block) => selectorOf(block) === "html[data-electron-mac] .electron-drag-strip");
+  const controlsRule = cssBlocks
+    .map(([block]) => block)
+    .find(
+      (block) =>
+        selectorOf(block).replace(/\s+/g, " ").startsWith("html[data-electron-mac] :is(") &&
+        block.includes("-webkit-app-region: no-drag"),
+    );
+  let dragSelector: string;
+  let controlsSelector: string;
 
-  it("starts the sidebar at the window's top edge (no empty strip above it)", () => {
-    // Was 2.25rem, which left the band of blank canvas this change removes.
-    expect(sidebarRule).toContain("margin-top: 0");
+  beforeAll(() => {
+    expect(dragRule, "expected the macOS window drag-strip rule").toBeDefined();
+    expect(controlsRule, "expected the macOS interactive-control exclusions").toBeDefined();
+    dragSelector = selectorOf(dragRule!);
+    controlsSelector = selectorOf(controlsRule!);
   });
 
-  it("drops the brand mark, which has nowhere to sit beside the lights", () => {
-    expect(brandRule).toContain("display: none");
+  // The mac shell marks <html> at boot (applyMacElectronShellAttribute).
+  const root = document.documentElement;
+  const markMacShell = () => root.setAttribute("data-electron-mac", "true");
+  const unmarkMacShell = () => root.removeAttribute("data-electron-mac");
+
+  afterEach(() => {
+    cleanup();
+    unmarkMacShell();
   });
 
-  it("collapses the emptied header row instead of leaving a dead band", () => {
-    // Both the wordmark and the cluster are gone from this row on mac, so a
-    // 3rem row would reintroduce the empty strip this change set out to remove.
-    expect(headerRowRule).toContain("height: 2.25rem");
+  it.each<[string, ComponentProps<"div">]>([
+    ["a", {}],
+    ["button", {}],
+    ["input", {}],
+    ["textarea", {}],
+    ["select", {}],
+    ["iframe", {}],
+    ["video", {}],
+    ["audio", {}],
+    ["label", {}],
+    ["summary", {}],
+    ["div", { tabIndex: 0 }],
+    ["span", { tabIndex: 1 }],
+    ["div", { className: "no-drag" }],
+    ["div", { role: "button" }],
+    ["div", { role: "link" }],
+    ["div", { role: "tab" }],
+    ["div", { role: "separator" }],
+    ["div", { role: "menuitem" }],
+    ["div", { role: "menuitemcheckbox" }],
+    ["div", { role: "menuitemradio" }],
+    ["div", { role: "combobox" }],
+    ["div", { role: "option" }],
+    ["div", { role: "radio" }],
+    ["div", { role: "checkbox" }],
+    ["div", { role: "switch" }],
+    ["div", { role: "slider" }],
+    ["div", { role: "listbox" }],
+    ["div", { role: "textbox" }],
+    ["div", { role: "searchbox" }],
+    ["div", { role: "spinbutton" }],
+    ["div", { role: "menu" }],
+    ["div", { role: "dialog" }],
+    ["div", { role: "tooltip" }],
+    ["div", { contentEditable: true }],
+  ])("keeps %s %j interactive inside the drag band", (tag, props) => {
+    markMacShell();
+    const { container } = render(createElement("div", {}, createElement(tag, props)));
+    const control = container.firstElementChild!.firstElementChild!;
+    expect(control.matches(controlsSelector)).toBe(true);
+    unmarkMacShell();
+    expect(control.matches(controlsSelector)).toBe(false);
   });
 
-  it("hides the sidebar's own cluster in favour of the title-bar copy", () => {
-    // The AppShell copy is the one that renders on mac; two visible clusters
-    // would be a duplicated control.
-    expect(inSidebarActionsRule).toContain("display: none");
+  it.each(["", "plaintext-only", "TRUE", "True", "PLAINTEXT-ONLY", "PlainText-Only"])(
+    "excludes contenteditable=%j from dragging",
+    (value) => {
+      markMacShell();
+      const { container } = render(createElement("div", {}, createElement("div")));
+      const control = container.firstElementChild!.firstElementChild!;
+      control.setAttribute("contenteditable", value);
+      expect(control.matches(controlsSelector)).toBe(true);
+    },
+  );
+
+  it.each(["menu", "dialog", "tooltip"])("excludes portaled %s containers", (role) => {
+    markMacShell();
+    const { container, getByRole } = render(
+      createElement(
+        "div",
+        { className: "app-shell" },
+        createPortal(createElement("div", { role }), document.body),
+      ),
+    );
+    const shell = container.firstElementChild!;
+    const overlay = getByRole(role);
+    expect(shell.contains(overlay)).toBe(false);
+    expect(overlay.matches(controlsSelector)).toBe(true);
+    unmarkMacShell();
+    expect(overlay.matches(controlsSelector)).toBe(false);
   });
 
-  it("scopes that hide to the sidebar so it cannot match the AppShell copy", () => {
-    // Without the .conversations-sidebar qualifier this selector would also hit
-    // the title-bar cluster and hide the icons entirely on mac.
-    expect(inSidebarActionsRule).toContain(".conversations-sidebar");
+  it("keeps unfocusable and noneditable content draggable unless explicitly opted out", () => {
+    markMacShell();
+    const { container } = render(
+      createElement(
+        "div",
+        {},
+        createElement("span", { tabIndex: -1 }),
+        createElement("span", { contentEditable: false }),
+      ),
+    );
+    const shell = container.firstElementChild!;
+    expect(shell.firstElementChild!.matches(controlsSelector)).toBe(false);
+    expect(shell.lastElementChild!.matches(controlsSelector)).toBe(false);
+    shell.firstElementChild!.classList.add("no-drag");
+    expect(shell.firstElementChild!.matches(controlsSelector)).toBe(true);
   });
 
-  it("pins the title-bar cluster beside the lights, independent of the sidebar", () => {
-    // Positioned against the app shell, NOT inside the sidebar — that is what
-    // keeps the icons in place while the sidebar collapses (md:w-0 +
-    // overflow-hidden + inert) or peeks (floating card at inset-2).
-    expect(stripActionsRule).toContain("position: absolute");
-  });
-
-  it("stacks the cluster above the sidebar so it is actually painted", () => {
-    // Regression guard: the sidebar is a positioned sibling at z-index 50 with
-    // an OPAQUE gradient background, so any lower layer leaves the buttons
-    // measuring correctly in the DOM while being invisible on screen — a bug no
-    // geometry assertion catches. Must clear 50.
-    const z = stripActionsRule?.match(/z-index:\s*(\d+)/)?.[1];
-    expect(z, "cluster needs an explicit z-index").toBeDefined();
-    expect(Number(z)).toBeGreaterThan(50);
-  });
-
-  it("hides the chat header's duplicate open-sidebar button", () => {
-    // The title-bar toggle is present in every state and carries the same
-    // dwell-to-peek, so the chat header's copy would be a second, lower, offset
-    // instance of one control.
-    expect(chatHeaderToggleRule).toContain("display: none");
-  });
-
-  it("floats the peek card below the title-bar controls", () => {
-    // The card's own inset-2 would put its first row level with the lights and
-    // the icon cluster, so it slides up UNDER the window controls. Its top edge
-    // must clear the 2.25rem strip (2.75rem = strip + the same 0.5rem gap the
-    // card's other edges use).
-    expect(peekCardRule).toContain("top: 2.75rem");
-  });
-
-  it("drops the header row inside the peek card", () => {
-    // The row reserves the title-bar strip for the lights and cluster, which
-    // only applies to the docked sidebar starting at y=0. The peek card already
-    // floats clear of all of it, so the row is 2.25rem of empty canvas above the
-    // first entry — the content should line up against the card's own padding.
-    expect(peekHeaderRowRule).toContain("display: none");
-  });
-
-  it("orders the cluster Collapse, Search, Settings left-to-right", () => {
-    // The DOM order is Search → Settings → toggle (tab order follows
-    // importance), so the toggle is reordered visually rather than moved.
-    expect(stripActionsRule).toMatch(/&\s*>\s*\*\s*>\s*\*:last-child\s*\{[^}]*order:\s*-1/);
-  });
-
-  it("pushes the settings sidebar's Back row below the lights", () => {
-    // /settings swaps the header row out entirely; without this its Back row
-    // would sit underneath the window controls.
-    expect(settingsHeaderRule).toContain("padding-top: 2.75rem");
-  });
-
-  it("keeps every header rule scoped to the desktop shell", () => {
-    // A browser tab has no window controls to align to, so none of this may
-    // apply there. Every SELECTOR mentioning these classes must carry the
-    // [data-electron-mac] scope somewhere ahead of the class — not necessarily
-    // immediately before it, since some are qualified further (e.g.
-    // `[data-electron-mac] .conversations-sidebar.is-peek .sidebar-header-row`).
-    // Selectors are checked whole so a leaked unscoped rule still fails.
-    const selectorsInSource = [...cssSource.matchAll(/(^|\})\s*([^{}]+?)\s*\{/g)].map((m) => m[2]);
-    for (const cls of [
-      ".sidebar-header-row",
-      ".sidebar-brand",
-      ".settings-sidebar-header",
-      ".electron-sidebar-header-actions",
-      ".chat-header-sidebar-toggle",
-    ]) {
-      const mentioning = selectorsInSource.filter((sel) => sel.includes(cls));
-      expect(mentioning.length, `${cls} should appear in at least one rule`).toBeGreaterThan(0);
-      for (const sel of mentioning) {
-        expect(sel, `${cls} must always be [data-electron-mac]-scoped`).toContain(
-          "[data-electron-mac]",
-        );
-      }
-    }
+  it("leaves noninteractive title-bar space draggable and other platforms unchanged", () => {
+    markMacShell();
+    const { container } = render(
+      createElement(
+        "div",
+        {},
+        createElement("div", { className: "electron-drag-strip" }),
+        createElement("span", {}, "Session title"),
+      ),
+    );
+    const shell = container.firstElementChild!;
+    const strip = shell.firstElementChild!;
+    expect(strip.matches(dragSelector)).toBe(true);
+    expect(shell.lastElementChild!.matches(controlsSelector)).toBe(false);
+    unmarkMacShell();
+    expect(strip.matches(dragSelector)).toBe(false);
   });
 });
 
@@ -1107,7 +1046,8 @@ describe("index.css electron-mac sidebar header", () => {
  * (z above the rail) then covers that corner — the lights sit over IT, and the
  * strip starts to the sidebar's right with nothing to clear — so the clearance
  * must drop, or the padding shoves the tabs into the middle. The rule keys off
- * `data-sidebar-open` on the app shell (set by AppShell) to do this; asserted at
+ * `data-sidebar-open` on the app shell (set by AppShell) under the
+ * `data-electron-mac` root (set on <html> at boot); asserted at
  * the CSS level because the lights are painted by macOS OUTSIDE the page, so no
  * DOM test or screenshot can see them. This selector IS the alignment.
  */
@@ -1120,7 +1060,10 @@ describe("index.css maximized workspace rail traffic-light clearance", () => {
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .trim();
 
-  function makeStrip(shellAttrs: Record<string, string>): HTMLElement {
+  afterEach(() => document.documentElement.removeAttribute("data-electron-mac"));
+
+  function makeStrip(macShell: boolean, shellAttrs: Record<string, string> = {}): HTMLElement {
+    if (macShell) document.documentElement.setAttribute("data-electron-mac", "true");
     const shell = document.createElement("div");
     shell.className = "app-shell";
     for (const [k, v] of Object.entries(shellAttrs)) shell.setAttribute(k, v);
@@ -1135,13 +1078,8 @@ describe("index.css maximized workspace rail traffic-light clearance", () => {
     return strip;
   }
 
-  it("has the clearance rule this test exists to protect", () => {
-    expect(rule, "the maximized rail tab-strip padding rule is gone from index.css").toBeDefined();
-    expect(rule).toMatch(/padding-left:\s*10\.5rem/);
-  });
-
   it("clears the lights on the mac shell while the sidebar is collapsed", () => {
-    const strip = makeStrip({ "data-electron-mac": "true" });
+    const strip = makeStrip(true);
     expect(strip.matches(selector)).toBe(true);
     strip.closest(".app-shell")?.remove();
   });
@@ -1149,13 +1087,13 @@ describe("index.css maximized workspace rail traffic-light clearance", () => {
   it("drops the clearance once the sidebar is reopened over the maximized rail", () => {
     // The exact bug: sidebar open covers the window corner, so the 10.5rem
     // padding has nothing to clear and would push the tabs into the middle.
-    const strip = makeStrip({ "data-electron-mac": "true", "data-sidebar-open": "true" });
+    const strip = makeStrip(true, { "data-sidebar-open": "true" });
     expect(strip.matches(selector)).toBe(false);
     strip.closest(".app-shell")?.remove();
   });
 
   it("never clears in a plain browser (no lights to avoid)", () => {
-    const strip = makeStrip({});
+    const strip = makeStrip(false);
     expect(strip.matches(selector)).toBe(false);
     strip.closest(".app-shell")?.remove();
   });

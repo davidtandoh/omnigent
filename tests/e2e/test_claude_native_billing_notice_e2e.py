@@ -332,7 +332,13 @@ async def test_real_claude_billing_notice_unblocks_pending_tool(
             assert gateway.classifier_requests > 0
             assert all(not result.get("is_error") for result in gateway.tool_results)
             assert "billing-notice-tool-completed" in json.dumps(gateway.tool_results)
-            config = json.loads((config_dir / ".claude.json").read_text())
+            # Claude persists acknowledgement asynchronously after resuming the tool.
+            async with asyncio.timeout(10):
+                while True:
+                    config = json.loads((config_dir / ".claude.json").read_text())
+                    if config.get("autoModeClassifierBillingNoticeAcknowledgedAt", 0) > 0:
+                        break
+                    await asyncio.sleep(0.1)
             assert config.get("autoModeClassifierBillingNoticeAcknowledgedAt", 0) > 0
         finally:
             await terminals.shutdown()

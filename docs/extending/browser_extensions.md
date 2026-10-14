@@ -55,8 +55,9 @@ Available V1 methods:
 - `theme.getCurrent` and `theme.subscribe`;
 - `storage.user.get`, `set`, and `delete` with the `storage.user` permission;
 - `sessions.getCached`, `sessions.listPage`, the SDK's `sessions.listAll` helper, and
-  `sessions.pullRequest` (the PR filed from a session's branch, via the same
-  GitHub lookup as the shell's GitHub tab) with the `sessions.read` permission;
+  `sessions.pullRequest` (the request associated with a session, via the shared
+  [pull request provider lookup](../git-pull-requests.md)) with the
+  `sessions.read` permission;
 - `projects.list` with the `projects.read` permission and `projects.create`
   with the `projects.write` permission.
 

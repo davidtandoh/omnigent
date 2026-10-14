@@ -34,6 +34,7 @@ from omnigent.runner.session_init_protocol import (
 from omnigent.spec.types import AgentSpec
 from omnigent.tools.builtins.browser import BROWSER_TOOL_NAMES
 from tests.runner.conftest import (
+    _drain_session_event_queue,
     _FakeProcessManager,
     _runner_client,
     _ScriptedHarnessClient,
@@ -307,6 +308,64 @@ async def test_without_suppress_recovery_turn_starts_recovery_turn_from_history(
             "Expected two harness calls total (recovery turn + forward-triggered turn); "
             f"got {len(harness.posted_bodies)}"
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("next_turn_running", [False, True])
+async def test_catch_up_republishes_completed_sdk_status(
+    monkeypatch: pytest.MonkeyPatch, next_turn_running: bool
+) -> None:
+    """Reconnect restores an idle edge consumed by the old server before it stopped."""
+    app, _pm, harness = _build_sdk_app(_CatchUpServerClient())
+    started, release = asyncio.Event(), asyncio.Event()
+    original = _ScriptedHarnessClient._StreamHandle.aiter_text
+
+    async def gated_stream(handle: Any) -> Any:
+        started.set()
+        await release.wait()
+        async for frame in original(handle):
+            yield frame
+
+    message = {
+        "type": "message",
+        "agent_id": AGENT_ID,
+        "content": [{"type": "input_text", "text": "hello"}],
+    }
+    async with _runner_client(app) as client:
+        response = await client.post(
+            "/v1/sessions", json=_session_init_payload(suppress_recovery_turn=True)
+        )
+        assert response.status_code == 201, response.text
+        response = await client.post(
+            f"/v1/sessions/{SESSION_ID}/events", params={"stream": "true"}, json=message
+        )
+        assert response.status_code == 200, response.text
+        assert (await client.get(f"/v1/sessions/{SESSION_ID}")).json()["status"] == "idle"
+
+        if next_turn_running:
+            monkeypatch.setattr(_ScriptedHarnessClient._StreamHandle, "aiter_text", gated_stream)
+            response = await client.post(f"/v1/sessions/{SESSION_ID}/events", json=message)
+            assert response.status_code == 202, response.text
+            await asyncio.wait_for(started.wait(), timeout=5)
+
+        # The old relay consumed these events but lost its last status on restart.
+        queue = app.state.session_event_queues[SESSION_ID]
+        old_events = _drain_session_event_queue(queue)
+        assert any(e.get("status") == "idle" for e in old_events)
+        try:
+            await app.state.catch_up_scan()
+            statuses = [
+                e["status"]
+                for e in _drain_session_event_queue(queue)
+                if e.get("type") == "session.status"
+            ]
+            if next_turn_running:
+                assert "idle" not in statuses
+            else:
+                assert statuses == ["idle"]
+            assert len(harness.posted_bodies) == (2 if next_turn_running else 1)
+        finally:
+            release.set()
 
 
 @pytest.mark.asyncio

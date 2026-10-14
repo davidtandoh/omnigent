@@ -64,8 +64,8 @@ The per-harness support matrix (interrupt / queue / subagents / reasoning / elic
 
 Most server logic lives in the (huge) `omnigent/server/routes/sessions.py` + `stores/conversation_store/`.
 
-- **Create session** — `POST /sessions` (`sessions.py:13329`). JSON (existing agent) vs multipart
-  (bundled → session-scoped agent). Optional `host_id` (launch managed sandbox runner,
+- **Create session** — see [session creation](../omnigent/server/API.md#create-session)
+  for JSON and multipart agent-binding rules. Optional `host_id` (launch managed sandbox runner,
   `_create_session_worktree`), `workspace` (pin dir). New session pushed to sidebar via
   `_announce_session_added` → `WS /sessions/updates`. ⚠️ agent-not-found 404; bundle name collision 409;
   no-auth server skips permission grant.
@@ -75,10 +75,11 @@ Most server logic lives in the (huge) `omnigent/server/routes/sessions.py` + `st
   (SSE, `:18762`) first, reads snapshot, dedupes by item id (WS events *before* snapshot dropped, *after* kept).
   **How much transcript loads into runner:** native harness rebuilds from stored items; SDK loads conversation
   history. ⚠️ runner offline → `runner_online=null`.
-- **Fork** — `POST /sessions/{src}/fork` (`:14777`) → `fork_conversation()` deep-copies items (optional
-  `up_to_response_id` truncation), clones agent (optional harness switch resets model if cross-family), drops
+- **Fork** — see [the fork contract](../omnigent/server/API.md#fork-session)
+  for history selection and agent reuse or copying. An optional harness switch resets the model
+  if cross-family. The fork drops
   instance-scoped labels (bridge_id, context_tokens). Native target rebuilds transcript from `FORK_CARRY_HISTORY`
-  label. ⚠️ can't fork a sub-agent (400); cross-family model invalid → ignored w/ warning.
+  label. ⚠️ cross-family model invalid → ignored w/ warning.
 - **Change agent** — see [retired in-place agent switching](../omnigent/server/API.md#retired-in-place-agent-switching)
   and the [fork entry points](../feature-map/sessions.md#how-to-get-to-it-user-pov).
 - **Disconnect → reconnect** — stream ends with `[DONE]` on all exit paths; reconnect re-runs snapshot+tail;

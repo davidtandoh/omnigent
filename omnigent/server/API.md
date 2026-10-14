@@ -513,8 +513,10 @@ Fields:
     here — the client re-hydrates the optimistic "queued message"
     bubble so it survives navigation / an SSE rebind. Drained when the
     message round-trips back (the matching `session.input.consumed`
-    carries `cleared_pending_id`). Empty for non-native sessions, which
-    already carry the message in `items`.
+    carries `cleared_pending_id`). Messages still queued when an
+    `interrupt` cancelled the turn are left out, so a reload does not
+    redraw a bubble the person stopped. Empty for non-native sessions,
+    which already carry the message in `items`.
 
   todos (array, default `[]`)
     Current native Plan/TODO list reported by a harness.
@@ -571,12 +573,14 @@ Request parts:
 {"session_id": "conv_abc123"}
 ```
 
-The server stores the bundle, then creates the `conversations` row
-and the session-scoped `agents` row in one database transaction. The
-new agent row has `agents.kind` set to `'session'`,
-and `conversations.agent_id` points at that agent. If the database
-agent write fails, the conversation row rolls back. If multipart or
-bundle parsing fails, no database row is written.
+On stores that support user agents, a top-level upload reuses the uploader's
+agent row with the same name and bundle contents. Changed contents create a
+different row; a row changed by an MCP edit is not reused for the old upload.
+The server persists the user agent before creating the conversation, whose
+`agent_id` references it. Child uploads receive separate agent rows. Stores
+without user-agent support also create a separate row per upload. These
+separate rows and their conversations are created in one transaction.
+If multipart or bundle parsing fails, no database row is written.
 
 400 Bad Request - invalid metadata or invalid agent bundle
 409 Conflict - agent write violates a uniqueness constraint
@@ -708,7 +712,7 @@ When liveness is wired, each list item includes two orthogonal signals
 ### Get Session (Snapshot)
 
 ```
-GET /v1/sessions/{session_id}[?include_items=true&include_liveness=true&include_usage=true&refresh_state=false]
+GET /v1/sessions/{session_id}[?include_items=true&include_liveness=true&include_usage=true&include_live_status=true&refresh_state=false]
 
 200 OK — body matches the `SessionResponse` shape above.
 404 Not Found — no session with that id
@@ -740,6 +744,12 @@ Contract" below.
     spend. Runner metadata reads use this option. The web chat also opts
     out and loads display usage separately, so a slow usage store does not
     block opening the session. Budget enforcement is unchanged.
+
+  include_live_status (query param, boolean, default `true`)
+    When `false`, skip the live-status probe of the session's bound runner
+    on a status-cache miss and report `status` from the cached or persisted
+    value. Runner metadata reads use this option: the probe would target the
+    very runner waiting on the response.
 
   refresh_state (query param, boolean, default `false`)
     When `true`, runner-derived snapshot overlays (for example skills
@@ -1100,10 +1110,16 @@ user-triggered cancel the server emits BOTH `response.incomplete`
 `session.interrupted` (from the route). Co-emitting the
 Responses-style event lets off-the-shelf parsers close cleanly while
 the session-scoped event carries the cancel intent for session-aware
-clients. The internal terminal-observed envelopes also bypass the
-queue: `external_conversation_item` appends/broadcasts an
-already-observed item and returns its stored `item_id`, while
-`external_output_text_delta` publishes a transient
+clients. On native-terminal sessions an `interrupt` the runner accepted
+also settles the web messages still queued at that moment: they leave
+`pending_inputs`, and a later transcript mirror that jumps over one
+drains it without persisting a `native_prompt_not_recorded` error (an
+exact mirror of it still drains it normally, since the agent did record
+it). A message sent after the Stop, or an interrupt the runner did not
+accept, leaves the queue as it was. The internal terminal-observed
+envelopes also bypass the queue: `external_conversation_item`
+appends/broadcasts an already-observed item and returns its stored
+`item_id`, while `external_output_text_delta` publishes a transient
 `response.output_text.delta` event without persisting. Its `data` is
 `{delta: string, message_id?: string, index?: integer, final?: boolean}`:
 `delta` is required; the optional `message_id` / `index` / `final` are
@@ -1211,8 +1227,8 @@ Request body matches `SessionForkRequest`:
 201 Created — body matches `SessionResponse` (status "idle",
   items are the deep-copied items from the source session).
 
-400 Bad Request — source session is a sub-agent session, has
-  no agent binding, up_to_response_id names no response in
+400 Bad Request — source session has no agent binding,
+  up_to_response_id names no response in
   the source session, or a managed fork asks for a sandbox this
   server has not configured
 404 Not Found — no session with that source_id, or the source's
@@ -1222,23 +1238,22 @@ Request body matches `SessionForkRequest`:
   repository URL
 ```
 
-Creates a new session by deep-copying every item from the source
-session. The server also clones the source's agent (new agent ID,
-same bundle and config) so the fork can be reconfigured independently.
-Unless `host_type: "managed"` is requested, the forked session is
+Creates a new session by deep-copying items from the source session, subject
+to `up_to_response_id`. A server agent or an agent owned by the caller is
+reused. An agent owned by another user, or a user agent without an owner,
+is copied under a new ID owned by the caller. This also applies when selecting
+a different target agent. On a single-user server without authentication,
+the agent is reused.
+Unless `host_type: "managed"` or `side_chat: true` is requested, the forked session is
 **not** bound to a runner — clients must `PATCH /v1/sessions/{id}`
 with `runner_id` before posting events, the same way they bind a
 runner after resuming an existing session.
+Side chats use their source session for routing and may share its live runner.
 
-The fork's bound agent is always that session-scoped clone, never the
-built-in it derives from. A managed fork's runner therefore carries no
-built-in agent classifier, so an admission policy keyed on one does not
-match it.
-
-The response is a full `SessionResponse` snapshot of the fork — same
-shape as `GET /v1/sessions/{id}` — with status `"idle"` and all
-copied items in chronological order. Clients must bind a runner
-before opening the fork's SSE stream or posting events.
+The response has the `SessionResponse` shape with status `"idle"` and the
+newest page of copied items in chronological order. Load earlier history
+through the session items endpoint. A standard external fork needs a runner
+binding before opening its SSE stream or posting events.
 
 ### Stream Session
 
@@ -1376,6 +1391,14 @@ across turns, transient races during reconnect are bounded to the
 in-flight HTTP roundtrip rather than the full turn duration. Clients
 should rely on `session.input.consumed` events and item-id dedupe
 against the snapshot to reconcile accepted inputs.
+
+Native shell-mode inputs (`!cmd`) settle when the matching `terminal_command`
+input is persisted. Its output does not acknowledge an input, and no
+`session.input.consumed` event is emitted for the shell command. Clients should
+remove only the sent bubble matching that command. During a mixed-version
+rollout, an older client can retain that bubble until refreshing its snapshot;
+an older server can still report the command as `native_prompt_not_recorded`.
+Updated clients preserve later bubbles when that older server's receipt arrives.
 
 ### Sessions Typical Flow
 
