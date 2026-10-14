@@ -199,6 +199,7 @@ class TerminalExitEvent:
     exit_status: int | None = None
     session_was_idle: bool = False
     terminal_instance_id: str | None = None
+    closed_terminal: TerminalInstance | None = field(default=None, repr=False, compare=False)
     lifecycle_context: dict[str, str] = field(default_factory=dict)
 
 
@@ -1916,6 +1917,7 @@ class SessionResourceRegistry:
                     session_was_idle=session_was_idle,
                     terminal_instance_id=instance.diagnostic_id if instance is not None else None,
                     lifecycle_context=lifecycle_context,
+                    closed_terminal=instance,
                 )
             )
 
@@ -2070,7 +2072,7 @@ class SessionResourceRegistry:
             )
         return None
 
-    async def cleanup_session(self, session_id: str) -> None:
+    async def cleanup_session(self, session_id: str) -> list[TerminalInstance]:
         """Close all resources owned by a session.
 
         Closes terminals before releasing their supporting resources.
@@ -2078,9 +2080,10 @@ class SessionResourceRegistry:
 
         :param session_id: Session/conversation identifier.
         """
+        closed: list[TerminalInstance] = []
         if self._terminal_registry is not None:
             try:
-                await self._terminal_registry.cleanup_conversation(session_id)
+                closed = await self._terminal_registry.cleanup_conversation(session_id)
             except (RuntimeError, OSError, ValueError, psutil.Error) as exc:
                 raise _terminal_cleanup_error(exc) from exc
         self._take_session_status_memo(session_id)
@@ -2118,6 +2121,8 @@ class SessionResourceRegistry:
                     "Error cleaning up Codex skills for session=%s",
                     session_id,
                 )
+
+        return closed
 
     def has_primary_env(self, session_id: str) -> bool:
         """Check if a primary env has been materialized.

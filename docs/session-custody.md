@@ -48,8 +48,11 @@ app-server and routers when cancellation carries that named refusal. After a
 Codex rotation, shutdown matches terminals to their app-server using the
 runner-generated `--remote` URL. An explicit `CODEX_HOME` override does not
 change this association. It closes that app-server only after registry
-cleanup succeeds for every matching terminal. A stale bridge label cannot
-authorize cleanup. OpenCode also preserves its server when cancellation carries a refusal.
+cleanup succeeds for every matching terminal. Session deletion also requires
+successful terminal-close results matched by remote app-server URL. If the session still names a server without that evidence,
+deletion returns `process_pending` and preserves the server and routers. A stale
+bridge label cannot authorize cleanup. OpenCode also preserves its server when
+cancellation carries a refusal.
 A helper terminal left in the launch session cannot authorize cleanup of the
 rotated terminal's dependencies. Nested cleanup and repeated cancellation retain
 the named refusal. Successful terminal shutdown still closes the associated

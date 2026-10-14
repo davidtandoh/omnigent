@@ -21,7 +21,7 @@ import sys
 import time
 import urllib.parse
 import uuid
-from collections.abc import Awaitable, Callable, Coroutine, Mapping, MutableMapping
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, MutableMapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from omnigent.runner.subagent_routing import SubagentRouter
     from omnigent.runner.turn_routing import TurnRouter
     from omnigent.spec.types import MCPServerConfig
+    from omnigent.terminals.registry import TerminalRegistry
 
 import click
 import httpx
@@ -260,27 +261,46 @@ async def _cancel_registered_auto_forwarder_task(
         )
 
 
-async def teardown_codex_native_app_server(session_id: str) -> None:
+async def teardown_codex_native_app_server(
+    session_id: str,
+    *,
+    closed_terminals: Sequence[TerminalInstance],
+    terminal_registry: TerminalRegistry | None,
+) -> None:
+    """Close dependencies after their terminals have successfully closed.
+
+    Match terminal launch URLs to registered app-servers. Refuse session cleanup
+    when its registered server lacks termination evidence or still has dependents.
     """
-    Tear down a host-spawned codex-native session's app-server subprocess.
-
-    ``DELETE /v1/sessions``, runner shutdown, and the idle pane reaper use
-    this helper for full native cleanup. An unexpected auxiliary-TUI exit
-    deliberately leaves the app-server running so an active response is not
-    cancelled; the next native-terminal ensure can recreate the TUI.
-
-    Cancelling the forwarder closes the app-server via the forwarder's own
-    ``finally`` (see :func:`_codex_discover_thread_and_forward`); the pop
-    below is the belt-and-suspenders close for the discovery-failed case
-    where no forwarder ever adopted the server. No-op for a session that
-    has no registered codex app-server, so this is safe to call from the
-    required-session teardown paths regardless of harness.
-
-    :param session_id: Session/conversation id, e.g. ``"conv_abc123"``.
-    :returns: None.
-    """
-    for launch_session_id in _codex_native_launch_session_ids(session_id):
-        await _teardown_codex_native_launch(launch_session_id)
+    closed_urls = {
+        remote_url
+        for instance in closed_terminals
+        for option, remote_url in zip(instance.args, instance.args[1:], strict=False)
+        if option == "--remote"
+    }
+    pending_urls = (
+        {
+            remote_url
+            for owner in terminal_registry.active_conversation_ids()
+            for entry in terminal_registry.list_for_cleanup(owner)
+            for option, remote_url in zip(
+                entry.instance.args, entry.instance.args[1:], strict=False
+            )
+            if option == "--remote"
+        }
+        if terminal_registry is not None
+        else set()
+    )
+    for launch_session_id, server in list(_AUTO_CODEX_APP_SERVERS.items()):
+        if server.listen_url in closed_urls and server.listen_url not in pending_urls:
+            await _teardown_codex_native_launch(launch_session_id)
+        elif (
+            launch_session_id == session_id
+            or _codex_native_active_session_id(launch_session_id) == session_id
+        ):
+            raise OmnigentError(
+                "Terminal cleanup refused: process_pending", code="process_pending"
+            )
 
 
 async def _teardown_codex_native_launch(launch_session_id: str) -> None:
@@ -1928,12 +1948,15 @@ async def _auto_create_opencode_terminal(
                 "resource": session_resource_view_to_dict(terminal_view),
             },
         )
-    except BaseException:
-        # Terminal startup failure or cancellation must also release the server.
-        await _cancel_auto_forwarder_task(session_id)
-        _AUTO_OPENCODE_SERVERS.pop(session_id, None)
-        with contextlib.suppress(Exception):
-            await server.close()
+    except BaseException as exc:
+        from omnigent.terminals.registry import TerminalCleanupRefused
+
+        refusal = exc if isinstance(exc, TerminalCleanupRefused) else None
+        await _cancel_auto_forwarder_task(session_id, refusal=refusal)
+        if refusal is None:
+            _AUTO_OPENCODE_SERVERS.pop(session_id, None)
+            with contextlib.suppress(Exception):
+                await server.close()
         raise
 
     _logger.info(

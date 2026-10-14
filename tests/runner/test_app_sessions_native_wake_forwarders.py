@@ -382,7 +382,10 @@ async def test_cancel_auto_forwarder_task_cancels_and_awaits_registered_task() -
 
 
 @pytest.mark.asyncio
-async def test_teardown_codex_native_app_server_cancels_forwarder_and_closes_server() -> None:
+async def test_teardown_codex_native_app_server_cancels_forwarder_and_closes_server(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """
     Codex pane teardown cancels the forwarder and closes the app-server.
 
@@ -404,6 +407,8 @@ async def test_teardown_codex_native_app_server_cancels_forwarder_and_closes_ser
             raise
 
     class _FakeAppServer:
+        listen_url = "ws://runner.test/codex"
+
         async def close(self) -> None:
             nonlocal closed
             closed = True
@@ -414,7 +419,20 @@ async def test_teardown_codex_native_app_server_cancels_forwarder_and_closes_ser
         runner_app_mod._AUTO_CODEX_APP_SERVERS[session_id] = _FakeAppServer()
         await asyncio.sleep(0)
 
-        await runner_app_mod.teardown_codex_native_app_server(session_id)
+        from omnigent.terminals.registry import TerminalRegistry
+        from tests.runner.helpers import make_test_terminal_instance
+
+        registry = TerminalRegistry()
+        instance = make_test_terminal_instance("codex", "main", tmp_path)
+        from unittest.mock import AsyncMock
+
+        monkeypatch.setattr(instance, "_tmux", AsyncMock())
+        instance.args = ["--remote", _FakeAppServer.listen_url]
+        registry._by_conversation[session_id] = {("codex", "main"): instance}
+        closed_terminals = await registry.cleanup_conversation(session_id)
+        await runner_app_mod.teardown_codex_native_app_server(
+            session_id, closed_terminals=closed_terminals, terminal_registry=registry
+        )
 
         assert task.cancelled(), "forwarder must be finished-cancelled after teardown"
         assert run.cancelled is True
@@ -448,7 +466,9 @@ async def test_teardown_codex_native_app_server_noop_without_registered_server()
         runner_app_mod._register_auto_forwarder_task(session_id, task)
         await asyncio.sleep(0)
 
-        await runner_app_mod.teardown_codex_native_app_server(session_id)
+        await runner_app_mod.teardown_codex_native_app_server(
+            session_id, closed_terminals=[], terminal_registry=None
+        )
 
         # No registered codex app-server -> the forwarder is left untouched.
         assert not task.done()

@@ -1796,7 +1796,13 @@ def create_runner_app(
         # A required terminal exit ends the session. Tear down any registered
         # Codex app-server alongside it; this is a no-op for other harnesses.
         _teardown_task = asyncio.create_task(
-            _native_runtime.teardown_codex_native_app_server(event.session_id)
+            _native_runtime.teardown_codex_native_app_server(
+                event.session_id,
+                closed_terminals=[event.closed_terminal]
+                if event.closed_terminal is not None
+                else [],
+                terminal_registry=resource_registry.terminal_registry,
+            )
         )
         _teardown_task.add_done_callback(_background_tasks.discard)
         _background_tasks.add(_teardown_task)
@@ -3322,8 +3328,12 @@ def create_runner_app(
             with contextlib.suppress(asyncio.CancelledError):
                 await turn_task
         await mcp_execution_registry.cancel_session(session_id)
-        await resource_registry.cleanup_session(session_id)
-        await _native_runtime.teardown_codex_native_app_server(session_id)
+        closed_terminals = await resource_registry.cleanup_session(session_id)
+        await _native_runtime.teardown_codex_native_app_server(
+            session_id,
+            closed_terminals=closed_terminals,
+            terminal_registry=resource_registry.terminal_registry,
+        )
         _session_message_buffers.pop(session_id, None)
         _live_response_id.pop(session_id, None)
         # Clear all desync/turn state so a recreated same-id session starts clean.
@@ -7398,8 +7408,12 @@ def create_runner_app(
     async def cleanup_session_resources(
         session_id: str,
     ) -> JSONResponse:
-        await resource_registry.cleanup_session(session_id)
-        await _native_runtime.teardown_codex_native_app_server(session_id)
+        closed_terminals = await resource_registry.cleanup_session(session_id)
+        await _native_runtime.teardown_codex_native_app_server(
+            session_id,
+            closed_terminals=closed_terminals,
+            terminal_registry=resource_registry.terminal_registry,
+        )
         _required_terminal_exit_errors.pop(session_id, None)
         _codex_terminal_ensure_locks.pop(session_id, None)
         _claude_terminal_ensure_locks.pop(session_id, None)
@@ -7441,9 +7455,13 @@ def create_runner_app(
         _kimi_terminal_ensure_locks.pop(session_id, None)
         _hermes_terminal_ensure_locks.pop(session_id, None)
         _repl_terminal_ensure_locks.pop(session_id, None)
-        await _teardown_session_terminals(session_id)
-        await resource_registry.cleanup_session(session_id)
-        await _native_runtime.teardown_codex_native_app_server(session_id)
+        closed_terminals = await _teardown_session_terminals(session_id)
+        closed_terminals.extend(await resource_registry.cleanup_session(session_id))
+        await _native_runtime.teardown_codex_native_app_server(
+            session_id,
+            closed_terminals=closed_terminals,
+            terminal_registry=resource_registry.terminal_registry,
+        )
         if process_manager is not None:
             await process_manager.release(session_id)
         _clear_session_agent_caches(session_id, _session_agent_ids.get(session_id))
@@ -7673,10 +7691,15 @@ def create_runner_app(
             )
 
         async def _reap_native_pane(pane: PaneRef) -> None:
+            instance = _pane_reaper_registry.get(pane.conversation_id, pane.terminal_name, "main")
             closed = await resource_registry.close_terminal(pane.conversation_id, pane.terminal_id)
             if not closed:
                 return
-            await _native_runtime.teardown_codex_native_app_server(pane.conversation_id)
+            await _native_runtime.teardown_codex_native_app_server(
+                pane.conversation_id,
+                closed_terminals=[instance] if instance is not None else [],
+                terminal_registry=_pane_reaper_registry,
+            )
             _publish_terminal_deleted_event(
                 conversation_id=pane.conversation_id,
                 terminal_name=pane.terminal_name,

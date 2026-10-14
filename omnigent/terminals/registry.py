@@ -663,7 +663,7 @@ class TerminalRegistry:
                     ):
                         self._instance_locks.pop(lock_key)
 
-    async def cleanup_conversation(self, conversation_id: str) -> None:
+    async def cleanup_conversation(self, conversation_id: str) -> list[TerminalInstance]:
         """Close every terminal owned by *conversation_id*.
 
         Called from the workflow's ``finally:`` block at workflow
@@ -684,16 +684,19 @@ class TerminalRegistry:
         """
         with self._lock:
             slot = dict(self._by_conversation.get(conversation_id, {}))
+        closed: list[TerminalInstance] = []
         failure: Exception | None = None
         for (name, key), instance in slot.items():
             try:
-                await self.close(conversation_id, name, key, expected=instance)
+                if await self.close(conversation_id, name, key, expected=instance):
+                    closed.append(instance)
             except Exception as exc:
                 _logger.exception("Terminal cleanup failed: %s/%s/%s", conversation_id, name, key)
                 if failure is None:
                     failure = exc
         if failure is not None:
             raise failure
+        return closed
 
     async def shutdown(
         self,
