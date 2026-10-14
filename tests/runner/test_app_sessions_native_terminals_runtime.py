@@ -437,9 +437,7 @@ async def test_auto_create_codex_terminal_keeps_loop_responsive_during_profile_r
         for use_envelope in (False, True)
     ]
     + [
-        pytest.param(
-            (0, 154, 0), [], True, True, "configured-workspace", id="configured-provider"
-        )
+        pytest.param((0, 154, 0), [], True, True, "configured-workspace", id="configured-provider")
     ],
 )
 @pytest.mark.parametrize(
@@ -5067,9 +5065,23 @@ async def test_auto_create_codex_terminal_accepts_gateway_spelled_override(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("launch_fails", [False, True])
+@pytest.mark.parametrize(
+    "launch_fails,rotation,terminal_state",
+    [
+        (False, "none", "ended"),
+        (True, "none", "ended"),
+        (False, "published", "refused"),
+        (False, "lost_response", "refused"),
+        (False, "published", "live"),
+        (False, "lost_response", "live"),
+    ],
+)
 async def test_codex_tui_recovery_preserves_live_control_plane(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_fails: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    launch_fails: bool,
+    rotation: str,
+    terminal_state: str,
 ) -> None:
     """A lost TUI reattaches to the live app-server without cancelling the forwarder.
 
@@ -5078,16 +5090,22 @@ async def test_codex_tui_recovery_preserves_live_control_plane(
     launch.
     """
     from types import SimpleNamespace
-    from unittest.mock import AsyncMock
+    from unittest.mock import AsyncMock, Mock
 
+    from omnigent.errors import OmnigentError
     from omnigent.harnesses.codex_native.bridge import CodexNativeBridgeState
+    from omnigent.harnesses.codex_native.forwarder import _create_thread_replacement_session
     from omnigent.runner.native import orchestration as native
     from omnigent.runner.native.orchestration import (
         _CodexNativeLaunchConfig,
         _CodexNativeTuiLaunch,
     )
 
+    from omnigent.terminals.registry import TerminalCleanupRefused, TerminalRegistry
+    from tests.runner.helpers import make_test_terminal_instance
+
     session_id = "tui-recovery-test-session"
+    launch_session_id = session_id
     server_url = "ws://127.0.0.1:9876"
     thread_id = "thread-live-1234"
     monkeypatch.setattr(codex_native_bridge, "_BRIDGE_ROOT", tmp_path)
@@ -5116,11 +5134,76 @@ async def test_codex_tui_recovery_preserves_live_control_plane(
         proc=SimpleNamespace(returncode=None),
         listen_url=server_url,
         codex_home=tmp_path,
+        bridge_dir=bridge_dir,
+        close=AsyncMock(),
+        terminal_cleanup_refusal=None,
     )
     forwarder = asyncio.create_task(asyncio.Event().wait())
     monkeypatch.setitem(native._AUTO_CODEX_APP_SERVERS, session_id, fake_server)
     monkeypatch.setitem(native._AUTO_FORWARDER_TASKS, session_id, forwarder)
-    monkeypatch.setattr(native, "_codex_native_launch_config", AsyncMock(return_value=config))
+    resolve_config = AsyncMock(return_value=config)
+    monkeypatch.setattr(native, "_codex_native_launch_config", resolve_config)
+    registry = TerminalRegistry()
+    registry.on_cleanup_refused = native._record_codex_terminal_cleanup_refusal
+    resources = SessionResourceRegistry(terminal_registry=registry)
+    labels = {}
+
+    async def response(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/labels"):
+            return httpx.Response(200, json={"labels": labels})
+        if request.method == "GET":
+            return httpx.Response(200, json={"agent_id": "agent", "runner_id": "runner"})
+        if request.url.path == "/v1/sessions":
+            labels.update(json.loads(request.content)["labels"])
+            return httpx.Response(200, json={"id": "successor"})
+        if request.url.path.endswith("/transfer"):
+            assert registry.transfer(launch_session_id, "successor", "codex", "main")
+            if rotation == "lost_response":
+                raise httpx.ReadTimeout("transfer applied; response lost", request=request)
+        return httpx.Response(200, json={})
+
+    client = httpx.AsyncClient(base_url="http://server", transport=httpx.MockTransport(response))
+    refusal = None
+    if rotation != "none":
+        terminal = make_test_terminal_instance("codex", "main", tmp_path)
+        terminal.args = ["--remote", server_url]
+        monkeypatch.setattr(terminal, "_tmux", AsyncMock(side_effect=OSError("kill failed")))
+        registry._by_conversation[launch_session_id] = {("codex", "main"): terminal}
+        transfer = _create_thread_replacement_session(
+            client=client,
+            old_session_id=launch_session_id,
+            bridge_dir=bridge_dir,
+            app_server_url=server_url,
+            new_thread_id=thread_id,
+        )
+        if rotation == "lost_response":
+            with pytest.raises(httpx.ReadTimeout):
+                await transfer
+            assert (
+                codex_native_bridge.read_bridge_state(bridge_dir).session_id == launch_session_id
+            )
+        else:
+            assert await transfer == "successor"
+        session_id = "successor"
+        if terminal_state == "refused":
+            with pytest.raises(TerminalCleanupRefused) as failed:
+                await registry.close(session_id, "codex", "main")
+            refusal = failed.value
+            assert not registry.list_for_cleanup(session_id)
+            assert fake_server.terminal_cleanup_refusal is refusal
+    relay = claude_native_bridge.start_tool_relay(
+        bridge_dir=bridge_dir,
+        tools=[],
+        tool_executor=AsyncMock(),
+        loop=asyncio.get_running_loop(),
+        session_id=session_id,
+    )
+    monkeypatch.setattr(relay, "close", Mock(wraps=relay.close))
+    relay_file = bridge_dir / "tool_relay.json"
+    advertisement = relay_file.read_bytes()
+    ensure_relay = AsyncMock()
+    prepare = Mock(wraps=codex_native_bridge.prepare_bridge_dir)
+    monkeypatch.setattr(codex_native_bridge, "prepare_bridge_dir", prepare)
     cancel = AsyncMock()
     monkeypatch.setattr(native, "_cancel_auto_forwarder_task", cancel)
     fake_view = SessionResourceView(
@@ -5133,29 +5216,61 @@ async def test_codex_tui_recovery_preserves_live_control_plane(
     )
     monkeypatch.setattr(native, "_launch_codex_native_tui", launch)
     try:
-        if launch_fails:
+        if terminal_state != "ended":
+            with pytest.raises(OmnigentError) as refused:
+                await native._auto_create_codex_terminal(
+                    session_id,
+                    resources,
+                    lambda *_: None,
+                    server_client=client,
+                    ensure_comment_relay=ensure_relay,
+                )
+            if refusal is not None:
+                assert refused.value is refusal
+            else:
+                assert refused.value.code == "process_pending"
+            resolve_config.assert_not_awaited()
+            prepare.assert_not_called()
+            launch.assert_not_awaited()
+            assert terminal.running
+        elif launch_fails:
             with pytest.raises(RuntimeError, match="TUI launch failed"):
                 await native._auto_create_codex_terminal(
-                    session_id, cast(Any, None), lambda *_: None
+                    session_id,
+                    resources,
+                    lambda *_: None,
+                    server_client=client,
+                    ensure_comment_relay=ensure_relay,
                 )
         else:
             result = await native._auto_create_codex_terminal(
-                session_id, cast(Any, None), lambda *_: None
+                session_id,
+                resources,
+                lambda *_: None,
+                server_client=client,
+                ensure_comment_relay=ensure_relay,
             )
             assert result is fake_view
         cancel.assert_not_awaited()
         assert not forwarder.done()
-        assert native._AUTO_CODEX_APP_SERVERS.get(session_id) is fake_server
-        assert launch.await_count == 1
-        assert launch.await_args is not None
-        assert launch.await_args.kwargs["app_server"] is fake_server
-        assert launch.await_args.kwargs["thread_id"] == thread_id
+        assert native._AUTO_CODEX_APP_SERVERS.get(launch_session_id) is fake_server
+        fake_server.close.assert_not_awaited()
+        ensure_relay.assert_not_awaited()
+        relay.close.assert_not_called()
+        assert relay_file.read_bytes() == advertisement
+        if terminal_state == "ended":
+            assert launch.await_count == 1
+            assert launch.await_args is not None
+            assert launch.await_args.kwargs["app_server"] is fake_server
+            assert launch.await_args.kwargs["thread_id"] == thread_id
     finally:
+        relay.close()
+        await client.aclose()
         forwarder.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await forwarder
-        native._AUTO_CODEX_APP_SERVERS.pop(session_id, None)
-        native._AUTO_FORWARDER_TASKS.pop(session_id, None)
+        native._AUTO_CODEX_APP_SERVERS.pop(launch_session_id, None)
+        native._AUTO_FORWARDER_TASKS.pop(launch_session_id, None)
 
 
 @pytest.mark.parametrize("forwarder_path", ["known", "discovery"])

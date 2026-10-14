@@ -64,8 +64,10 @@ successful exit does not clear it. Shared-resource disposal checks this guard
 after terminal cleanup and before closing the primary environment or deleting
 skills. Bridge deletion checks every targeted directory against the same owner
 guard. The refusal retains the failed session ID, so a lost transfer response
-or a failed label lookup cannot hide the successor from its owner. This fails
-closed after a true failure; it provides no recovery or eventual-clearance
+or a failed label lookup cannot hide the successor from its owner. Terminal
+recreation uses the same guard before preparing a bridge or replacing a relay.
+A registered dependent or latched refusal blocks recreation across rotation.
+This fails closed after a true failure; it provides no recovery or eventual-clearance
 guarantee and creates no serialized state or terminal ownership claim.
 OpenCode also preserves its server when cancellation carries a refusal.
 A helper terminal left in the launch session cannot authorize cleanup of the

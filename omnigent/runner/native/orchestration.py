@@ -4980,6 +4980,12 @@ async def _auto_create_codex_terminal(
     )
     from omnigent.inner.codex_executor import codex_extended_catalog_env
 
+    if _AUTO_CODEX_APP_SERVERS:
+        await guard_codex_native_cleanup(
+            session_id,
+            terminal_registry=resource_registry.terminal_registry,
+            server_client=server_client,
+        )
     launch_config = await _codex_native_launch_config(
         session_id=session_id,
         server_client=server_client,
@@ -4991,9 +4997,6 @@ async def _auto_create_codex_terminal(
     socket_path = socket_path_for_bridge_dir(bridge_dir)
     codex_home = codex_home_for_bridge_dir(bridge_dir)
     app_server = _AUTO_CODEX_APP_SERVERS.get(session_id)
-    refusal = getattr(app_server, "terminal_cleanup_refusal", None)
-    if refusal is not None:
-        raise refusal
     forwarder = _AUTO_FORWARDER_TASKS.get(session_id)
     bridge_state = read_bridge_state(bridge_dir)
     process = getattr(app_server, "proc", None)
