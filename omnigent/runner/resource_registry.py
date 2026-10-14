@@ -2082,6 +2082,8 @@ class SessionResourceRegistry:
         Preserves workspace files for post-mortem inspection per the design.
 
         :param session_id: Session/conversation identifier.
+        :returns: Terminal instances closed by this cleanup. An empty list
+            does not establish that previously unregistered terminals ended.
         """
         closed: list[TerminalInstance] = []
         if self._terminal_registry is not None:

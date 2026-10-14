@@ -14,9 +14,8 @@ Per ``designs/OMNIGENT_TERMINAL_BRIDGE.md`` §4.2, this rewrite swaps to:
   sessions of the same configured terminal (e.g. ``bash:s1`` and
   ``bash:s2`` running in parallel).
 - No idle reaper: terminals are explicit-launch only and the LLM is
-  expected to ``sys_terminal_close`` when done. Omnigent shutdown still
-  closes everything; per-conversation cleanup runs from the workflow's
-  finally block.
+  expected to ``sys_terminal_close`` when done. See ``shutdown`` and
+  ``cleanup_conversation`` for cleanup and refusal semantics.
 
 The registry is constructed once at Omnigent startup
 (``omnigent.runtime._globals.init``) and accessed via
@@ -697,6 +696,8 @@ class TerminalRegistry:
         cleanup. A failed close propagates without retaining registry ownership.
 
         :param conversation_id: The conversation being torn down.
+        :returns: Successfully closed instances, or an empty list if none were
+            registered. A refusal raises instead of returning partial results.
         """
         with self._lock:
             slot = dict(self._by_conversation.get(conversation_id, {}))
