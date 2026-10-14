@@ -231,3 +231,65 @@ async def test_opencode_launch_cancellation_preserves_refused_dependencies(
         assert not private_dir.exists()
         assert not orchestration._AUTO_OPENCODE_SERVERS
         server.close.assert_awaited()
+
+
+@pytest.mark.parametrize("terminal_state", ["empty", "live", "cleanup_refused"])
+async def test_reset_state_returns_cleanup_evidence_from_bound_controls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, terminal_state: str
+) -> None:
+    from omnigent.runner import app as runner_app
+
+    session_id = "conv_reset_cleanup"
+    registry = TerminalRegistry()
+    server = SimpleNamespace(listen_url="ws://runner.test/reset", close=AsyncMock())
+    servers = {} if terminal_state == "empty" else {session_id: server}
+    monkeypatch.setattr(orchestration, "_AUTO_CODEX_APP_SERVERS", servers)
+    monkeypatch.setattr(orchestration, "_AUTO_FORWARDER_TASKS", {})
+    monkeypatch.setattr(runner_app, "_session_agent_ids_ref", {})
+    routers = [AsyncMock(), AsyncMock()]
+    monkeypatch.setattr(orchestration, "_shutdown_session_router_async", routers[0])
+    monkeypatch.setattr(orchestration, "_shutdown_session_turn_router_async", routers[1])
+    instance = None
+    if terminal_state != "empty":
+        instance = make_test_terminal_instance("codex", "main", tmp_path)
+        instance.args = ["--remote", server.listen_url]
+        monkeypatch.setattr(
+            instance,
+            "_tmux",
+            AsyncMock(
+                side_effect=OSError("kill failed") if terminal_state == "cleanup_refused" else None
+            ),
+        )
+        registry._by_conversation[session_id] = {("codex", "main"): instance}
+    spec = AgentSpec(spec_version=1, name="test", executor=ExecutorSpec(type="omnigent"))
+    app, pm = await _build_app_for_spec(spec, terminal_registry=registry)
+    runner_app._session_agent_ids_ref[session_id] = "agent_before_reset"
+    assert runner_app.get_session_agent_id(session_id) == "agent_before_reset"
+    async with _runner_client(app) as client:
+        response = await client.post(f"/v1/sessions/{session_id}/reset-state")
+    assert registry.list_for_cleanup(session_id) == []
+    if terminal_state == "cleanup_refused":
+        assert response.status_code >= 400, response.text
+        assert "unavailable_probe" in response.text
+        assert instance.running
+        assert runner_app.get_session_agent_id(session_id) == "agent_before_reset"
+        assert session_id not in pm.released
+        assert servers[session_id] is server
+        server.close.assert_not_awaited()
+        for router in routers:
+            router.assert_not_awaited()
+    else:
+        assert response.status_code == 200, response.text
+        assert response.json() == {
+            "session_id": session_id,
+            "object": "session.state_reset",
+            "reset": True,
+        }
+        assert runner_app.get_session_agent_id(session_id) is None
+        assert session_id in pm.released
+        if instance is not None:
+            assert not instance.running
+            server.close.assert_awaited_once()
+            for router in routers:
+                router.assert_awaited_once_with(session_id)
+        assert not servers
