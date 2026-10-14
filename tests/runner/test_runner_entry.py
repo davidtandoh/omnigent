@@ -2502,14 +2502,17 @@ def test_install_crash_logging_is_idempotent() -> None:
 )
 @pytest.mark.parametrize("terminal_failure", [False, True])
 @pytest.mark.parametrize(
-    ("forwarder_path", "rotated", "lost_response"),
+    ("forwarder_path", "rotated", "lost_response", "override_codex_home"),
     [
-        ("known", False, False),
-        ("discovery", False, False),
-        ("known", True, False),
-        ("known", True, True),
-        ("discovery", True, False),
-        ("opencode", False, False),
+        ("known", False, False, False),
+        ("discovery", False, False, False),
+        ("known", True, False, False),
+        ("known", True, True, False),
+        ("discovery", True, False, False),
+        ("opencode", False, False, False),
+        ("known", False, False, True),
+        ("discovery", False, False, True),
+        ("known", True, True, True),
     ],
 )
 def test_runner_shutdown_closes_terminal_registry(
@@ -2521,6 +2524,7 @@ def test_runner_shutdown_closes_terminal_registry(
     forwarder_path: str,
     rotated: bool,
     lost_response: bool,
+    override_codex_home: bool,
 ) -> None:
     """The --server local runner shuts down terminal-owned resources.
 
@@ -2539,7 +2543,12 @@ def test_runner_shutdown_closes_terminal_registry(
     from omnigent.errors import OmnigentError
     from omnigent.harnesses.codex_native import bridge as codex_bridge
     from omnigent.harnesses.codex_native import forwarder as codex_forwarder
+    from omnigent.harnesses.codex_native.app_server import (
+        build_codex_remote_args,
+        codex_terminal_env,
+    )
     from omnigent.inner.terminal import TerminalInstance
+    from omnigent.native.launch_environment import validate_native_launch_environment
     from omnigent.runner.native import orchestration
     from omnigent.terminals.registry import TerminalRegistry
 
@@ -2629,7 +2638,12 @@ def test_runner_shutdown_closes_terminal_registry(
                 await close_router(session, None)
                 await close_turn_router(session, None)
 
-        servers[session] = SimpleNamespace(close=close_server, codex_home=tmp_path / session)
+        servers[session] = SimpleNamespace(
+            close=close_server,
+            codex_home=tmp_path / session,
+            listen_url=f"ws://runner.test/{session}",
+            env={},
+        )
 
     process_managers: list[_FakeProcessManager] = []
     terminal_registries: list[TerminalRegistry] = []
@@ -2669,14 +2683,31 @@ def test_runner_shutdown_closes_terminal_registry(
 
         registry = Registry(conversation_link_base_url=conversation_link_base_url)
         for session in ("failed", "healthy"):
+            launch_env = (
+                validate_native_launch_environment({"CODEX_HOME": str(tmp_path / "custom-home")})
+                if override_codex_home
+                else {}
+            )
             instance = TerminalInstance(
                 terminal_name,
                 "main",
                 tmp_path / session,
                 tmp_path,
                 running=True,
-                env={"CODEX_HOME": str(tmp_path / session)} if terminal_name == "codex" else {},
+                args=build_codex_remote_args(
+                    codex_args=(),
+                    thread_id=None,
+                    remote_url=servers[session].listen_url,
+                )
+                if terminal_name == "codex"
+                else [],
+                env={**codex_terminal_env(servers[session]), **launch_env}
+                if terminal_name == "codex"
+                else {},
             )
+
+            if override_codex_home:
+                assert instance.env["CODEX_HOME"] != str(servers[session].codex_home)
 
             async def close_terminal(session=session):
                 closed.append((session, "terminal"))
@@ -2775,7 +2806,7 @@ def test_runner_shutdown_closes_terminal_registry(
                         tmp_path / session,
                         codex_bridge.CodexNativeBridgeState(
                             session_id=session,
-                            socket_path="ws://runner.test",
+                            socket_path=servers[session].listen_url,
                             thread_id="thread",
                             codex_home=str(tmp_path / session),
                         ),
@@ -2784,7 +2815,7 @@ def test_runner_shutdown_closes_terminal_registry(
                     operation = orchestration._codex_forward_known_thread(
                         session_id=session,
                         bridge_dir=tmp_path / session,
-                        codex_ws_url="ws://runner.test",
+                        codex_ws_url=servers[session].listen_url,
                         thread_id="thread",
                         client=client,
                     )
@@ -2798,7 +2829,7 @@ def test_runner_shutdown_closes_terminal_registry(
                     operation = orchestration._codex_discover_thread_and_forward(
                         session_id=session,
                         bridge_dir=tmp_path / session,
-                        codex_ws_url="ws://runner.test",
+                        codex_ws_url=servers[session].listen_url,
                         codex_home=tmp_path / session,
                         workspace=str(tmp_path),
                         event_client=client,
@@ -2831,7 +2862,7 @@ def test_runner_shutdown_closes_terminal_registry(
                         tmp_path / session,
                         codex_bridge.CodexNativeBridgeState(
                             session_id=active_session,
-                            socket_path="ws://runner.test",
+                            socket_path=servers[session].listen_url,
                             thread_id="rotated-thread",
                             codex_home=str(tmp_path / session),
                         ),

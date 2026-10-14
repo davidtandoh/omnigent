@@ -46,7 +46,8 @@ refusal reaches the session's forwarder through its existing cancellation path
 before the event loop exits. Both Codex forwarder cleanup paths preserve the
 app-server and routers when cancellation carries that named refusal. After a
 Codex rotation, shutdown matches terminals to their app-server using the
-`CODEX_HOME` supplied at launch. It closes that app-server only after registry
+runner-generated `--remote` URL. An explicit `CODEX_HOME` override does not
+change this association. It closes that app-server only after registry
 cleanup succeeds for every matching terminal. A stale bridge label cannot
 authorize cleanup. OpenCode also preserves its server when cancellation carries a refusal.
 A helper terminal left in the launch session cannot authorize cleanup of the

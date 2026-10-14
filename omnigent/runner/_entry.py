@@ -1616,16 +1616,20 @@ def create_app(
         from omnigent.runner.resource_registry import _terminal_cleanup_error
 
         terminal_dependencies = [
-            (session_id, entry.instance.env.get("CODEX_HOME"))
+            (session_id, remote_url)
             for session_id in _terminal_registry.active_conversation_ids()
             for entry in _terminal_registry.list_for_cleanup(session_id)
+            for option, remote_url in zip(
+                entry.instance.args, entry.instance.args[1:], strict=False
+            )
+            if option == "--remote"
         ]
         closed_sessions: set[str] = set()
 
         async def preserve_dependents(session_id: str, refusal: Exception) -> None:
             named_refusal = _terminal_cleanup_error(refusal)
             for launch_id, server in list(orchestration._AUTO_CODEX_APP_SERVERS.items()):
-                if (session_id, str(server.codex_home)) in terminal_dependencies:
+                if (session_id, server.listen_url) in terminal_dependencies:
                     await orchestration._cancel_registered_auto_forwarder_task(
                         launch_id, refusal=named_refusal
                     )
@@ -1639,8 +1643,8 @@ def create_app(
             for launch_id, server in list(orchestration._AUTO_CODEX_APP_SERVERS.items()):
                 dependents = {
                     owner
-                    for owner, home in terminal_dependencies
-                    if home == str(server.codex_home)
+                    for owner, remote_url in terminal_dependencies
+                    if remote_url == server.listen_url
                 }
                 if dependents and dependents <= closed_sessions:
                     await orchestration._teardown_codex_native_launch(launch_id)
