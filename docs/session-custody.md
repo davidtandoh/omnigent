@@ -41,7 +41,10 @@ Terminal cleanup closes the terminal before releasing its environment, skills,
 native bridge files or app-server. Exit finalization propagates failure before
 publishing `TerminalExitEvent`. Session cleanup and terminal DELETE propagate
 named JSON refusals. Shutdown attempts each independent terminal and releases
-that session's dependencies only after its terminal cleanup succeeds.
+that session's dependencies only after its terminal cleanup succeeds. A shutdown
+refusal reaches the session's forwarder through its existing cancellation path
+before the event loop exits. Both Codex forwarder cleanup paths preserve the
+app-server and routers when cancellation carries that named refusal.
 
 A kill-failed live terminal becomes unregistered without claimed ownership.
 Its private directory and dependent resources remain intact on refusal. This

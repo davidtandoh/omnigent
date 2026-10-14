@@ -696,7 +696,10 @@ class TerminalRegistry:
             raise failure
 
     async def shutdown(
-        self, *, on_conversation_closed: Callable[[str], Awaitable[None]] | None = None
+        self,
+        *,
+        on_conversation_closed: Callable[[str], Awaitable[None]] | None = None,
+        on_conversation_refused: Callable[[str, Exception], Awaitable[None]] | None = None,
     ) -> None:
         """Tear down every registered terminal across all conversations.
 
@@ -716,6 +719,8 @@ class TerminalRegistry:
             except Exception as exc:
                 if failure is None:
                     failure = exc
+                if on_conversation_refused is not None:
+                    await on_conversation_refused(conversation_id, exc)
         if failure is not None:
             raise failure
 

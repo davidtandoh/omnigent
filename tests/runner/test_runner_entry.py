@@ -2496,18 +2496,19 @@ def test_install_crash_logging_is_idempotent() -> None:
         sys.excepthook = original_hook
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("host_owns_global_cleanup", "expected_sweep_orphans"),
     [(True, False), (False, True)],
 )
 @pytest.mark.parametrize("terminal_failure", [False, True])
-async def test_runner_shutdown_closes_terminal_registry(
+@pytest.mark.parametrize("forwarder_path", ["known", "discovery"])
+def test_runner_shutdown_closes_terminal_registry(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     host_owns_global_cleanup: bool,
     expected_sweep_orphans: bool,
     terminal_failure: bool,
+    forwarder_path: str,
 ) -> None:
     """The --server local runner shuts down terminal-owned resources.
 
@@ -2522,11 +2523,38 @@ async def test_runner_shutdown_closes_terminal_registry(
 
     import omnigent.runner._entry as entry_mod
     from omnigent.errors import OmnigentError
+    from omnigent.harnesses.codex_native import forwarder as codex_forwarder
     from omnigent.inner.terminal import TerminalInstance
     from omnigent.runner.native import orchestration
     from omnigent.terminals.registry import TerminalRegistry
 
     closed = []
+    forwarders = []
+    loop_cancelled = []
+    for session in ("failed", "healthy"):
+        directory = tmp_path / session
+        directory.mkdir()
+        for resource in ("router", "turn_router"):
+            (directory / resource).write_text("dependent resource")
+
+    async def close_router(session_id, _router):
+        (tmp_path / session_id / "router").unlink()
+
+    async def close_turn_router(session_id, _router):
+        (tmp_path / session_id / "turn_router").unlink()
+
+    async def forward(*, client, **_kwargs):
+        client.started.set()
+        await asyncio.Event().wait()
+
+    async def discover(client, **_kwargs):
+        client.started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(codex_forwarder, "supervise_forwarder", forward)
+    monkeypatch.setattr(codex_forwarder, "wait_for_thread_started", discover)
+    monkeypatch.setattr(orchestration, "_shutdown_session_router_async", close_router)
+    monkeypatch.setattr(orchestration, "_shutdown_session_turn_router_async", close_turn_router)
     monkeypatch.setattr(orchestration, "_AUTO_CODEX_APP_SERVERS", {})
     monkeypatch.setattr(orchestration, "_AUTO_FORWARDER_TASKS", {})
     monkeypatch.setattr(orchestration, "_AUTO_OPENCODE_SERVERS", {})
@@ -2585,6 +2613,7 @@ async def test_runner_shutdown_closes_terminal_registry(
                     raise OSError("synthetic exhaustion")
 
             instance.close = AsyncMock(side_effect=close_terminal)
+            instance.is_alive = AsyncMock(return_value=True)
             registry._by_conversation[session] = {("codex", "main"): instance}
         terminal_registries.append(registry)
         return registry
@@ -2636,10 +2665,54 @@ async def test_runner_shutdown_closes_terminal_registry(
     )
 
     app = entry_mod.create_app()
+
+    async def run_lifespan():
+        async def cancelled_by_loop():
+            try:
+                await asyncio.Event().wait()
+            finally:
+                loop_cancelled.append(True)
+
+        asyncio.create_task(cancelled_by_loop())
+        async with app.router.lifespan_context(app):
+            for session in ("failed", "healthy"):
+                client = SimpleNamespace(close=AsyncMock(), started=asyncio.Event())
+                if forwarder_path == "known":
+                    operation = orchestration._codex_forward_known_thread(
+                        session_id=session,
+                        bridge_dir=tmp_path / session,
+                        codex_ws_url="ws://runner.test",
+                        thread_id="thread",
+                        client=client,
+                    )
+                else:
+                    operation = orchestration._codex_discover_thread_and_forward(
+                        session_id=session,
+                        bridge_dir=tmp_path / session,
+                        codex_ws_url="ws://runner.test",
+                        codex_home=tmp_path / session,
+                        workspace=str(tmp_path),
+                        event_client=client,
+                        app_server=orchestration._AUTO_CODEX_APP_SERVERS[session],
+                        routing_summary="synthetic",
+                        terminal_instance=terminal_registries[0].get(session, "codex", "main"),
+                    )
+                task = asyncio.create_task(operation)
+                forwarders.append(task)
+                orchestration._register_auto_forwarder_task(session, task)
+                await asyncio.wait_for(client.started.wait(), timeout=2)
+                assert not task.done()
+
     if terminal_failure:
-        with pytest.raises(OmnigentError, match="unavailable_probe"):
-            async with app.router.lifespan_context(app):
-                pass
+        with pytest.raises(OmnigentError, match="unavailable_probe") as refused:
+            asyncio.run(run_lifespan())
+        assert refused.value.code == "unavailable_probe"
+        assert loop_cancelled == [True]
+        assert all(task.cancelled() for task in forwarders)
+        assert (tmp_path / "failed" / "router").exists()
+        assert (tmp_path / "failed" / "turn_router").exists()
+        assert not (tmp_path / "healthy" / "router").exists()
+        assert not (tmp_path / "healthy" / "turn_router").exists()
         assert closed == [
             ("failed", "terminal"),
             ("healthy", "terminal"),
@@ -2650,8 +2723,12 @@ async def test_runner_shutdown_closes_terminal_registry(
         assert not process_managers[0].shutdown_called
         assert terminal_registries[0].active_conversation_ids() == []
         return
-    async with app.router.lifespan_context(app):
-        pass
+    asyncio.run(run_lifespan())
+    assert loop_cancelled == [True]
+    assert all(task.cancelled() for task in forwarders)
+    for session in ("failed", "healthy"):
+        assert not (tmp_path / session / "router").exists()
+        assert not (tmp_path / session / "turn_router").exists()
     assert closed == [
         ("failed", "terminal"),
         ("failed", "server"),

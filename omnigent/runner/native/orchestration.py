@@ -192,7 +192,9 @@ class _CodexNativeModelOptionsNotReady(RuntimeError):
     """Raised when Codex model options are requested before bridge startup."""
 
 
-async def _cancel_auto_forwarder_task(session_id: str) -> None:
+async def _cancel_auto_forwarder_task(
+    session_id: str, *, refusal: OmnigentError | None = None
+) -> None:
     """
     Cancel and await the session's registered transcript forwarder, if any.
 
@@ -209,7 +211,7 @@ async def _cancel_auto_forwarder_task(session_id: str) -> None:
     task = _AUTO_FORWARDER_TASKS.pop(session_id, None)
     if task is None or task.done():
         return
-    task.cancel()
+    task.cancel(refusal)
     # asyncio.wait absorbs the CancelledError and bounds the wait on a hung cancellation.
     _done, pending = await asyncio.wait({task}, timeout=_AUTO_FORWARDER_CANCEL_TIMEOUT_S)
     if pending:
@@ -6174,8 +6176,9 @@ async def _codex_discover_thread_and_forward(
             client=event_client,
             auth=_RunnerDatabricksAuth(auth_factory),
         )
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as exc:
         cancelled = True
+        preserve_dependencies = bool(exc.args and isinstance(exc.args[0], OmnigentError))
         raise
     except OmnigentError as exc:
         if exc.code == "native_rotation_refused":
@@ -6264,8 +6267,9 @@ async def _codex_forward_known_thread(
             client=client,
             auth=_RunnerDatabricksAuth(auth_factory),
         )
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as exc:
         cancelled = True
+        preserve_dependencies = bool(exc.args and isinstance(exc.args[0], OmnigentError))
         raise
     except OmnigentError as exc:
         if exc.code == "native_rotation_refused":

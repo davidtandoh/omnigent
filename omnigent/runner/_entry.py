@@ -1608,18 +1608,27 @@ def create_app(
             await _pane_reaper.shutdown()
         # Host shutdown skips per-session deletion, so close native servers here.
         from omnigent.runner.native import (
+            _cancel_auto_forwarder_task,
             teardown_all_codex_native_app_servers,
             teardown_all_opencode_native_servers,
             teardown_codex_native_app_server,
             teardown_opencode_native_server,
         )
 
+        from omnigent.runner.resource_registry import _terminal_cleanup_error
+
+        async def preserve_dependents(session_id: str, refusal: Exception) -> None:
+            await _cancel_auto_forwarder_task(session_id, refusal=_terminal_cleanup_error(refusal))
+
         async def close_dependents(session_id: str) -> None:
             await teardown_codex_native_app_server(session_id)
             await teardown_opencode_native_server(session_id)
             await pm.release(session_id)
 
-        await _terminal_registry.shutdown(on_conversation_closed=close_dependents)
+        await _terminal_registry.shutdown(
+            on_conversation_closed=close_dependents,
+            on_conversation_refused=preserve_dependents,
+        )
         with contextlib.suppress(Exception):
             await teardown_all_codex_native_app_servers()
         with contextlib.suppress(Exception):
