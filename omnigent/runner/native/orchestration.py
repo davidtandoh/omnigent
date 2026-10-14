@@ -4837,10 +4837,6 @@ async def _auto_create_codex_terminal(
     )
     from omnigent.inner.codex_executor import codex_extended_catalog_env
 
-    terminal_registry = getattr(resource_registry, "terminal_registry", None)
-    if terminal_registry is not None:
-        terminal_registry.get(session_id, "codex", "main")
-
     launch_config = await _codex_native_launch_config(
         session_id=session_id,
         server_client=server_client,
@@ -5524,16 +5520,12 @@ async def _auto_create_codex_terminal(
         terminal_view = launched.view
         terminal_instance = launched.terminal_instance
         thread_start_timeout_seconds = launched.thread_start_timeout_seconds
-    except BaseException:
+    except BaseException as exc:
+        from omnigent.terminals.registry import TerminalCleanupRefused
+
         with contextlib.suppress(Exception):
             await event_client.close()
-        retained = terminal_registry is not None and any(
-            entry.terminal_name == "codex"
-            and entry.session_key == "main"
-            and entry.instance.launch_failed
-            for entry in terminal_registry.list_for_cleanup(session_id)
-        )
-        if not retained:
+        if not isinstance(exc, TerminalCleanupRefused):
             with contextlib.suppress(Exception):
                 await app_server.close()
             _AUTO_CODEX_APP_SERVERS.pop(session_id, None)
@@ -5916,6 +5908,7 @@ async def _codex_discover_thread_and_forward(
     discovery_started_at = time.monotonic()
     startup_pending_recorded = False
     cancelled = False
+    preserve_dependencies = False
     try:
         while True:
             try:
@@ -6184,14 +6177,11 @@ async def _codex_discover_thread_and_forward(
     except asyncio.CancelledError:
         cancelled = True
         raise
+    except OmnigentError as exc:
+        if exc.code == "native_rotation_refused":
+            preserve_dependencies = True
+        raise
     finally:
-        # Tear down the listener and the per-session app-server whenever
-        # forwarding ends — discovery failed, the app-server connection dropped
-        # (``supervise_forwarder`` returned), or the task was cancelled on
-        # session teardown. ``supervise_forwarder`` also closes ``event_client``
-        # in its own ``finally``; ``close()`` is idempotent. The app-server
-        # subprocess is ours to stop, else it orphans one process per session.
-        # Pop first so the dict never holds a closed reference.
         _logger.info(
             "Codex native input stopped",
             extra=debug_event(
@@ -6201,19 +6191,20 @@ async def _codex_discover_thread_and_forward(
                 stage="native_input",
             ),
         )
-        leftover_app_server = app_server
-        if app_server is None or _AUTO_CODEX_APP_SERVERS.get(session_id) is app_server:
-            leftover_app_server = _AUTO_CODEX_APP_SERVERS.pop(session_id, None)
-            if not cancelled:
-                # The pane outlives its app-server; mark it so the next ensure replaces it.
-                record_app_server_stopped(bridge_dir)
         with contextlib.suppress(Exception):
             await event_client.close()
-        if leftover_app_server is not None:
-            with contextlib.suppress(Exception):
-                await leftover_app_server.close()
-        await _shutdown_session_router_async(session_id, subagent_router)
-        await _shutdown_session_turn_router_async(session_id, turn_router)
+        if not preserve_dependencies:
+            leftover_app_server = app_server
+            if app_server is None or _AUTO_CODEX_APP_SERVERS.get(session_id) is app_server:
+                leftover_app_server = _AUTO_CODEX_APP_SERVERS.pop(session_id, None)
+                if not cancelled:
+                    # The pane outlives its app-server; mark it so the next ensure replaces it.
+                    record_app_server_stopped(bridge_dir)
+            if leftover_app_server is not None:
+                with contextlib.suppress(Exception):
+                    await leftover_app_server.close()
+            await _shutdown_session_router_async(session_id, subagent_router)
+            await _shutdown_session_turn_router_async(session_id, turn_router)
 
 
 async def _codex_forward_known_thread(
@@ -6257,6 +6248,7 @@ async def _codex_forward_known_thread(
     )
 
     cancelled = False
+    preserve_dependencies = False
     try:
         server_url = _required_runner_env("RUNNER_SERVER_URL")
         auth_factory = _make_auth_token_factory()
@@ -6275,6 +6267,10 @@ async def _codex_forward_known_thread(
     except asyncio.CancelledError:
         cancelled = True
         raise
+    except OmnigentError as exc:
+        if exc.code == "native_rotation_refused":
+            preserve_dependencies = True
+        raise
     finally:
         if client is not None:
             with contextlib.suppress(Exception):
@@ -6288,17 +6284,18 @@ async def _codex_forward_known_thread(
                 stage="native_input",
             ),
         )
-        leftover_app_server = app_server
-        if app_server is None or _AUTO_CODEX_APP_SERVERS.get(session_id) is app_server:
-            leftover_app_server = _AUTO_CODEX_APP_SERVERS.pop(session_id, None)
-            if not cancelled:
-                # The pane outlives its app-server; mark it so the next ensure replaces it.
-                record_app_server_stopped(bridge_dir)
-        if leftover_app_server is not None:
-            with contextlib.suppress(Exception):
-                await leftover_app_server.close()
-        await _shutdown_session_router_async(session_id, subagent_router)
-        await _shutdown_session_turn_router_async(session_id, turn_router)
+        if not preserve_dependencies:
+            leftover_app_server = app_server
+            if app_server is None or _AUTO_CODEX_APP_SERVERS.get(session_id) is app_server:
+                leftover_app_server = _AUTO_CODEX_APP_SERVERS.pop(session_id, None)
+                if not cancelled:
+                    # The pane outlives its app-server; mark it so the next ensure replaces it.
+                    record_app_server_stopped(bridge_dir)
+            if leftover_app_server is not None:
+                with contextlib.suppress(Exception):
+                    await leftover_app_server.close()
+            await _shutdown_session_router_async(session_id, subagent_router)
+            await _shutdown_session_turn_router_async(session_id, turn_router)
 
 
 async def _run_antigravity_reader(

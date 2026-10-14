@@ -484,7 +484,9 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     from omnigent.runner import app as runner_app_mod
 
     retained_failure = launch_outcome in {
-        "retained", "observation_cancelled", "observation_exited"
+        "retained",
+        "observation_cancelled",
+        "observation_exited",
     }
     session_id = "76cbdcbbf84d4149b2a7d7441b6966c1"
     thread_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
@@ -826,7 +828,8 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
         instance.launch = start_terminal
         instance.is_alive = probe_terminal
         monkeypatch.setattr(
-            registry_mod, "create_terminal_instance",
+            registry_mod,
+            "create_terminal_instance",
             Mock(return_value=TerminalCreateResult(instance, tmp_path)),
         )
         spawn = AsyncMock(side_effect=OSError(errno.EAGAIN, "synthetic exhaustion"))
@@ -834,62 +837,25 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
 
     try:
         if retained_failure:
-            error_type, error_message = {
-                "retained": (RuntimeError, "could not start"),
-                "observation_cancelled": (asyncio.CancelledError, None),
-                "observation_exited": (
-                    registry_mod.TerminalExitedDuringLaunch, "exited before it became available"
-                ),
-            }[launch_outcome]
-            with pytest.raises(error_type, match=error_message):
+            with pytest.raises(registry_mod.TerminalCleanupRefused, match="unavailable_probe"):
                 await _auto_create_codex_terminal(
-                    session_id, resources,
+                    session_id,
+                    resources,
                     lambda _sid, event: published_events.append(event),
                     agent_spec=agent_spec,
                     server_client=_SnapshotServerClient(),
                     session_init=session_init,
                 )
-            assert instance.launch_failed
             assert instance.running is (launch_outcome != "observation_exited")
             assert private_dir.exists()
-            assert terminal_registry.list_for_cleanup(session_id)[0].instance is instance
+            assert terminal_registry.list_for_conversation(session_id) == []
             assert not app_server.closed
             assert runner_app_mod._AUTO_CODEX_APP_SERVERS[session_id] is app_server
             assert not forward_calls
             assert not published_events
             assert resources.terminal_resource_role(session_id, "terminal_codex_main") is None
-            with pytest.raises(RuntimeError, match="process_pending"):
-                await _auto_create_codex_terminal(
-                    session_id, resources, lambda *_: None,
-                    agent_spec=agent_spec, server_client=_SnapshotServerClient(),
-                    session_init=session_init,
-                )
+            assert terminal_registry.get_instance_lock(session_id, "codex", "main") is None
             assert len(build_calls) == 1
-            app = create_runner_app(
-                server_client=NullServerClient(),
-                terminal_registry=terminal_registry,
-                resource_registry=resources,
-            )
-            monkeypatch.setattr(runner_app_mod, "_delete_native_bridge_dirs", AsyncMock())
-            path = f"/v1/sessions/{session_id}/resources"
-            if not use_envelope:
-                path += "/terminals/terminal_codex_main"
-            transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
-            async with httpx.AsyncClient(transport=transport, base_url="http://runner") as client:
-                refused = await client.delete(path)
-                assert refused.status_code == 500
-                assert refused.json()["error"]["code"] == "unavailable_probe"
-                assert not app_server.closed
-                spawn.side_effect = None
-                spawn.return_value = SimpleNamespace(
-                    returncode=0, communicate=AsyncMock(return_value=(b"", b""))
-                )
-                completed = await client.delete(path)
-                assert completed.status_code == 200, completed.text
-            assert terminal_registry.list_for_cleanup(session_id) == []
-            assert not private_dir.exists()
-            assert app_server.closed
-            assert session_id not in runner_app_mod._AUTO_CODEX_APP_SERVERS
             return
         if launch_outcome == "cancelled":
             with pytest.raises(asyncio.CancelledError):
@@ -3751,11 +3717,14 @@ async def test_codex_session_needs_runner_terminal_false_without_client() -> Non
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("outcome", ["success", "setup_error", "forward_error", "cancelled"])
+@pytest.mark.parametrize(
+    "outcome", ["success", "setup_error", "forward_error", "rotation_refused", "cancelled"]
+)
 async def test_codex_known_thread_forwarder_closes_retained_subscription(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, outcome: str
 ) -> None:
     """Ownership transfer must close the preload client on every forwarder exit."""
+    from omnigent.errors import OmnigentError
     from omnigent.harnesses.codex_native import forwarder as codex_forwarder
     from omnigent.runner import _entry
     from omnigent.runner.native import orchestration
@@ -3780,6 +3749,8 @@ async def test_codex_known_thread_forwarder_closes_retained_subscription(
     async def forward(**kwargs: Any) -> None:
         assert kwargs["client"] is client
         assert not closed
+        if outcome == "rotation_refused":
+            raise OmnigentError("rotation refused", code="native_rotation_refused")
         if outcome == "forward_error":
             raise RuntimeError("forward failed")
         if outcome == "cancelled":
@@ -3800,9 +3771,20 @@ async def test_codex_known_thread_forwarder_closes_retained_subscription(
     if outcome == "success":
         await operation
     else:
-        error = asyncio.CancelledError if outcome == "cancelled" else RuntimeError
+        error = (
+            OmnigentError
+            if outcome == "rotation_refused"
+            else asyncio.CancelledError
+            if outcome == "cancelled"
+            else RuntimeError
+        )
         with pytest.raises(error):
             await operation
+    if outcome == "rotation_refused":
+        assert closed == ["client"]
+        assert session_id in orchestration._AUTO_CODEX_APP_SERVERS
+        orchestration._AUTO_CODEX_APP_SERVERS.pop(session_id)
+        return
     assert closed == ["client", "server"]
     assert session_id not in orchestration._AUTO_CODEX_APP_SERVERS
 

@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from omnigent.errors import OmnigentError
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec, TerminalEnvSpec
 from omnigent.inner.terminal import TerminalCreateResult, TerminalInstance
 from omnigent.terminals import TerminalRegistry
@@ -400,7 +401,6 @@ async def test_close_and_relaunch_share_exclusion(
     assert json.loads(result)["status"] == "closed"
     assert registry.get_instance_lock(*args[:3]) is None
     replacement.close.assert_awaited_once()
-
 
 
 def test_transfer_moves_terminal_without_closing_tmux(tmp_path: Path) -> None:
@@ -941,8 +941,8 @@ async def test_close_removes_instance_lock(tmp_path: Path) -> None:
     instance.close.assert_awaited_once()
 
 
-async def test_close_with_timeout_preserves_registration(tmp_path: Path) -> None:
-    """A timed-out close retains the terminal and reports failure."""
+async def test_close_with_timeout_releases_registration(tmp_path: Path) -> None:
+    """A timed-out close releases registration and reports failure."""
     reg = TerminalRegistry()
     instance = TerminalInstance(
         name="bash",
@@ -966,17 +966,17 @@ async def test_close_with_timeout_preserves_registration(tmp_path: Path) -> None
     original = reg_mod._CLOSE_TIMEOUT_S
     reg_mod._CLOSE_TIMEOUT_S = 0.01
     try:
-        with pytest.raises(asyncio.TimeoutError):
+        with pytest.raises(OmnigentError, match="process_pending"):
             await reg.close("conv_a", "bash", "s1")
     finally:
         reg_mod._CLOSE_TIMEOUT_S = original
 
-    assert reg.get("conv_a", "bash", "s1") is instance
-    assert reg.get_instance_lock("conv_a", "bash", "s1") is not None
+    assert reg.get("conv_a", "bash", "s1") is None
+    assert reg.get_instance_lock("conv_a", "bash", "s1") is None
 
 
 async def test_cleanup_conversation_propagates_close_exception(tmp_path: Path) -> None:
-    """Failed cleanup retains the terminal and refuses session teardown."""
+    """Failed cleanup preserves resources and refuses session teardown."""
     reg = TerminalRegistry()
     good_instance = TerminalInstance(
         name="bash",
@@ -1006,20 +1006,22 @@ async def test_cleanup_conversation_propagates_close_exception(tmp_path: Path) -
     reg._instance_locks[("conv_a", "bash", "s1")] = threading.Lock()
     reg._instance_locks[("conv_a", "bash", "s2")] = threading.Lock()
 
-    with pytest.raises(RuntimeError, match="tmux gone"):
+    with pytest.raises(OmnigentError, match="unavailable_probe"):
         await reg.cleanup_conversation("conv_a")
 
-    assert reg.active_conversation_ids() == ["conv_a"]
-    assert reg.get("conv_a", "bash", "s2") is bad_instance
-    assert reg.get_instance_lock("conv_a", "bash", "s2") is not None
+    assert reg.active_conversation_ids() == []
+    assert reg.get("conv_a", "bash", "s2") is None
+    assert reg.get_instance_lock("conv_a", "bash", "s2") is None
     assert reg.get("conv_a", "bash", "s1") is None
     assert reg.get_instance_lock("conv_a", "bash", "s1") is None
     # The good instance's close was still called.
     good_instance.close.assert_awaited_once()
 
 
-async def test_shutdown_attempts_all_terminals_before_propagating_incomplete_cleanup(tmp_path: Path) -> None:
-    """One shutdown pass closes independent terminals and retains failures."""
+async def test_shutdown_attempts_all_terminals_before_propagating_incomplete_cleanup(
+    tmp_path: Path,
+) -> None:
+    """One shutdown pass attempts every terminal and propagates failure."""
     reg = TerminalRegistry()
     good = TerminalInstance(
         name="bash",
@@ -1055,12 +1057,12 @@ async def test_shutdown_attempts_all_terminals_before_propagating_incomplete_cle
     reg._instance_locks[("conv_a", "bash", "s1")] = threading.Lock()
     reg._instance_locks[("conv_b", "bash", "s1")] = threading.Lock()
 
-    with pytest.raises(RuntimeError, match="tmux gone"):
+    with pytest.raises(OmnigentError, match="unavailable_probe"):
         await reg.shutdown()
 
-    assert reg.active_conversation_ids() == ["conv_a"]
-    assert reg.get("conv_a", "bash", "s1") is bad
-    assert reg.get_instance_lock("conv_a", "bash", "s1") is not None
+    assert reg.active_conversation_ids() == []
+    assert reg.get("conv_a", "bash", "s1") is None
+    assert reg.get_instance_lock("conv_a", "bash", "s1") is None
     assert reg.get("conv_a", "bash", "s2") is None
     assert reg.get_instance_lock("conv_b", "bash", "s1") is None
     good.close.assert_awaited_once()

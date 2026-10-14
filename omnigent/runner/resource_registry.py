@@ -205,6 +205,8 @@ class TerminalExitEvent:
 def _terminal_cleanup_error(exc: Exception) -> OmnigentError:
     from omnigent.runner.custody import CustodyError
 
+    if isinstance(exc, OmnigentError):
+        return exc
     category = (
         str(exc)
         if isinstance(exc, CustodyError)
@@ -1307,7 +1309,9 @@ class SessionResourceRegistry:
                 resource_role=resource_role,
             )
         except BaseException:
-            instance.launch_failed = True
+            await self._terminal_registry.close(
+                session_id, terminal_name, session_key, expected=instance
+            )
             raise
 
     async def observe_required_terminal(
@@ -1761,8 +1765,8 @@ class SessionResourceRegistry:
         """Clean up and publish lifecycle events for an unexpected terminal exit."""
         terminal_id = terminal_resource_id(terminal_name, session_key)
         with self._lock:
-            observed = self._terminal_lifecycles.pop((session_id, terminal_id), None)
-            observed_role = self._terminal_roles.pop((session_id, terminal_id), None)
+            observed = self._terminal_lifecycles.get((session_id, terminal_id))
+            observed_role = self._terminal_roles.get((session_id, terminal_id))
         if observed is None:
             return
         if observed != lifecycle:
@@ -1819,17 +1823,17 @@ class SessionResourceRegistry:
                 await self._terminal_registry.close(
                     session_id, terminal_name, session_key, expected=instance
                 )
-            except Exception:
-                _logger.exception(
-                    "Error evicting exited terminal: session=%s terminal=%s:%s",
-                    session_id,
-                    terminal_name,
-                    session_key,
-                )
-            else:
-                current = self._terminal_registry.get(session_id, terminal_name, session_key)
-                if current is not None and instance is not None and current is not instance:
-                    superseded_by = current
+            except OmnigentError:
+                raise
+            except (RuntimeError, OSError, ValueError, psutil.Error) as exc:
+                raise _terminal_cleanup_error(exc) from exc
+            current = self._terminal_registry.get(session_id, terminal_name, session_key)
+            if current is not None and instance is not None and current is not instance:
+                superseded_by = current
+        if superseded_by is None:
+            with self._lock:
+                self._terminal_lifecycles.pop((session_id, terminal_id), None)
+                self._terminal_roles.pop((session_id, terminal_id), None)
 
         # A replaced launch must not consume its successor's status memo.
         session_status_before_exit = (

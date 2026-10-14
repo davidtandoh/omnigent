@@ -2174,6 +2174,19 @@ async def supervise_forwarder(
                         app_server_url=app_server_url,
                         event=event,
                     )
+                except Exception as exc:
+                    from omnigent.errors import OmnigentError
+                    from omnigent.harnesses.codex_native.bridge import write_bridge_startup_error
+
+                    write_bridge_startup_error(
+                        bridge_dir,
+                        "Native thread rotation refused; forwarding stopped.",
+                        code="native_rotation_refused",
+                    )
+                    raise OmnigentError(
+                        "Native thread rotation refused", code="native_rotation_refused"
+                    ) from exc
+                try:
                     if rotated:
                         forwarder_state.note_parent_rotation(target.session_id)
                         subscribe_task.cancel()

@@ -1610,14 +1610,21 @@ def create_app(
         from omnigent.runner.native import (
             teardown_all_codex_native_app_servers,
             teardown_all_opencode_native_servers,
+            teardown_codex_native_app_server,
+            teardown_opencode_native_server,
         )
 
+        async def close_dependents(session_id: str) -> None:
+            await teardown_codex_native_app_server(session_id)
+            await teardown_opencode_native_server(session_id)
+            await pm.release(session_id)
+
+        await _terminal_registry.shutdown(on_conversation_closed=close_dependents)
         with contextlib.suppress(Exception):
             await teardown_all_codex_native_app_servers()
         with contextlib.suppress(Exception):
             await teardown_all_opencode_native_servers()
         await pm.shutdown()
-        await _terminal_registry.shutdown()
         if mcp_manager is not None:
             await mcp_manager.shutdown()
         await server_client.aclose()

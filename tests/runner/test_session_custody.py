@@ -531,7 +531,9 @@ async def test_owned_terminal_close_retires_only_proven_released_receipts(
                     else registry.shutdown()
                 )
                 if spawn_fails:
-                    with pytest.raises(terminal_module._TmuxProcessStartError):
+                    with pytest.raises(
+                        registry_module.TerminalCleanupRefused, match="unavailable_probe"
+                    ):
                         await call
                 else:
                     await call
@@ -541,21 +543,9 @@ async def test_owned_terminal_close_retires_only_proven_released_receipts(
                     assert process.poll() is None
                     assert owner.record_path.read_bytes() == before
                     assert len(owner.record.terminals) == 1
-                    create = Mock()
-                    monkeypatch.setattr(registry_module, "create_terminal_instance", create)
-                    assert (
-                        await registry.launch(
-                            "conv_synthetic", "bash", "helper", TerminalEnvSpec(command="bash")
-                        )
-                        is terminal
-                    )
-                    create.assert_not_called()
-                    assert owner.record_path.read_bytes() == before
-                    assert registry.get("conv_synthetic", "bash", "helper") is terminal
-                    assert (
-                        registry.get_instance_lock("conv_synthetic", "bash", "helper")
-                        is instance_lock
-                    )
+                    assert registry.get("conv_synthetic", "bash", "helper") is None
+                    assert registry.get_instance_lock("conv_synthetic", "bash", "helper") is None
+                    assert not instance_lock.locked()
                     assert terminal.running
                     assert terminal.private_dir.exists()
                     assert terminal.socket_path.exists()
@@ -721,14 +711,14 @@ async def test_concurrent_terminal_launch_refuses_before_spawn_with_failed_close
             before = owner.record_path.read_bytes()
             spawn = AsyncMock(side_effect=OSError(errno.EAGAIN, "synthetic resource exhaustion"))
             monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
-            with pytest.raises(RuntimeError, match="tmux command could not start"):
+            with pytest.raises(registry_module.TerminalCleanupRefused, match="unavailable_probe"):
                 await registry.close("conv_synthetic", "bash", "helper")
             spawn.assert_awaited_once()
             assert spawn.call_args.args[-1] == "kill-server"
             assert owner.record.terminals == [receipt]
             assert owner.record_path.read_bytes() == before
-            assert registry.get(*args[:3]) is instance
-            assert registry.get_instance_lock(*args[:3]) is not None
+            assert registry.get(*args[:3]) is None
+            assert registry.get_instance_lock(*args[:3]) is None
             assert instance.running
             assert instance.private_dir.exists()
             assert instance.socket_path.exists()

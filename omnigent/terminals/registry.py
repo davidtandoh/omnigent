@@ -39,13 +39,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 
 import psutil
 
+from omnigent.errors import OmnigentError
 from omnigent.inner.datamodel import OSEnvSpec, TerminalEnvSpec
 from omnigent.inner.os_env import OSEnvironment
 from omnigent.inner.terminal import TerminalInstance, create_terminal_instance
@@ -59,6 +60,11 @@ from omnigent.inner.terminal import TerminalInstance, create_terminal_instance
 _CLOSE_TIMEOUT_S = 5.0
 
 _logger = logging.getLogger(__name__)
+
+
+class TerminalCleanupRefused(OmnigentError):
+    def __init__(self, code: str) -> None:
+        super().__init__(f"Terminal cleanup refused: {code}", code=code)
 
 
 def conversation_link_for_id(
@@ -329,19 +335,7 @@ class TerminalRegistry:
                 psutil.Error,
                 asyncio.CancelledError,
             ) as exc:
-                try:
-                    await asyncio.wait_for(
-                        self._close_instance(instance, conversation_id), timeout=_CLOSE_TIMEOUT_S
-                    )
-                except BaseException as cleanup_error:
-                    instance.launch_failed = True
-                    with self._lock:
-                        self._by_conversation.setdefault(conversation_id, {})[key] = instance
-                    if isinstance(cleanup_error, CustodyError):
-                        raise RuntimeError(
-                            f"Session custody refused: {cleanup_error}"
-                        ) from cleanup_error
-                    raise
+                await self._close_instance(instance, conversation_id)
                 if custody is None or isinstance(exc, asyncio.CancelledError):
                     raise
                 category = str(exc) if isinstance(exc, CustodyError) else "unavailable_probe"
@@ -359,8 +353,6 @@ class TerminalRegistry:
                     self._instance_locks.pop(lock_key)
 
     def _verify_usable(self, conversation_id: str, instance: TerminalInstance) -> None:
-        if instance.launch_failed:
-            raise RuntimeError("Terminal cleanup refused: process_pending")
         from omnigent.runner.custody import CustodyError, current_custody
 
         custody = current_custody()
@@ -450,7 +442,7 @@ class TerminalRegistry:
         return entries
 
     def list_for_cleanup(self, conversation_id: str) -> list[TerminalListEntry]:
-        """Snapshot owned terminals, including failed launches, for scoped teardown."""
+        """Snapshot registered terminals for scoped teardown."""
         with self._lock:
             slot = dict(self._by_conversation.get(conversation_id, {}))
         return [
@@ -482,11 +474,7 @@ class TerminalRegistry:
         with self._lock:
             for conv_id, slot in self._by_conversation.items():
                 for (name, key), instance in slot.items():
-                    if (
-                        key == "main"
-                        and name in NATIVE_PANE_TERMINAL_NAMES
-                        and not instance.launch_failed
-                    ):
+                    if key == "main" and name in NATIVE_PANE_TERMINAL_NAMES:
                         self._verify_usable(conv_id, instance)
                         out.append((conv_id, name, instance.socket_path))
         return out
@@ -582,28 +570,35 @@ class TerminalRegistry:
         return True
 
     async def _close_instance(self, instance: TerminalInstance, conversation_id: str) -> None:
-        from omnigent.runner.custody import current_custody
+        from omnigent.runner.custody import CustodyError, current_custody
 
-        custody = current_custody()
-        receipt = (
-            next(
-                (r for r in custody.record.terminals if r.socket == str(instance.socket_path)),
-                None,
+        try:
+            custody = current_custody()
+            receipt = (
+                next(
+                    (r for r in custody.record.terminals if r.socket == str(instance.socket_path)),
+                    None,
+                )
+                if custody is not None
+                else None
             )
-            if custody is not None
-            else None
-        )
-        if (
-            custody is not None
-            and custody.record.session_id == conversation_id
-            and receipt is None
-        ):
-            receipt = custody.reserve_terminal(
-                instance.name, instance.session_key, instance.socket_path
-            )
-        await instance.close()
-        if custody is not None and receipt is not None:
-            custody.retire_terminal(receipt)
+            if (
+                custody is not None
+                and custody.record.session_id == conversation_id
+                and receipt is None
+            ):
+                receipt = custody.reserve_terminal(
+                    instance.name, instance.session_key, instance.socket_path
+                )
+            await asyncio.wait_for(instance.close(), timeout=_CLOSE_TIMEOUT_S)
+            if custody is not None and receipt is not None:
+                custody.retire_terminal(receipt)
+        except CustodyError as exc:
+            raise TerminalCleanupRefused(str(exc)) from exc
+        except (TimeoutError, asyncio.CancelledError) as exc:
+            raise TerminalCleanupRefused("process_pending") from exc
+        except (RuntimeError, OSError, ValueError, psutil.Error) as exc:
+            raise TerminalCleanupRefused("unavailable_probe") from exc
 
     async def close(
         self,
@@ -649,23 +644,23 @@ class TerminalRegistry:
             if not _preserve_lock and not instance_lock.acquire(blocking=False):
                 raise RuntimeError("Session custody refused: owner_busy")
         try:
-            await asyncio.wait_for(
-                self._close_instance(instance, conversation_id), timeout=_CLOSE_TIMEOUT_S
-            )
+            await self._close_instance(instance, conversation_id)
+            return True
+        finally:
             with self._lock:
                 slot = self._by_conversation.get(conversation_id)
                 if slot is not None and slot.get(key) is instance:
                     del slot[key]
                     if not slot:
                         self._by_conversation.pop(conversation_id, None)
-            return True
-        finally:
             if not _preserve_lock:
                 with self._lock:
                     instance_lock.release()
                     if self._instance_locks.get(
                         lock_key
-                    ) is instance_lock and key not in self._by_conversation.get(conversation_id, {}):
+                    ) is instance_lock and key not in self._by_conversation.get(
+                        conversation_id, {}
+                    ):
                         self._instance_locks.pop(lock_key)
 
     async def cleanup_conversation(self, conversation_id: str) -> None:
@@ -683,7 +678,7 @@ class TerminalRegistry:
 
         Each ``instance.close()`` is bounded by ``_CLOSE_TIMEOUT_S``
         via ``asyncio.wait_for`` so a wedged tmux session can't stall
-        cleanup. A failed close propagates and retains the terminal and lock.
+        cleanup. A failed close propagates without retaining registry ownership.
 
         :param conversation_id: The conversation being torn down.
         """
@@ -700,7 +695,9 @@ class TerminalRegistry:
         if failure is not None:
             raise failure
 
-    async def shutdown(self) -> None:
+    async def shutdown(
+        self, *, on_conversation_closed: Callable[[str], Awaitable[None]] | None = None
+    ) -> None:
         """Tear down every registered terminal across all conversations.
 
         Called from the FastAPI server's lifespan shutdown handler.
@@ -714,6 +711,8 @@ class TerminalRegistry:
         for conversation_id in conversation_ids:
             try:
                 await self.cleanup_conversation(conversation_id)
+                if on_conversation_closed is not None:
+                    await on_conversation_closed(conversation_id)
             except Exception as exc:
                 if failure is None:
                     failure = exc

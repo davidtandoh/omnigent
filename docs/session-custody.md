@@ -34,26 +34,27 @@ What works today for every harness:
   retained.
 - Host retention of its runners beyond the loopback refusal horizon during an
   API outage.
-- Truthful terminal teardown: a terminal whose `tmux kill-server` cannot be
-  proven is retained, never reported as ended.
+- Truthful terminal teardown: failed termination produces a named refusal,
+  never a successful ending or deletion event.
 
-A failed launch whose cleanup fails remains in the terminal registry with its
-lock and resources. Failed lifecycle observation also marks the exact terminal
-as a failed launch. The registry refuses reuse until explicit cleanup succeeds.
-The idle reaper excludes failed launches and continues to inspect healthy sessions.
-Session cleanup closes terminals before releasing the primary environment,
-skills or native bridge files. A terminal cleanup failure propagates through
-the resource registry as a named JSON error; the runner does not return
-`cleaned=true`. The terminal DELETE route can retire retained failed launches
-without admitting them for reuse. A retained failed Codex launch also retains
-its app-server. Terminal deletion or session cleanup releases that app-server
-only after terminal termination succeeds. Close and launch use the same
-per-instance lock; concurrent operations refuse with `owner_busy`.
-Native stop and idle cleanup publish deletion
-only after the terminal closes. Failed closure preserves the Codex app-server
-and forwarder. Shutdown attempts every independent terminal once before
-propagating a refusal and retains failed entries. These rules also apply when
-durable custody is disabled.
+Terminal cleanup closes the terminal before releasing its environment, skills,
+native bridge files or app-server. Exit finalization propagates failure before
+publishing `TerminalExitEvent`. Session cleanup and terminal DELETE propagate
+named JSON refusals. Shutdown attempts each independent terminal and releases
+that session's dependencies only after its terminal cleanup succeeds.
+
+A kill-failed live terminal becomes unregistered without claimed ownership.
+Its private directory and dependent resources remain intact on refusal. This
+slice does not track that terminal for subsequent cleanup, guarantee eventual
+cleanup, or prove durable custody. Failed launches have no separate retained
+state, reuse refusal or reaper exclusion. Real custody remains later work.
+
+Close, launch and transfer retain the existing per-instance exclusion. Transfer
+acquires both source and destination locks; contention refuses with `owner_busy`.
+Watcher exit callbacks run after releasing the instance lock. If native Codex
+rotation refuses, forwarding stops with `native_rotation_refused` in the existing
+bridge error record. It does not consume later events against the old thread or
+claim transfer success. There is no rotation retry in this slice.
 
 What refuses today: `omnigent codex --binding-json`, `--reattach-binding`,
 `runtime session-contract` and `runtime end-session` return

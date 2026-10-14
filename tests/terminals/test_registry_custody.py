@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from omnigent.errors import OmnigentError
 from omnigent.inner import terminal as terminal_module
 from omnigent.inner.datamodel import TerminalEnvSpec
 from omnigent.inner.terminal import TerminalCreateResult, TerminalInstance
@@ -123,24 +124,17 @@ async def test_launch_failure_never_exposes_unpublished_terminal(
     if close_fails:
         t.spawn.side_effect = OSError(errno.EAGAIN, "private diagnostics")
 
-    with pytest.raises(RuntimeError) as refused:
+    with pytest.raises((RuntimeError, OmnigentError)) as refused:
         await t.registry.launch(*t.args)
-    if close_fails:
-        assert isinstance(refused.value, terminal_module._TmuxProcessStartError)
-    else:
-        assert str(refused.value) == f"Session custody refused: {category}"
     unresolved = close_fails or failure not in {"publication", "verification"}
     if unresolved:
-        assert t.registry.active_conversation_ids() == [t.args[0]]
-        assert t.registry.get_instance_lock(*t.args[:3]) is not None
-        with pytest.raises(RuntimeError, match="process_pending"):
-            t.registry.get(*t.args[:3])
-        with pytest.raises(RuntimeError, match="process_pending"):
-            t.registry.list_for_conversation(t.args[0])
+        assert isinstance(refused.value, OmnigentError)
+        assert refused.value.code == "unavailable_probe"
     else:
-        assert t.registry.get(*t.args[:3]) is None
-        assert t.registry.list_for_conversation(t.args[0]) == []
-        assert t.registry.get_instance_lock(*t.args[:3]) is None
+        assert str(refused.value) == f"Session custody refused: {category}"
+    assert t.registry.get(*t.args[:3]) is None
+    assert t.registry.list_for_conversation(t.args[0]) == []
+    assert t.registry.get_instance_lock(*t.args[:3]) is None
     t.spawn.assert_awaited_once()
     assert t.spawn.call_args.args[-1] == "kill-server"
     assert (t.process.poll() is None) == close_fails
@@ -149,8 +143,6 @@ async def test_launch_failure_never_exposes_unpublished_terminal(
         assert len(t.owner.record.terminals) == 1
         persisted = json.loads(t.owner.record_path.read_bytes())
         assert len(persisted["terminals"]) == 1
-        with pytest.raises(RuntimeError, match="Terminal cleanup refused: process_pending"):
-            await t.registry.launch(*t.args)
         t.create.assert_called_once()
         if close_fails and failure in {"publication", "verification"}:
             custody.verify_resources(t.owner.record)
@@ -229,15 +221,15 @@ async def test_cleanup_retains_evidence_for_missing_receipt(
     t.owner.record.terminals.clear()
     t.owner._publish()
     t.spawn.side_effect = OSError(errno.EAGAIN, "private diagnostics")
-    with pytest.raises(terminal_module._TmuxProcessStartError):
+    with pytest.raises(OmnigentError, match="unavailable_probe"):
         if operation == "close":
             await t.registry.close(*t.args[:3])
         elif operation == "cleanup":
             await t.registry.cleanup_conversation(t.args[0])
         else:
             await t.registry.shutdown()
-    assert t.registry.active_conversation_ids() == [t.args[0]]
-    assert t.registry.get_instance_lock(*t.args[:3]) is not None
+    assert t.registry.active_conversation_ids() == []
+    assert t.registry.get_instance_lock(*t.args[:3]) is None
     assert t.instance.running
     assert t.instance.private_dir.exists()
     assert t.process.poll() is None
@@ -328,13 +320,12 @@ async def test_foreign_terminal_socket_still_refuses_authoritative_operations(
 
 @pytest.mark.parametrize("operation", ["close", "cleanup", "shutdown"])
 @pytest.mark.parametrize("failure", ["eagain", "command", "timeout"])
-async def test_ordinary_cleanup_retains_live_terminal_until_retry(
+async def test_ordinary_cleanup_refuses_without_claiming_live_terminal(
     owned_terminal, monkeypatch: pytest.MonkeyPatch, operation: str, failure: str
 ) -> None:
     t = owned_terminal
     monkeypatch.setattr(custody, "_current_custody", None)
     await t.registry.launch(*t.args)
-    instance_lock = t.registry.get_instance_lock(*t.args[:3])
     environment = Mock()
     t.instance.os_env = environment
     if failure == "eagain":
@@ -345,48 +336,26 @@ async def test_ordinary_cleanup_retains_live_terminal_until_retry(
         )
     else:
         t.spawn.side_effect = asyncio.TimeoutError()
-    with pytest.raises((RuntimeError, asyncio.TimeoutError)):
+    with pytest.raises(OmnigentError):
         if operation == "close":
             await t.registry.close(*t.args[:3])
         elif operation == "cleanup":
             await t.registry.cleanup_conversation(t.args[0])
         else:
             await t.registry.shutdown()
-    assert t.registry.get(*t.args[:3]) is t.instance
-    assert t.registry.get_instance_lock(*t.args[:3]) is instance_lock
+    assert t.registry.get(*t.args[:3]) is None
+    assert t.registry.get_instance_lock(*t.args[:3]) is None
     assert t.instance.running
     assert t.instance.private_dir.exists()
     assert t.instance.socket_path.exists()
     assert t.process.poll() is None
     environment.close.assert_not_called()
 
-    async def killed():
-        t.process.terminate()
-        t.process.wait(timeout=5)
-        return b"", b""
 
-    t.spawn.side_effect = None
-    t.spawn.return_value = SimpleNamespace(returncode=0, communicate=AsyncMock(side_effect=killed))
-    assert await t.registry.close(*t.args[:3])
-    assert t.registry.get(*t.args[:3]) is None
-    assert t.registry.get_instance_lock(*t.args[:3]) is None
-    assert not t.instance.running
-    assert not t.instance.private_dir.exists()
-    environment.close.assert_called_once()
-
-
-async def test_failed_start_retains_terminal_until_explicit_cleanup(
+async def test_failed_start_preserves_resources_without_registration(
     owned_terminal, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import httpx
-
-    from omnigent.runner import app as runner_app
-    from omnigent.runner.resource_registry import (
-        CLAUDE_NATIVE_TERMINAL_ROLE,
-        SessionResourceRegistry,
-    )
-
-    from tests.runner.helpers import NullServerClient
+    from omnigent.runner.resource_registry import SessionResourceRegistry
 
     t = owned_terminal
     monkeypatch.setattr(custody, "_current_custody", None)
@@ -399,60 +368,18 @@ async def test_failed_start_retains_terminal_until_explicit_cleanup(
         return False
 
     monkeypatch.setattr(t.instance, "is_alive", exited)
-    t.spawn.side_effect = OSError(errno.EAGAIN, "synthetic resource exhaustion")
+    t.spawn.side_effect = OSError(errno.EAGAIN, "synthetic exhaustion")
     resources = SessionResourceRegistry(terminal_registry=t.registry)
-    for _attempt in range(2):
-        with pytest.raises(RuntimeError, match="could not start|process_pending"):
-            await resources.launch_required_terminal(
-                *t.args, resource_role=CLAUDE_NATIVE_TERMINAL_ROLE
-            )
-        assert t.registry.active_conversation_ids() == [t.args[0]]
-        assert t.registry.get_instance_lock(*t.args[:3]) is not None
-        assert resources.terminal_resource_role(t.args[0], "terminal_codex_main") is None
-        assert t.instance.private_dir.exists()
-        assert t.instance.socket_path.exists()
-        assert t.process.poll() is None
-        environment.close.assert_not_called()
-        t.create.assert_called_once()
-        with pytest.raises(RuntimeError, match="process_pending"):
-            t.registry.get(*t.args[:3])
-    sibling = TerminalInstance(
-        "bash", "other", t.instance.private_dir / "other.sock", t.instance.private_dir / "other"
-    )
-    sibling.close = AsyncMock()
-    t.registry._by_conversation[t.args[0]][("bash", "other")] = sibling
-    app = runner_app.create_runner_app(
-        terminal_registry=t.registry,
-        resource_registry=resources,
-        server_client=NullServerClient(),
-    )
-    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
-    path = f"/v1/sessions/{t.args[0]}/resources/terminals/terminal_codex_main"
-    async with httpx.AsyncClient(transport=transport, base_url="http://runner") as client:
-        foreign = await client.delete(
-            "/v1/sessions/foreign/resources/terminals/terminal_codex_main"
-        )
-        assert foreign.status_code == 404
-        healthy = await client.delete(
-            f"/v1/sessions/{t.args[0]}/resources/terminals/terminal_bash_other"
-        )
-        assert healthy.status_code == 200, healthy.text
-        sibling.close.assert_awaited_once()
-        refused = await client.delete(path)
-        assert refused.status_code == 500
-        assert refused.json()["error"]["code"] == "unavailable_probe"
-        assert t.process.poll() is None
-        assert t.instance.private_dir.exists()
-        environment.close.assert_not_called()
-        t.spawn.side_effect = None
-        completed = await client.delete(path)
-        assert completed.status_code == 200, completed.text
-        assert completed.json()["deleted"] is True
+    with pytest.raises(OmnigentError, match="unavailable_probe"):
+        await resources.launch_required_terminal(*t.args)
     assert t.registry.active_conversation_ids() == []
     assert t.registry.get_instance_lock(*t.args[:3]) is None
-    assert t.process.poll() is not None
-    assert not t.instance.private_dir.exists()
-    environment.close.assert_called_once()
+    assert t.registry.list_for_conversation(t.args[0]) == []
+    assert t.instance.private_dir.exists()
+    assert t.instance.socket_path.exists()
+    assert t.process.poll() is None
+    environment.close.assert_not_called()
+    t.create.assert_called_once()
 
 
 @pytest.mark.parametrize("route", ["session", "resources"])
@@ -473,7 +400,6 @@ async def test_session_cleanup_retains_supporting_resources_until_terminal_exits
         monkeypatch.setattr(custody, "_current_custody", None)
     await t.registry.launch(*t.args)
     before = t.owner.record_path.read_bytes()
-    instance_lock = t.registry.get_instance_lock(*t.args[:3])
     resources = SessionResourceRegistry(terminal_registry=t.registry)
     primary_dir = tmp_path / "primary"
     primary_dir.mkdir()
@@ -509,8 +435,8 @@ async def test_session_cleanup_retains_supporting_resources_until_terminal_exits
             assert refused.status_code == 500
             assert refused.json()["error"]["code"] == "unavailable_probe"
             assert "cleaned" not in refused.json()
-            assert t.registry.get(*t.args[:3]) is t.instance
-            assert t.registry.get_instance_lock(*t.args[:3]) is instance_lock
+            assert t.registry.get(*t.args[:3]) is None
+            assert t.registry.get_instance_lock(*t.args[:3]) is None
             assert resources.has_primary_env(t.args[0])
             assert (primary_dir / "workspace.txt").exists()
             assert skill.exists()
@@ -521,24 +447,6 @@ async def test_session_cleanup_retains_supporting_resources_until_terminal_exits
             primary.close.assert_not_called()
             cleanup_bridges.assert_not_awaited()
             manager.release.assert_not_awaited()
-
-            t.spawn.side_effect = None
-            completed = await client.delete(path)
-            assert completed.status_code == 200, completed.text
-            if route == "resources":
-                assert completed.json()["cleaned"] is True
-            assert t.registry.get(*t.args[:3]) is None
-            assert t.registry.get_instance_lock(*t.args[:3]) is None
-            assert not resources.has_primary_env(t.args[0])
-            assert not primary_dir.exists()
-            assert not skill.exists()
-            assert not bridge_dir.exists()
-            assert t.process.poll() is not None
-            if durable:
-                assert t.owner.record.terminals == []
-            primary.close.assert_called_once()
-            cleanup_bridges.assert_awaited_once()
-            manager.release.assert_awaited_once()
 
 
 @pytest.mark.parametrize("caller", ["reaper", "reset", "claude-native", "cursor-native"])
@@ -559,7 +467,6 @@ async def test_native_cleanup_refusal_preserves_dependents_and_deletion_events(
     t = owned_terminal
     await t.registry.launch(*t.args)
     receipt = t.owner.record_path.read_bytes()
-    instance_lock = t.registry.get_instance_lock(*t.args[:3])
     resources = SessionResourceRegistry(terminal_registry=t.registry)
     deleted = Mock()
     monkeypatch.setattr(tool_dispatch, "_publish_terminal_deleted_event", deleted)
@@ -576,9 +483,7 @@ async def test_native_cleanup_refusal_preserves_dependents_and_deletion_events(
     if caller in {"claude-native", "cursor-native"}:
         import importlib
 
-        bridge = importlib.import_module(
-            f"omnigent.harnesses.{caller.replace('-', '_')}.bridge"
-        )
+        bridge = importlib.import_module(f"omnigent.harnesses.{caller.replace('-', '_')}.bridge")
         monkeypatch.setattr(bridge, "kill_session", Mock())
         if caller == "claude-native":
             monkeypatch.setattr(
@@ -619,8 +524,8 @@ async def test_native_cleanup_refusal_preserves_dependents_and_deletion_events(
             with pytest.raises(OmnigentError) as refusal:
                 await cleanup()
             assert refusal.value.code == "unavailable_probe"
-        assert t.registry.get(*t.args[:3]) is t.instance
-        assert t.registry.get_instance_lock(*t.args[:3]) is instance_lock
+        assert t.registry.get(*t.args[:3]) is None
+        assert t.registry.get_instance_lock(*t.args[:3]) is None
         assert t.owner.record_path.read_bytes() == receipt
         assert t.instance.private_dir.exists()
         assert t.process.poll() is None
@@ -630,22 +535,12 @@ async def test_native_cleanup_refusal_preserves_dependents_and_deletion_events(
         assert captured["published"] == []
         assert captured["wakes"] == []
 
-        t.spawn.side_effect = None
-        await cleanup()
-        assert t.registry.get(*t.args[:3]) is None
-        assert t.registry.get_instance_lock(*t.args[:3]) is None
-        assert t.owner.record.terminals == []
-        assert t.process.poll() is not None
-        deleted.assert_called_once()
-        if caller == "reaper":
-            app_server.close.assert_awaited_once()
-            assert forwarder.cancelled()
     finally:
         forwarder.cancel()
         await asyncio.gather(forwarder, return_exceptions=True)
 
 
-async def test_native_reaper_skips_failed_launch_and_closes_healthy_session(
+async def test_native_reaper_closes_healthy_session_after_unregistered_launch_failure(
     owned_terminal, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from omnigent.runner import app as runner_app
@@ -661,13 +556,12 @@ async def test_native_reaper_skips_failed_launch_and_closes_healthy_session(
         t.instance, "is_alive", AsyncMock(side_effect=[True, asyncio.CancelledError])
     )
     t.spawn.side_effect = OSError(errno.EAGAIN, "synthetic resource exhaustion")
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(OmnigentError, match="unavailable_probe"):
         await resources.launch_auxiliary_terminal(
             *t.args, resource_role=CODEX_NATIVE_TERMINAL_ROLE
         )
-    assert t.instance.launch_failed
+    assert t.registry.list_for_conversation(t.args[0]) == []
     receipt = t.owner.record_path.read_bytes()
-    failed_lock = t.registry.get_instance_lock(*t.args[:3])
     healthy = TerminalInstance("codex", "main", tmp_path / "healthy.sock", tmp_path, running=True)
     healthy.launch = AsyncMock()
     healthy.is_alive = AsyncMock(return_value=True)
@@ -689,15 +583,50 @@ async def test_native_reaper_skips_failed_launch_and_closes_healthy_session(
     healthy.close.assert_awaited_once()
     assert t.registry.list_for_cleanup("conv_healthy") == []
     assert t.registry.get_instance_lock("conv_healthy", "codex", "main") is None
-    assert t.registry.list_for_cleanup(t.args[0])[0].instance is t.instance
-    assert t.registry.get_instance_lock(*t.args[:3]) is failed_lock
+    assert t.registry.list_for_conversation(t.args[0]) == []
+    assert t.registry.get_instance_lock(*t.args[:3]) is None
     assert t.owner.record_path.read_bytes() == receipt
     assert t.instance.private_dir.exists()
     assert t.process.poll() is None
-    with pytest.raises(RuntimeError, match="process_pending"):
-        await t.registry.launch(*t.args)
-    t.spawn.side_effect = None
-    assert await t.registry.close(*t.args[:3], expected=t.instance)
-    assert t.registry.list_for_cleanup(t.args[0]) == []
-    assert t.owner.record.terminals == []
-    assert t.process.poll() is not None
+
+
+@pytest.mark.parametrize("fails", [False, True])
+async def test_observed_exit_publishes_only_after_proven_cleanup(
+    owned_terminal, monkeypatch: pytest.MonkeyPatch, fails: bool
+) -> None:
+    from omnigent.errors import OmnigentError
+    from omnigent.runner.resource_registry import SessionResourceRegistry, TerminalLifecycle
+
+    t = owned_terminal
+    monkeypatch.setattr(custody, "_current_custody", None)
+    resources = SessionResourceRegistry(terminal_registry=t.registry)
+    resources._start_terminal_activity_watcher = Mock()
+    published = Mock()
+    resources.set_terminal_exit_publisher(published)
+    await resources.launch_required_terminal(*t.args)
+    environment = Mock()
+    t.instance.os_env = environment
+    if fails:
+        t.spawn.side_effect = OSError(errno.EAGAIN, "synthetic exhaustion")
+    call = resources._handle_terminal_exit(
+        session_id=t.args[0],
+        terminal_name="codex",
+        session_key="main",
+        lifecycle=TerminalLifecycle.REQUIRED,
+        instance=t.instance,
+    )
+    if fails:
+        with pytest.raises(OmnigentError) as refused:
+            await call
+        assert refused.value.code == "unavailable_probe"
+        published.assert_not_called()
+        environment.close.assert_not_called()
+        assert t.instance.private_dir.exists()
+        assert t.process.poll() is None
+    else:
+        await call
+        published.assert_called_once()
+        environment.close.assert_called_once()
+        assert t.process.poll() is not None
+    assert t.registry.list_for_conversation(t.args[0]) == []
+    assert t.registry.get_instance_lock(*t.args[:3]) is None

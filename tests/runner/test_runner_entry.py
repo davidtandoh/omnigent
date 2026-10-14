@@ -2501,11 +2501,13 @@ def test_install_crash_logging_is_idempotent() -> None:
     ("host_owns_global_cleanup", "expected_sweep_orphans"),
     [(True, False), (False, True)],
 )
+@pytest.mark.parametrize("terminal_failure", [False, True])
 async def test_runner_shutdown_closes_terminal_registry(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     host_owns_global_cleanup: bool,
     expected_sweep_orphans: bool,
+    terminal_failure: bool,
 ) -> None:
     """The --server local runner shuts down terminal-owned resources.
 
@@ -2515,10 +2517,28 @@ async def test_runner_shutdown_closes_terminal_registry(
     startup/shutdown hooks directly and verifies shutdown includes the
     TerminalRegistry, not just harness subprocesses and MCPs.
     """
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
     import omnigent.runner._entry as entry_mod
+    from omnigent.errors import OmnigentError
+    from omnigent.inner.terminal import TerminalInstance
+    from omnigent.runner.native import orchestration
+    from omnigent.terminals.registry import TerminalRegistry
+
+    closed = []
+    monkeypatch.setattr(orchestration, "_AUTO_CODEX_APP_SERVERS", {})
+    monkeypatch.setattr(orchestration, "_AUTO_FORWARDER_TASKS", {})
+    monkeypatch.setattr(orchestration, "_AUTO_OPENCODE_SERVERS", {})
+    for session in ("failed", "healthy"):
+
+        async def close_server(session=session):
+            closed.append((session, "server"))
+
+        orchestration._AUTO_CODEX_APP_SERVERS[session] = SimpleNamespace(close=close_server)
 
     process_managers: list[_FakeProcessManager] = []
-    terminal_registries: list[_TrackingTerminalRegistry] = []
+    terminal_registries: list[TerminalRegistry] = []
     mcp_managers: list[_TrackingMcpManager] = []
     async_clients: list[_TrackingAsyncClient] = []
     sync_clients: list[_TrackingSyncClient] = []
@@ -2536,16 +2556,36 @@ async def test_runner_shutdown_closes_terminal_registry(
             assert sweep_orphans is expected_sweep_orphans
             self.started = True
 
+        async def release(self, session_id: str) -> None:
+            closed.append((session_id, "process"))
+
         async def shutdown(self) -> None:
             self.shutdown_called = True
 
     def _terminal_registry_factory(
         *,
         conversation_link_base_url: str | None = None,
-    ) -> _TrackingTerminalRegistry:
-        registry = _TrackingTerminalRegistry(
-            conversation_link_base_url=conversation_link_base_url,
-        )
+    ) -> TerminalRegistry:
+        class Registry(TerminalRegistry):
+            shutdown_called = False
+
+            async def shutdown(self, **kwargs):
+                self.shutdown_called = True
+                await super().shutdown(**kwargs)
+
+        registry = Registry(conversation_link_base_url=conversation_link_base_url)
+        for session in ("failed", "healthy"):
+            instance = TerminalInstance(
+                "codex", "main", tmp_path / session, tmp_path, running=True
+            )
+
+            async def close_terminal(session=session):
+                closed.append((session, "terminal"))
+                if session == "failed" and terminal_failure:
+                    raise OSError("synthetic exhaustion")
+
+            instance.close = AsyncMock(side_effect=close_terminal)
+            registry._by_conversation[session] = {("codex", "main"): instance}
         terminal_registries.append(registry)
         return registry
 
@@ -2596,16 +2636,39 @@ async def test_runner_shutdown_closes_terminal_registry(
     )
 
     app = entry_mod.create_app()
-    # starlette 1.x removed Router.startup/shutdown; drive the lifespan instead.
+    if terminal_failure:
+        with pytest.raises(OmnigentError, match="unavailable_probe"):
+            async with app.router.lifespan_context(app):
+                pass
+        assert closed == [
+            ("failed", "terminal"),
+            ("healthy", "terminal"),
+            ("healthy", "server"),
+            ("healthy", "process"),
+        ]
+        assert "failed" in orchestration._AUTO_CODEX_APP_SERVERS
+        assert not process_managers[0].shutdown_called
+        assert terminal_registries[0].active_conversation_ids() == []
+        return
     async with app.router.lifespan_context(app):
         pass
-
+    assert closed == [
+        ("failed", "terminal"),
+        ("failed", "server"),
+        ("failed", "process"),
+        ("healthy", "terminal"),
+        ("healthy", "server"),
+        ("healthy", "process"),
+    ]
     assert process_managers and process_managers[0].started
     assert process_managers[0].shutdown_called
     assert terminal_sweeps == ([] if host_owns_global_cleanup else [1])
     assert bridge_sweeps == ([] if host_owns_global_cleanup else [1])
     assert terminal_registries and terminal_registries[0].shutdown_called
-    assert terminal_registries[0].conversation_link_base_url == "http://runner.test"
+    assert (
+        terminal_registries[0].conversation_link_for_id("session")
+        == "http://runner.test/c/session"
+    )
     # In Omnigent mode (P1) the entry point passes mcp_manager=None; MCP calls are
     # routed per-session through ProxyMcpManager (runner/proxy_mcp_manager.py)
     # instead of a shared RunnerMcpManager. No RunnerMcpManager is created on
