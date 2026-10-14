@@ -1578,9 +1578,11 @@ async def test_liveness_probe_before_first_watcher_tick_still_reports_exit(
         exits.append((instance.last_exit_status(), instance.last_pane_text()))
 
     if watcher == "threaded":
+        stop_event = threading.Event()
+        instance._idle_stop_event = stop_event
         await asyncio.to_thread(
             instance._idle_watch_loop_threaded,
-            threading.Event(),
+            stop_event,
             on_exit=on_exit,
             poll_interval_s=0,
         )

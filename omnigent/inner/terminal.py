@@ -2206,11 +2206,11 @@ class TerminalInstance:
             if stop_event.wait(interval):
                 return
             lock = self.operation_lock
-            if lock is not None and not lock.acquire(blocking=False):
-                continue
-            try:
-                if not self.running:
-                    break
+            session_id = self.lifecycle_trace.session_id
+            was_running = self.running
+            snapshot = None
+            pane_dead = False
+            if was_running:
                 try:
                     snapshot = self._capture_pane_for_idle_or_none()
                 except _TmuxProcessStartError as exc:
@@ -2239,61 +2239,87 @@ class TerminalInstance:
                     consecutive_capture_failures += 1
                     if consecutive_capture_failures < _IDLE_EXIT_FAILURE_THRESHOLD:
                         continue
-                    self._log_tmux_unavailable(
-                        consecutive_capture_failures, exit_callback_present=on_exit is not None
-                    )
-                    self.running = False
-                    break
+                else:
+                    consecutive_capture_failures = 0
+                    self._probe_failures.clear()
+                    self._remember_pane_snapshot(snapshot)
+                    pane_dead = self._pane_is_dead()
+                    if pane_dead is None:
+                        if stop_event.wait(_TMUX_PROBE_START_FAILURE_BACKOFF_SECONDS):
+                            return
+                        continue
+            # Probes do not exclude lifecycle operations. Discard observations
+            # from a stopped watcher or an owner that changed during the probe.
+            if stop_event.is_set() or self._idle_stop_event is not stop_event:
+                return
+            if (
+                self.operation_lock is not lock
+                or self.lifecycle_trace.session_id != session_id
+                or self.running != was_running
+            ):
                 consecutive_capture_failures = 0
-                self._probe_failures.clear()
-                self._remember_pane_snapshot(snapshot)
-                pane_dead = self._pane_is_dead()
-                if pane_dead is None:
-                    if stop_event.wait(_TMUX_PROBE_START_FAILURE_BACKOFF_SECONDS):
-                        return
+                continue
+            if not was_running or snapshot is None or pane_dead:
+                if lock is not None and not lock.acquire(blocking=False):
                     continue
-                if pane_dead:
-                    self._capture_exit_snapshot_sync()
-                    # Retained dead panes must release attached clients and report
-                    # exit rather than appearing to be idle agents.
-                    if self.keep_alive_after_exit:
-                        with contextlib.suppress(Exception):
-                            self._tmux_output_sync("detach-client", "-s", self.tmux_target)
-                    self.running = False
+                try:
+                    # Recheck under the owner lock before committing the exit.
+                    if stop_event.is_set() or self._idle_stop_event is not stop_event:
+                        return
+                    if (
+                        self.operation_lock is not lock
+                        or self.lifecycle_trace.session_id != session_id
+                        or self.running != was_running
+                    ):
+                        consecutive_capture_failures = 0
+                        continue
+                    if was_running:
+                        if snapshot is None:
+                            self._log_tmux_unavailable(
+                                consecutive_capture_failures,
+                                exit_callback_present=on_exit is not None,
+                            )
+                        elif pane_dead:
+                            self._capture_exit_snapshot_sync()
+                            # Release attached clients of retained dead panes.
+                            if self.keep_alive_after_exit:
+                                with contextlib.suppress(Exception):
+                                    self._tmux_output_sync("detach-client", "-s", self.tmux_target)
+                        self.running = False
                     break
-                # Per-tick out-of-band status hook (e.g. claude-native reading
-                # Claude's sessions/<pid>.json). Fired after the exit checks so
-                # it never runs for a dead pane, and before the pane diff so an
-                # authoritative file status can preempt the PTY-derived edge.
-                if on_tick is not None and not self._fire_watch_callback(on_tick, "tick"):
-                    return
-                # A pane change that lands within the recent-interaction window
-                # is a client-driven repaint (attach/detach reflow, focus,
-                # mouse, keystroke — stamped via note_client_interaction), not
-                # agent output, so the detector discounts it.
-                suppress = (
-                    time.monotonic() - self._last_client_interaction_at
-                ) < _CLIENT_INTERACTION_WINDOW_SECONDS
-                idle_fired = detector.tick(snapshot, suppress_activity=suppress)
-                # Activity edge first: a tick can both change the pane and
-                # (much later) cross the idle threshold, but never both in
-                # the same tick — a change resets the idle timer.
-                if (
-                    on_activity is not None
-                    and detector.changed_this_tick
-                    and not self._fire_watch_callback(on_activity, "activity")
-                ):
-                    return
-                if (
-                    idle_fired
-                    and on_idle is not None
-                    and not self._fire_watch_callback(on_idle, "idle")
-                ):
-                    return
+                finally:
+                    if lock is not None:
+                        lock.release()
+            # Per-tick out-of-band status hook (e.g. claude-native reading
+            # Claude's sessions/<pid>.json). Fired after the exit checks so
+            # it never runs for a dead pane, and before the pane diff so an
+            # authoritative file status can preempt the PTY-derived edge.
+            if on_tick is not None and not self._fire_watch_callback(on_tick, "tick"):
+                return
+            # A pane change that lands within the recent-interaction window
+            # is a client-driven repaint (attach/detach reflow, focus,
+            # mouse, keystroke — stamped via note_client_interaction), not
+            # agent output, so the detector discounts it.
+            suppress = (
+                time.monotonic() - self._last_client_interaction_at
+            ) < _CLIENT_INTERACTION_WINDOW_SECONDS
+            idle_fired = detector.tick(snapshot, suppress_activity=suppress)
+            # Activity edge first: a tick can both change the pane and
+            # (much later) cross the idle threshold, but never both in
+            # the same tick — a change resets the idle timer.
+            if (
+                on_activity is not None
+                and detector.changed_this_tick
+                and not self._fire_watch_callback(on_activity, "activity")
+            ):
+                return
+            if (
+                idle_fired
+                and on_idle is not None
+                and not self._fire_watch_callback(on_idle, "idle")
+            ):
+                return
 
-            finally:
-                if lock is not None:
-                    lock.release()
         if on_exit is not None:
             self._fire_watch_callback(on_exit, "exit")
 

@@ -403,6 +403,187 @@ async def test_close_and_relaunch_share_exclusion(
     replacement.close.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["close", "relaunch", "transfer"])
+@pytest.mark.parametrize("pane_dead", [False, True])
+async def test_watcher_probe_does_not_exclude_lifecycle_operations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, pane_dead: bool
+) -> None:
+    from unittest.mock import Mock
+
+    from omnigent.inner import terminal as terminal_mod
+
+    registry = TerminalRegistry()
+    instance = TerminalInstance(
+        "claude", "main", tmp_path / "old" / "tmux.sock", tmp_path / "old", running=True
+    )
+    lock = threading.Lock()
+    instance.operation_lock = lock
+    instance.lifecycle_trace.transfer_session("source")
+    registry._by_conversation["source"] = {("claude", "main"): instance}
+    registry._instance_locks[("source", "claude", "main")] = lock
+    instance._tmux = AsyncMock()
+    entered = threading.Event()
+    release = threading.Event()
+    next_probe = threading.Event()
+    finish = threading.Event()
+    probes = 0
+
+    def probe() -> bool:
+        nonlocal probes
+        probes += 1
+        if probes == 1:
+            entered.set()
+            assert release.wait(3)
+        else:
+            next_probe.set()
+            assert finish.wait(3)
+        return pane_dead
+
+    monkeypatch.setattr(instance, "_capture_pane_for_idle_or_none", lambda: "pane")
+    monkeypatch.setattr(instance, "_pane_is_dead", probe)
+    snapshot = Mock()
+    monkeypatch.setattr(instance, "_capture_exit_snapshot_sync", snapshot)
+    # Exercise close's existing bounded-join path while the probe is paused.
+    monkeypatch.setattr(terminal_mod, "_IDLE_WATCHER_JOIN_TIMEOUT_S", 0)
+    exited = Mock()
+    instance.start_idle_watcher_thread(on_exit=exited, poll_interval_s=0.001)
+    watcher = instance._idle_thread
+    assert watcher is not None
+    replacement = TerminalInstance(
+        "claude", "main", tmp_path / "new.sock", tmp_path / "new", running=True
+    )
+    replacement.launch = AsyncMock()
+    replacement.is_alive = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        registry_mod,
+        "create_terminal_instance",
+        Mock(return_value=TerminalCreateResult(replacement, tmp_path)),
+    )
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        if operation == "transfer":
+            assert registry.transfer("source", "destination", "claude", "main")
+            assert registry.get("destination", "claude", "main") is instance
+            assert registry.get_instance_lock("destination", "claude", "main") is lock
+        elif operation == "relaunch":
+            instance.is_alive = AsyncMock(return_value=False)
+            assert (
+                await registry.launch(
+                    "source", "claude", "main", TerminalEnvSpec(command="claude")
+                )
+                is replacement
+            )
+        else:
+            assert await registry.close("source", "claude", "main", expected=instance)
+            assert registry.get("source", "claude", "main") is None
+        release.set()
+        if operation == "transfer":
+            assert await asyncio.to_thread(next_probe.wait, 3)
+            assert instance.running
+        else:
+            await asyncio.to_thread(watcher.join, 3)
+            assert not watcher.is_alive()
+            assert not instance.running
+            instance._tmux.assert_awaited_once_with("kill-server")
+        exited.assert_not_called()
+        snapshot.assert_not_called()
+        assert not lock.locked()
+    finally:
+        instance._stop_idle_watcher_thread()
+        release.set()
+        finish.set()
+        await asyncio.to_thread(watcher.join, 3)
+
+
+@pytest.mark.asyncio
+async def test_watcher_exit_transition_keeps_lifecycle_exclusion(tmp_path: Path) -> None:
+    registry = TerminalRegistry()
+    instance = TerminalInstance("claude", "main", tmp_path / "tmux.sock", tmp_path, running=True)
+    lock = threading.Lock()
+    instance.operation_lock = lock
+    registry._by_conversation["source"] = {("claude", "main"): instance}
+    registry._instance_locks[("source", "claude", "main")] = lock
+    entered = threading.Event()
+    release = threading.Event()
+    exited = threading.Event()
+
+    def capture_exit() -> None:
+        entered.set()
+        assert release.wait(3)
+
+    instance._capture_pane_for_idle_or_none = lambda: "pane"
+    instance._pane_is_dead = lambda: True
+    instance._capture_exit_snapshot_sync = capture_exit
+    instance.start_idle_watcher_thread(on_exit=exited.set, poll_interval_s=0.001)
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        with pytest.raises(RuntimeError, match="owner_busy"):
+            await registry.close("source", "claude", "main")
+        with pytest.raises(RuntimeError, match="owner_busy"):
+            await registry.launch("source", "claude", "main", TerminalEnvSpec(command="claude"))
+        with pytest.raises(RuntimeError, match="owner_busy"):
+            registry.transfer("source", "destination", "claude", "main")
+        assert registry.get("source", "claude", "main") is instance
+        assert registry.get("destination", "claude", "main") is None
+        release.set()
+        assert await asyncio.to_thread(exited.wait, 3)
+        assert not instance.running
+        assert not lock.locked()
+    finally:
+        release.set()
+        await asyncio.to_thread(instance._stop_idle_watcher_thread)
+
+
+@pytest.mark.asyncio
+async def test_watcher_exit_defers_to_an_in_progress_close(tmp_path: Path) -> None:
+    registry = TerminalRegistry()
+    instance = TerminalInstance("claude", "main", tmp_path / "tmux.sock", tmp_path, running=True)
+    lock = threading.Lock()
+    instance.operation_lock = lock
+    registry._by_conversation["source"] = {("claude", "main"): instance}
+    registry._instance_locks[("source", "claude", "main")] = lock
+    closing = asyncio.Event()
+    release_close = asyncio.Event()
+    reprobed = threading.Event()
+    exited = threading.Event()
+    probes = 0
+    original_close = instance.close
+
+    async def close() -> None:
+        closing.set()
+        await release_close.wait()
+        await original_close()
+
+    def probe() -> bool:
+        nonlocal probes
+        probes += 1
+        if probes > 1:
+            reprobed.set()
+        return True
+
+    instance.close = close
+    instance._tmux = AsyncMock()
+    instance._capture_pane_for_idle_or_none = lambda: "pane"
+    instance._pane_is_dead = probe
+    task = asyncio.create_task(registry.close("source", "claude", "main"))
+    try:
+        await asyncio.wait_for(closing.wait(), 3)
+        instance.start_idle_watcher_thread(on_exit=exited.set, poll_interval_s=0.001)
+        assert await asyncio.to_thread(reprobed.wait, 3)
+        assert instance.running
+        assert not exited.is_set()
+        release_close.set()
+        assert await task
+        assert not instance.running
+        assert not exited.is_set()
+        assert registry.get("source", "claude", "main") is None
+    finally:
+        release_close.set()
+        await task
+        await asyncio.to_thread(instance._stop_idle_watcher_thread)
+
+
 def test_transfer_moves_terminal_without_closing_tmux(tmp_path: Path) -> None:
     """
     Terminal transfer changes ownership without touching the instance.
