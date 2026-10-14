@@ -7518,6 +7518,10 @@ def create_runner_app(
         for session_id in list(_session_histories):
             if _is_native_harness(session_id):
                 continue
+            # The old relay can consume completion before persisting idle.
+            # SDK sessions have no status poller to reassert it after reconnect.
+            if _native_pane_status.get(session_id) == "idle":
+                _publish_turn_status(session_id, "idle")
             try:
                 after_id = _last_server_item_id.get(session_id)
                 all_new: list[_JsonObject] = []
