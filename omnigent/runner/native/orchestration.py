@@ -192,19 +192,33 @@ class _CodexNativeModelOptionsNotReady(RuntimeError):
     """Raised when Codex model options are requested before bridge startup."""
 
 
-def _codex_native_launch_session_ids(session_id: str) -> list[str]:
-    """Resolve registered Codex launches through their existing active bridge records."""
+def _codex_native_active_session_id(launch_session_id: str) -> str:
+    """Resolve a Codex launch's active session from its existing bridge record."""
     from omnigent.harnesses.codex_native.bridge import bridge_dir_for_bridge_id, read_bridge_state
 
-    launches = []
-    for launch_session_id in _AUTO_CODEX_APP_SERVERS:
-        if launch_session_id == session_id:
-            launches.append(launch_session_id)
-            continue
-        state = read_bridge_state(bridge_dir_for_bridge_id(launch_session_id))
-        if state is not None and state.session_id == session_id:
-            launches.append(launch_session_id)
-    return launches
+    state = read_bridge_state(bridge_dir_for_bridge_id(launch_session_id))
+    return state.session_id if state is not None else launch_session_id
+
+
+def _codex_native_launch_session_ids(session_id: str) -> list[str]:
+    """Resolve registered Codex launches through their existing active bridge records."""
+    return [
+        launch_session_id
+        for launch_session_id in _AUTO_CODEX_APP_SERVERS
+        if _codex_native_active_session_id(launch_session_id) == session_id
+    ]
+
+
+def _forwarder_cancellation_refusal(exc: BaseException) -> OmnigentError | None:
+    """Read a named refusal through nested cancellation exceptions."""
+    current: BaseException | None = exc
+    while current is not None:
+        if isinstance(current, asyncio.CancelledError) and current.args:
+            refusal = current.args[0]
+            if isinstance(refusal, OmnigentError):
+                return refusal
+        current = current.__context__
+    return None
 
 
 async def _cancel_auto_forwarder_task(
@@ -223,7 +237,9 @@ async def _cancel_auto_forwarder_task(
     :param session_id: Session/conversation id, e.g. ``"conv_abc123"``.
     :returns: None.
     """
-    launch_session_ids = dict.fromkeys([session_id, *_codex_native_launch_session_ids(session_id)])
+    launch_session_ids = _codex_native_launch_session_ids(session_id)
+    if session_id not in _AUTO_CODEX_APP_SERVERS:
+        launch_session_ids.append(session_id)
     for launch_session_id in launch_session_ids:
         task = _AUTO_FORWARDER_TASKS.pop(launch_session_id, None)
         if task is None or task.done():
@@ -257,8 +273,11 @@ async def teardown_codex_native_app_server(session_id: str) -> None:
     :param session_id: Session/conversation id, e.g. ``"conv_abc123"``.
     :returns: None.
     """
-    for launch_session_id in _codex_native_launch_session_ids(session_id):
-        await _cancel_auto_forwarder_task(launch_session_id)
+    launch_session_ids = _codex_native_launch_session_ids(session_id)
+    if not launch_session_ids:
+        return
+    await _cancel_auto_forwarder_task(session_id)
+    for launch_session_id in launch_session_ids:
         leftover_app_server = _AUTO_CODEX_APP_SERVERS.pop(launch_session_id, None)
         if leftover_app_server is not None:
             with contextlib.suppress(Exception):
@@ -288,7 +307,7 @@ async def teardown_all_codex_native_app_servers() -> None:
     """
     for session_id in list(_AUTO_CODEX_APP_SERVERS):
         with contextlib.suppress(Exception):
-            await teardown_codex_native_app_server(session_id)
+            await teardown_codex_native_app_server(_codex_native_active_session_id(session_id))
 
 
 async def teardown_opencode_native_server(session_id: str) -> None:
@@ -1938,7 +1957,10 @@ async def _supervise_opencode_forwarder(
     try:
         await forwarder.run()
     except asyncio.CancelledError as exc:
-        preserve_dependencies = bool(exc.args and isinstance(exc.args[0], OmnigentError))
+        refusal = _forwarder_cancellation_refusal(exc)
+        preserve_dependencies = refusal is not None
+        if refusal is not None:
+            raise asyncio.CancelledError(refusal) from exc
         raise
     finally:
         if not preserve_dependencies:
@@ -6198,7 +6220,10 @@ async def _codex_discover_thread_and_forward(
         )
     except asyncio.CancelledError as exc:
         cancelled = True
-        preserve_dependencies = bool(exc.args and isinstance(exc.args[0], OmnigentError))
+        refusal = _forwarder_cancellation_refusal(exc)
+        preserve_dependencies = refusal is not None
+        if refusal is not None:
+            raise asyncio.CancelledError(refusal) from exc
         raise
     except OmnigentError as exc:
         if exc.code == "native_rotation_refused":
@@ -6289,7 +6314,10 @@ async def _codex_forward_known_thread(
         )
     except asyncio.CancelledError as exc:
         cancelled = True
-        preserve_dependencies = bool(exc.args and isinstance(exc.args[0], OmnigentError))
+        refusal = _forwarder_cancellation_refusal(exc)
+        preserve_dependencies = refusal is not None
+        if refusal is not None:
+            raise asyncio.CancelledError(refusal) from exc
         raise
     except OmnigentError as exc:
         if exc.code == "native_rotation_refused":

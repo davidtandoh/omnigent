@@ -2641,6 +2641,16 @@ def test_runner_shutdown_closes_terminal_registry(
             instance.close = AsyncMock(side_effect=close_terminal)
             instance.is_alive = AsyncMock(return_value=True)
             registry._by_conversation[session] = {(terminal_name, "main"): instance}
+            if rotated:
+                helper = TerminalInstance(
+                    "shell", "helper", tmp_path / session, tmp_path, running=True
+                )
+
+                async def close_helper(session=session):
+                    closed.append((session, "helper"))
+
+                helper.close = AsyncMock(side_effect=close_helper)
+                registry._by_conversation[session][("shell", "helper")] = helper
         terminal_registries.append(registry)
         return registry
 
@@ -2752,6 +2762,15 @@ def test_runner_shutdown_closes_terminal_registry(
                     assert session in orchestration._AUTO_FORWARDER_TASKS
                     assert active_session not in orchestration._AUTO_FORWARDER_TASKS
 
+    helper_cleanup = (
+        [
+            (session, resource)
+            for session in ("failed", "healthy")
+            for resource in ("helper", "process")
+        ]
+        if rotated
+        else []
+    )
     if terminal_failure:
         with pytest.raises(OmnigentError, match="unavailable_probe") as refused:
             asyncio.run(run_lifespan())
@@ -2762,7 +2781,7 @@ def test_runner_shutdown_closes_terminal_registry(
         assert (tmp_path / "failed" / "turn_router").exists()
         assert not (tmp_path / "healthy" / "router").exists()
         assert not (tmp_path / "healthy" / "turn_router").exists()
-        assert closed == [
+        assert closed == helper_cleanup + [
             ("failed", "terminal"),
             ("healthy", "terminal"),
             ("healthy", "server"),
@@ -2778,7 +2797,7 @@ def test_runner_shutdown_closes_terminal_registry(
     for session in ("failed", "healthy"):
         assert not (tmp_path / session / "router").exists()
         assert not (tmp_path / session / "turn_router").exists()
-    assert closed == [
+    assert closed == helper_cleanup + [
         ("failed", "terminal"),
         ("failed", "server"),
         (active_sessions["failed"], "process"),

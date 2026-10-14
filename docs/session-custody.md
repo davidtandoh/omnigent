@@ -47,7 +47,10 @@ before the event loop exits. Both Codex forwarder cleanup paths preserve the
 app-server and routers when cancellation carries that named refusal. After a
 Codex rotation, shutdown resolves the owning launch through the existing bridge
 record. OpenCode also preserves its server when cancellation carries a refusal.
-Successful terminal shutdown still closes the associated native dependencies.
+A helper terminal left in the launch session cannot authorize cleanup of the
+rotated terminal's dependencies. Nested cleanup and repeated cancellation retain
+the named refusal. Successful terminal shutdown still closes the associated
+native dependencies.
 
 A kill-failed live terminal becomes unregistered without claimed ownership.
 Its private directory and dependent resources remain intact on refusal. This

@@ -5157,3 +5157,128 @@ async def test_codex_tui_recovery_preserves_live_control_plane(
             await forwarder
         native._AUTO_CODEX_APP_SERVERS.pop(session_id, None)
         native._AUTO_FORWARDER_TASKS.pop(session_id, None)
+
+
+@pytest.mark.parametrize("forwarder_path", ["known", "discovery"])
+@pytest.mark.parametrize("termination_refused", [False, True])
+def test_codex_shutdown_refusal_survives_cancelled_usage_flush(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    forwarder_path: str,
+    termination_refused: bool,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from omnigent import cli_auth
+    from omnigent.errors import OmnigentError
+    from omnigent.harnesses.codex_native import forwarder
+    from omnigent.runner import _entry
+    from omnigent.runner.native import orchestration
+
+    started = asyncio.Event()
+    flushing = asyncio.Event()
+    flush_cancelled = []
+    tasks = []
+    refusal = OmnigentError("Terminal cleanup refused", code="unavailable_probe")
+    server = SimpleNamespace(close=AsyncMock())
+    router = AsyncMock()
+    turn_router = AsyncMock()
+
+    async def events():
+        started.set()
+        await asyncio.Event().wait()
+        yield {}
+
+    client = SimpleNamespace(iter_events=events, close=AsyncMock())
+
+    async def subscribe(*_args, usage_coalescer, **_kwargs):
+        usage_coalescer.record({"tokenUsage": {"total": {"inputTokens": 1000}}})
+        await asyncio.Event().wait()
+
+    async def post(request):
+        if request.method == "POST":
+            payload = json.loads(request.content)
+            assert payload["type"] == "external_session_usage"
+            flushing.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                flush_cancelled.append(True)
+                raise
+        return httpx.Response(200, json={})
+
+    @contextlib.asynccontextmanager
+    async def open_client(base_url, **_kwargs):
+        async with httpx.AsyncClient(
+            base_url=base_url, transport=httpx.MockTransport(post)
+        ) as ap_client:
+            yield ap_client
+
+    monkeypatch.setenv("RUNNER_SERVER_URL", "http://runner.test")
+    monkeypatch.setattr(_entry, "_make_auth_token_factory", lambda: None)
+    monkeypatch.setattr(cli_auth, "open_server_client", open_client)
+    monkeypatch.setattr(forwarder, "_seed_mcp_startup_round", AsyncMock(return_value=None))
+    monkeypatch.setattr(forwarder, "_subscribe_until_ready", subscribe)
+    monkeypatch.setattr(forwarder, "_drive_side_chat_requests", AsyncMock())
+    monkeypatch.setattr(forwarder, "wait_for_thread_started", AsyncMock(return_value="thread"))
+    monkeypatch.setattr(orchestration, "_AUTO_CODEX_APP_SERVERS", {"session": server})
+    monkeypatch.setattr(orchestration, "_AUTO_FORWARDER_TASKS", {})
+    monkeypatch.setattr(orchestration, "_AUTO_FORWARDER_CANCEL_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(orchestration, "_shutdown_session_router_async", router)
+    monkeypatch.setattr(orchestration, "_shutdown_session_turn_router_async", turn_router)
+    monkeypatch.setattr(codex_native_bridge, "bridge_dir_for_bridge_id", lambda _session: tmp_path)
+
+    async def run():
+        if forwarder_path == "known":
+            operation = orchestration._codex_forward_known_thread(
+                session_id="session",
+                bridge_dir=tmp_path,
+                codex_ws_url="ws://runner.test",
+                thread_id="thread",
+                client=client,
+            )
+        else:
+            operation = orchestration._codex_discover_thread_and_forward(
+                session_id="session",
+                bridge_dir=tmp_path,
+                codex_ws_url="ws://runner.test",
+                codex_home=tmp_path,
+                workspace=str(tmp_path),
+                event_client=client,
+                app_server=server,
+                routing_summary="synthetic",
+            )
+        task = asyncio.create_task(operation)
+        tasks.append(task)
+        orchestration._register_auto_forwarder_task("session", task)
+        await asyncio.wait_for(started.wait(), timeout=2)
+        await orchestration._cancel_auto_forwarder_task(
+            "session",
+            refusal=refusal if termination_refused else None,
+        )
+        assert flushing.is_set()
+        assert not task.done()
+        if termination_refused:
+            raise refusal
+
+    if termination_refused:
+        with pytest.raises(OmnigentError) as raised:
+            asyncio.run(run())
+        assert raised.value is refusal
+        server.close.assert_not_awaited()
+        router.assert_not_awaited()
+        turn_router.assert_not_awaited()
+        assert orchestration._AUTO_CODEX_APP_SERVERS["session"] is server
+    else:
+        asyncio.run(run())
+        server.close.assert_awaited_once()
+        router.assert_awaited_once()
+        turn_router.assert_awaited_once()
+        assert not orchestration._AUTO_CODEX_APP_SERVERS
+    assert flush_cancelled == [True]
+    assert tasks[0].cancelled()
+    with pytest.raises(asyncio.CancelledError) as cancelled:
+        tasks[0].result()
+    if termination_refused:
+        assert cancelled.value.args == (refusal,)
