@@ -2211,9 +2211,7 @@ class TerminalInstance:
                 continue
             try:
                 if not self.running:
-                    if on_exit is not None:
-                        self._fire_watch_callback(on_exit, "exit")
-                    return
+                    break
                 try:
                     snapshot = self._capture_pane_for_idle_or_none()
                 except _TmuxProcessStartError as exc:
@@ -2246,9 +2244,7 @@ class TerminalInstance:
                         consecutive_capture_failures, exit_callback_present=on_exit is not None
                     )
                     self.running = False
-                    if on_exit is not None:
-                        self._fire_watch_callback(on_exit, "exit")
-                    return
+                    break
                 consecutive_capture_failures = 0
                 self._probe_failures.clear()
                 self._remember_pane_snapshot(snapshot)
@@ -2265,9 +2261,7 @@ class TerminalInstance:
                         with contextlib.suppress(Exception):
                             self._tmux_output_sync("detach-client", "-s", self.tmux_target)
                     self.running = False
-                    if on_exit is not None:
-                        self._fire_watch_callback(on_exit, "exit")
-                    return
+                    break
                 # Per-tick out-of-band status hook (e.g. claude-native reading
                 # Claude's sessions/<pid>.json). Fired after the exit checks so
                 # it never runs for a dead pane, and before the pane diff so an
@@ -2301,6 +2295,8 @@ class TerminalInstance:
             finally:
                 if lock is not None:
                     lock.release()
+        if on_exit is not None:
+            self._fire_watch_callback(on_exit, "exit")
 
     def _capture_pane_for_idle_or_none(self) -> str | None:
         """

@@ -435,6 +435,66 @@ def test_transfer_moves_terminal_without_closing_tmux(tmp_path: Path) -> None:
     assert reg.active_conversation_ids() == ["conv_new"]
 
 
+@pytest.mark.parametrize("operation", ["source_close", "destination_launch"])
+async def test_transfer_refuses_in_flight_terminal_operation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    from unittest.mock import Mock
+
+    registry = TerminalRegistry()
+    source = TerminalInstance("claude", "main", tmp_path / "source.sock", tmp_path, running=True)
+    source_lock = threading.Lock()
+    registry._by_conversation["source"] = {("claude", "main"): source}
+    registry._instance_locks[("source", "claude", "main")] = source_lock
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def pause(**_kwargs) -> None:
+        entered.set()
+        await release.wait()
+
+    source.close = AsyncMock(side_effect=pause)
+    destination = TerminalInstance(
+        "claude", "main", tmp_path / "destination.sock", tmp_path, running=True
+    )
+    destination.launch = AsyncMock(side_effect=pause)
+    destination.is_alive = AsyncMock(return_value=True)
+    destination.close = AsyncMock()
+    monkeypatch.setattr(
+        registry_mod,
+        "create_terminal_instance",
+        Mock(return_value=TerminalCreateResult(destination, tmp_path)),
+    )
+    task = asyncio.create_task(
+        registry.close("source", "claude", "main", expected=source)
+        if operation == "source_close"
+        else registry.launch("destination", "claude", "main", TerminalEnvSpec(command="claude"))
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        destination_lock = registry.get_instance_lock("destination", "claude", "main")
+        with pytest.raises(RuntimeError, match="owner_busy"):
+            registry.transfer("source", "destination", "claude", "main")
+        assert registry.get("source", "claude", "main") is source
+        assert registry.get("destination", "claude", "main") is None
+        assert registry.get_instance_lock("source", "claude", "main") is source_lock
+        assert registry.get_instance_lock("destination", "claude", "main") is destination_lock
+    finally:
+        release.set()
+        await task
+    if operation == "source_close":
+        assert registry.active_conversation_ids() == []
+        assert not registry.transfer("source", "destination", "claude", "main")
+    else:
+        assert registry.get("destination", "claude", "main") is destination
+        assert await registry.close("destination", "claude", "main")
+        assert registry.transfer("source", "destination", "claude", "main")
+        assert registry.get("destination", "claude", "main") is source
+        assert registry.get_instance_lock("destination", "claude", "main") is source_lock
+        source.close.assert_not_awaited()
+    assert not source_lock.locked()
+
+
 def test_transfer_rejects_target_collision_without_moving_source(tmp_path: Path) -> None:
     """
     Transfer refuses to overwrite an existing target terminal.

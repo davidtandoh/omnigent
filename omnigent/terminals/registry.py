@@ -516,9 +516,20 @@ class TerminalRegistry:
             entry with the same terminal name and session key.
         """
         with self._lock:
-            return self._transfer_locked(
-                source_conversation_id, target_conversation_id, terminal_name, session_key
-            )
+            acquired: list[threading.Lock] = []
+            try:
+                for conversation_id in (source_conversation_id, target_conversation_id):
+                    lock = self._instance_locks.get((conversation_id, terminal_name, session_key))
+                    if lock is not None and lock not in acquired:
+                        if not lock.acquire(blocking=False):
+                            raise RuntimeError("Session custody refused: owner_busy")
+                        acquired.append(lock)
+                return self._transfer_locked(
+                    source_conversation_id, target_conversation_id, terminal_name, session_key
+                )
+            finally:
+                for lock in reversed(acquired):
+                    lock.release()
 
     def _transfer_locked(
         self,
