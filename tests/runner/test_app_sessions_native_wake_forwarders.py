@@ -1018,6 +1018,8 @@ async def test_auto_create_codex_terminal_recovers_without_restarting_healthy_se
     class _FakeResourceRegistry:
         """Returns a terminal resource view without launching tmux."""
 
+        terminal_registry = None
+
         async def launch_auxiliary_terminal(
             self,
             *,
@@ -1553,6 +1555,8 @@ async def test_auto_create_codex_terminal_unreadable_thread_starts_fresh(
 
     class _FakeResourceRegistry:
         """Captures the TUI argv instead of launching tmux."""
+
+        terminal_registry = None
 
         async def launch_auxiliary_terminal(
             self,

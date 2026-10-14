@@ -7147,7 +7147,9 @@ async def test_frame_handler_failure_serializes_decoded_attribution(
             path="/unused",
             session_id="session-b",
         ),
-        HostStopRunnerFrame(request_id="req_runner", runner_id="runner-a"),
+        HostStopRunnerFrame(
+            request_id="req_runner", runner_id="runner-a", session_id="session-runner"
+        ),
         HostModelOptionsFrame(request_id="req_identity_poor", harness="claude-native"),
     ]
 
@@ -7176,7 +7178,7 @@ async def test_frame_handler_failure_serializes_decoded_attribution(
         assert "runner_id" not in attrs
 
     runner_row = by_request["req_runner"]
-    assert runner_row["session_id"] is None
+    assert runner_row["session_id"] == "session-runner"
     assert runner_row["attributes"]["runner_id"] == "runner-a"
     assert runner_row["attributes"]["frame_kind"] == "host.stop_runner"
 

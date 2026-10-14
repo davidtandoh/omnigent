@@ -1178,6 +1178,8 @@ async def test_auto_create_codex_terminal_fork_clones_rollout_and_resumes(
     class _FakeResourceRegistry:
         """Resource registry that records the launched terminal spec."""
 
+        terminal_registry = None
+
         async def launch_auxiliary_terminal(
             self,
             *,
@@ -1476,6 +1478,8 @@ async def test_auto_create_codex_terminal_fork_builds_rollout_from_items_and_res
     class _FakeResourceRegistry:
         """Resource registry that records the launched terminal spec."""
 
+        terminal_registry = None
+
         async def launch_auxiliary_terminal(
             self,
             *,
@@ -1747,6 +1751,8 @@ async def test_auto_create_codex_terminal_uses_worktree_workspace_not_bundle_dir
     class _FakeResourceRegistry:
         """Resource registry that records the launched terminal spec."""
 
+        terminal_registry = None
+
         async def launch_auxiliary_terminal(
             self,
             *,
@@ -1976,6 +1982,8 @@ async def test_auto_create_codex_terminal_fresh_launch_loads_relaunch_graph(
     class _FakeResourceRegistry:
         """Resource registry that accepts the launched terminal."""
 
+        terminal_registry = None
+
         async def launch_auxiliary_terminal(self, **kwargs: Any) -> SessionResourceView:
             """
             Return a terminal resource view for the launch.
@@ -2162,6 +2170,8 @@ async def test_auto_create_codex_terminal_starts_relay_at_session_creation(
 
     class _FakeResourceRegistry:
         """Resource registry returning a fixed terminal view."""
+
+        terminal_registry = None
 
         async def launch_auxiliary_terminal(
             self,
@@ -4785,6 +4795,8 @@ async def test_auto_create_codex_terminal_default_pin_requires_a_fresh_catalog(
     class _FakeResourceRegistry:
         """Resource registry that accepts the terminal launch."""
 
+        terminal_registry = None
+
         async def launch_auxiliary_terminal(
             self,
             *,
@@ -5014,6 +5026,8 @@ async def test_auto_create_codex_terminal_accepts_gateway_spelled_override(
 
     class _FakeResourceRegistry:
         """Resource registry that accepts the terminal launch."""
+
+        terminal_registry = None
 
         async def launch_auxiliary_terminal(
             self,

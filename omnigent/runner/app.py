@@ -3345,13 +3345,18 @@ def create_runner_app(
             with contextlib.suppress(asyncio.CancelledError):
                 await turn_task
         await mcp_execution_registry.cancel_session(session_id)
-        closed_terminals = await resource_registry.cleanup_session(session_id)
+        if process_manager is not None:
+            await process_manager.forward_cancel(session_id)
+        closed_terminals = await _teardown_session_terminals(session_id)
         await _native_runtime.teardown_codex_native_app_server(
             session_id,
             closed_terminals=closed_terminals,
             terminal_registry=resource_registry.terminal_registry,
             server_client=server_client,
         )
+        if process_manager is not None:
+            await process_manager.release(session_id)
+        await resource_registry.cleanup_session(session_id)
         _session_message_buffers.pop(session_id, None)
         _live_response_id.pop(session_id, None)
         # Clear all desync/turn state so a recreated same-id session starts clean.
@@ -3381,15 +3386,9 @@ def create_runner_app(
         # Close any OpenCode server that no forwarder adopted.
         await _native_runtime.teardown_opencode_native_server(session_id)
 
-        if process_manager is not None:
-            await process_manager.forward_cancel(session_id)
-
         queue = _session_event_queues.get(session_id)
         if queue is not None:
             queue.put_nowait(None)
-
-        if process_manager is not None:
-            await process_manager.release(session_id)
 
         await _delete_native_bridge_dirs(
             server_client=server_client,
@@ -7427,13 +7426,16 @@ def create_runner_app(
     async def cleanup_session_resources(
         session_id: str,
     ) -> JSONResponse:
-        closed_terminals = await resource_registry.cleanup_session(session_id)
+        closed_terminals = await _teardown_session_terminals(session_id)
         await _native_runtime.teardown_codex_native_app_server(
             session_id,
             closed_terminals=closed_terminals,
             terminal_registry=resource_registry.terminal_registry,
             server_client=server_client,
         )
+        if process_manager is not None:
+            await process_manager.release(session_id)
+        await resource_registry.cleanup_session(session_id)
         _required_terminal_exit_errors.pop(session_id, None)
         _codex_terminal_ensure_locks.pop(session_id, None)
         _claude_terminal_ensure_locks.pop(session_id, None)
@@ -7446,8 +7448,6 @@ def create_runner_app(
         _kimi_terminal_ensure_locks.pop(session_id, None)
         _hermes_terminal_ensure_locks.pop(session_id, None)
         _repl_terminal_ensure_locks.pop(session_id, None)
-        if process_manager is not None:
-            await process_manager.release(session_id)
         await _delete_native_bridge_dirs(
             server_client=server_client,
             session_id=session_id,
@@ -7477,7 +7477,6 @@ def create_runner_app(
         _hermes_terminal_ensure_locks.pop(session_id, None)
         _repl_terminal_ensure_locks.pop(session_id, None)
         closed_terminals = await _teardown_session_terminals(session_id)
-        closed_terminals.extend(await resource_registry.cleanup_session(session_id))
         await _native_runtime.teardown_codex_native_app_server(
             session_id,
             closed_terminals=closed_terminals,
@@ -7486,6 +7485,7 @@ def create_runner_app(
         )
         if process_manager is not None:
             await process_manager.release(session_id)
+        await resource_registry.cleanup_session(session_id)
         _clear_session_agent_caches(session_id, _session_agent_ids.get(session_id))
         return JSONResponse(
             status_code=200,

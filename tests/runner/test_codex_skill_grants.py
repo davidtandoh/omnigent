@@ -17,6 +17,7 @@ from omnigent.entities import DEFAULT_ENVIRONMENT_ID
 from omnigent.inference_config import inference_config_scope
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.os_env import CallerProcessOSEnvironment
+from omnigent.inner.terminal import TerminalInstance
 from omnigent.runner import create_runner_app
 from omnigent.runner.app import _build_spawn_env_from_spec
 from omnigent.runner.resource_registry import SessionResourceRegistry
@@ -248,12 +249,12 @@ async def test_cleanup_releases_codex_before_removing_its_skills(
             other_client = await manager.get_client("other", "codex")
             other_pid = (await other_client.get("/pid")).json()["pid"]
 
-            async def cleanup_after_release(session_id: str) -> None:
+            async def cleanup_after_release(session_id: str) -> list[TerminalInstance]:
                 assert session_id == "owner"
                 assert old_root.is_dir(), "skills must remain until harness teardown completes"
                 assert old_process.returncode is not None, "cached harness was not released"
                 assert not manager.has_session(session_id)
-                await original_cleanup(session_id)
+                return await original_cleanup(session_id)
 
             monkeypatch.setattr(registry, "cleanup_session", cleanup_after_release)
             app = create_runner_app(

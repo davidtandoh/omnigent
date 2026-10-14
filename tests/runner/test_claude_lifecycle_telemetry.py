@@ -282,6 +282,7 @@ async def test_old_terminal_exit_does_not_read_replacement_hook_evidence(
     _hook(launch, monkeypatch, "SessionStart", 100.0, source="startup")
     _hook(launch, monkeypatch, "SessionEnd", 101.0, reason="logout")
     replacement = make_test_terminal_instance("claude", "main", tmp_path / "replacement")
+    monkeypatch.setattr(replacement, "_tmux", AsyncMock())
     replacement.args = list(launch.instance.args)
     launch.terminals._by_conversation[_SESSION][("claude", "main")] = replacement
     launch.resources.note_session_turn_started(_SESSION)
