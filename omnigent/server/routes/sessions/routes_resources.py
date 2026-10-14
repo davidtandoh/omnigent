@@ -1611,9 +1611,10 @@ def register_resources_routes(
                 code=ErrorCode.NOT_FOUND,
             )
         if status >= 400:
-            raise HTTPException(
-                status_code=502,
-                detail="runner terminal delete failed",
+            error = payload.get("error", {})
+            raise OmnigentError(
+                error.get("message", "Runner terminal delete failed"),
+                code=error.get("code", ErrorCode.INTERNAL_ERROR),
             )
         _publish_and_persist_resource_event(
             session_id,

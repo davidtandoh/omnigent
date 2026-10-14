@@ -475,7 +475,8 @@ async def test_native_cleanup_refusal_preserves_dependents_and_deletion_events(
         resource_registry=resources,
         server_client=NullServerClient(),
     )
-    app_server = SimpleNamespace(close=AsyncMock())
+    app_server = SimpleNamespace(listen_url="ws://runner.test/codex", close=AsyncMock())
+    t.instance.args = ["--remote", app_server.listen_url]
     forwarder = asyncio.create_task(asyncio.Event().wait())
     monkeypatch.setitem(orchestration._AUTO_CODEX_APP_SERVERS, t.args[0], app_server)
     monkeypatch.setitem(orchestration._AUTO_FORWARDER_TASKS, t.args[0], forwarder)

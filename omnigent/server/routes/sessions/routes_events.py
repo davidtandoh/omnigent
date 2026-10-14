@@ -3220,11 +3220,8 @@ def register_events_routes(
         if conv is None:
             raise _session_not_found()
         await _best_effort_stop(session_id, conversation_store, runner_router)
-        # Runner-side resource cleanup is best-effort: if the bound
-        # runner is offline or unbound, the session must still be
-        # deletable. Server-owned records (files and conversation row
-        # below) live independently of the runner, and runner-side
-        # resources are gone with the runner anyway.
+        # Offline or unbound runners do not block server-side deletion.
+        # An explicit cleanup refusal must preserve server-owned resources.
         runner_client: httpx.AsyncClient | None = None
         try:
             runner_client = await _get_runner_client_for_resource_access(session_id)
@@ -3237,7 +3234,7 @@ def register_events_routes(
         if runner_client is not None:
             try:
                 # Allow initialization, forwarder, and resource cleanup to finish.
-                await runner_client.delete(
+                response = await runner_client.delete(
                     f"/v1/sessions/{session_id}",
                     timeout=60.0,
                 )
@@ -3246,6 +3243,13 @@ def register_events_routes(
                     "Runner cleanup failed for %s, falling back",
                     session_id,
                 )
+            else:
+                if response.status_code >= 400:
+                    error = response.json().get("error", {})
+                    raise OmnigentError(
+                        error.get("message", "Runner session cleanup failed"),
+                        code=error.get("code", ErrorCode.INTERNAL_ERROR),
+                    )
         else:
             import contextlib
 

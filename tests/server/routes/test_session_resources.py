@@ -2000,6 +2000,27 @@ async def test_delete_terminal_surfaces_runner_404(
     assert resp.json()["error"]["code"] == "not_found"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["process_pending", "unavailable_probe"])
+async def test_delete_terminal_preserves_named_cleanup_refusal(
+    client: httpx.AsyncClient, code: str
+) -> None:
+    path = (
+        "/v1/sessions/79b22ebd2309e48fdeb450c65611d51b"
+        "/resources/terminals/terminal_codex_main"
+    )
+    fake_runner = _FakeRunnerClient(
+        responses={path: (500, {"error": {"code": code, "message": "Cleanup refused"}})},
+    )
+    set_runner_router(_FakeRunnerRouter(fake_runner))  # type: ignore[arg-type]
+
+    response = await client.delete(path)
+
+    assert response.status_code >= 400
+    assert response.json().get("error", {}).get("code") == code
+    assert "deleted" not in response.json()
+
+
 # ── Phase 1c: session-scoped file endpoint tests ────────────────
 
 
