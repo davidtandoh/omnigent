@@ -192,6 +192,21 @@ class _CodexNativeModelOptionsNotReady(RuntimeError):
     """Raised when Codex model options are requested before bridge startup."""
 
 
+def _codex_native_launch_session_ids(session_id: str) -> list[str]:
+    """Resolve registered Codex launches through their existing active bridge records."""
+    from omnigent.harnesses.codex_native.bridge import bridge_dir_for_bridge_id, read_bridge_state
+
+    launches = []
+    for launch_session_id in _AUTO_CODEX_APP_SERVERS:
+        if launch_session_id == session_id:
+            launches.append(launch_session_id)
+            continue
+        state = read_bridge_state(bridge_dir_for_bridge_id(launch_session_id))
+        if state is not None and state.session_id == session_id:
+            launches.append(launch_session_id)
+    return launches
+
+
 async def _cancel_auto_forwarder_task(
     session_id: str, *, refusal: OmnigentError | None = None
 ) -> None:
@@ -208,18 +223,19 @@ async def _cancel_auto_forwarder_task(
     :param session_id: Session/conversation id, e.g. ``"conv_abc123"``.
     :returns: None.
     """
-    task = _AUTO_FORWARDER_TASKS.pop(session_id, None)
-    if task is None or task.done():
-        return
-    task.cancel(refusal)
-    # asyncio.wait absorbs the CancelledError and bounds the wait on a hung cancellation.
-    _done, pending = await asyncio.wait({task}, timeout=_AUTO_FORWARDER_CANCEL_TIMEOUT_S)
-    if pending:
-        _logger.warning(
-            "Cancelled transcript forwarder for %s did not finish within %.0fs",
-            session_id,
-            _AUTO_FORWARDER_CANCEL_TIMEOUT_S,
-        )
+    launch_session_ids = dict.fromkeys([session_id, *_codex_native_launch_session_ids(session_id)])
+    for launch_session_id in launch_session_ids:
+        task = _AUTO_FORWARDER_TASKS.pop(launch_session_id, None)
+        if task is None or task.done():
+            continue
+        task.cancel(refusal)
+        _done, pending = await asyncio.wait({task}, timeout=_AUTO_FORWARDER_CANCEL_TIMEOUT_S)
+        if pending:
+            _logger.warning(
+                "Cancelled transcript forwarder for %s did not finish within %.0fs",
+                launch_session_id,
+                _AUTO_FORWARDER_CANCEL_TIMEOUT_S,
+            )
 
 
 async def teardown_codex_native_app_server(session_id: str) -> None:
@@ -241,13 +257,12 @@ async def teardown_codex_native_app_server(session_id: str) -> None:
     :param session_id: Session/conversation id, e.g. ``"conv_abc123"``.
     :returns: None.
     """
-    if session_id not in _AUTO_CODEX_APP_SERVERS:
-        return
-    await _cancel_auto_forwarder_task(session_id)
-    leftover_app_server = _AUTO_CODEX_APP_SERVERS.pop(session_id, None)
-    if leftover_app_server is not None:
-        with contextlib.suppress(Exception):
-            await leftover_app_server.close()
+    for launch_session_id in _codex_native_launch_session_ids(session_id):
+        await _cancel_auto_forwarder_task(launch_session_id)
+        leftover_app_server = _AUTO_CODEX_APP_SERVERS.pop(launch_session_id, None)
+        if leftover_app_server is not None:
+            with contextlib.suppress(Exception):
+                await leftover_app_server.close()
 
 
 async def teardown_all_codex_native_app_servers() -> None:
@@ -1919,16 +1934,21 @@ async def _supervise_opencode_forwarder(
     :param forwarder: The :class:`OpenCodeNativeForwarder` to run.
     :returns: None.
     """
+    preserve_dependencies = False
     try:
         await forwarder.run()
+    except asyncio.CancelledError as exc:
+        preserve_dependencies = bool(exc.args and isinstance(exc.args[0], OmnigentError))
+        raise
     finally:
-        leftover = _AUTO_OPENCODE_SERVERS.pop(session_id, None)
-        if leftover is not None:
-            with contextlib.suppress(Exception):
-                await leftover.close()
-        elif server is not None:
-            with contextlib.suppress(Exception):
-                await server.close()
+        if not preserve_dependencies:
+            leftover = _AUTO_OPENCODE_SERVERS.pop(session_id, None)
+            if leftover is not None:
+                with contextlib.suppress(Exception):
+                    await leftover.close()
+            elif server is not None:
+                with contextlib.suppress(Exception):
+                    await server.close()
 
 
 # Permission decisions can park a human approval card server-side

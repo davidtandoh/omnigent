@@ -2501,7 +2501,16 @@ def test_install_crash_logging_is_idempotent() -> None:
     [(True, False), (False, True)],
 )
 @pytest.mark.parametrize("terminal_failure", [False, True])
-@pytest.mark.parametrize("forwarder_path", ["known", "discovery"])
+@pytest.mark.parametrize(
+    ("forwarder_path", "rotated"),
+    [
+        ("known", False),
+        ("discovery", False),
+        ("known", True),
+        ("discovery", True),
+        ("opencode", False),
+    ],
+)
 def test_runner_shutdown_closes_terminal_registry(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2509,6 +2518,7 @@ def test_runner_shutdown_closes_terminal_registry(
     expected_sweep_orphans: bool,
     terminal_failure: bool,
     forwarder_path: str,
+    rotated: bool,
 ) -> None:
     """The --server local runner shuts down terminal-owned resources.
 
@@ -2523,11 +2533,16 @@ def test_runner_shutdown_closes_terminal_registry(
 
     import omnigent.runner._entry as entry_mod
     from omnigent.errors import OmnigentError
+    from omnigent.harnesses.codex_native import bridge as codex_bridge
     from omnigent.harnesses.codex_native import forwarder as codex_forwarder
     from omnigent.inner.terminal import TerminalInstance
     from omnigent.runner.native import orchestration
     from omnigent.terminals.registry import TerminalRegistry
 
+    terminal_name = "opencode" if forwarder_path == "opencode" else "codex"
+    active_sessions = {
+        session: f"{session}-rotated" if rotated else session for session in ("failed", "healthy")
+    }
     closed = []
     forwarders = []
     loop_cancelled = []
@@ -2551,6 +2566,9 @@ def test_runner_shutdown_closes_terminal_registry(
         client.started.set()
         await asyncio.Event().wait()
 
+    monkeypatch.setattr(
+        codex_bridge, "bridge_dir_for_bridge_id", lambda session: tmp_path / session
+    )
     monkeypatch.setattr(codex_forwarder, "supervise_forwarder", forward)
     monkeypatch.setattr(codex_forwarder, "wait_for_thread_started", discover)
     monkeypatch.setattr(orchestration, "_shutdown_session_router_async", close_router)
@@ -2558,12 +2576,20 @@ def test_runner_shutdown_closes_terminal_registry(
     monkeypatch.setattr(orchestration, "_AUTO_CODEX_APP_SERVERS", {})
     monkeypatch.setattr(orchestration, "_AUTO_FORWARDER_TASKS", {})
     monkeypatch.setattr(orchestration, "_AUTO_OPENCODE_SERVERS", {})
+    servers = (
+        orchestration._AUTO_OPENCODE_SERVERS
+        if forwarder_path == "opencode"
+        else orchestration._AUTO_CODEX_APP_SERVERS
+    )
     for session in ("failed", "healthy"):
 
         async def close_server(session=session):
             closed.append((session, "server"))
+            if forwarder_path == "opencode":
+                await close_router(session, None)
+                await close_turn_router(session, None)
 
-        orchestration._AUTO_CODEX_APP_SERVERS[session] = SimpleNamespace(close=close_server)
+        servers[session] = SimpleNamespace(close=close_server)
 
     process_managers: list[_FakeProcessManager] = []
     terminal_registries: list[TerminalRegistry] = []
@@ -2604,7 +2630,7 @@ def test_runner_shutdown_closes_terminal_registry(
         registry = Registry(conversation_link_base_url=conversation_link_base_url)
         for session in ("failed", "healthy"):
             instance = TerminalInstance(
-                "codex", "main", tmp_path / session, tmp_path, running=True
+                terminal_name, "main", tmp_path / session, tmp_path, running=True
             )
 
             async def close_terminal(session=session):
@@ -2614,7 +2640,7 @@ def test_runner_shutdown_closes_terminal_registry(
 
             instance.close = AsyncMock(side_effect=close_terminal)
             instance.is_alive = AsyncMock(return_value=True)
-            registry._by_conversation[session] = {("codex", "main"): instance}
+            registry._by_conversation[session] = {(terminal_name, "main"): instance}
         terminal_registries.append(registry)
         return registry
 
@@ -2685,6 +2711,12 @@ def test_runner_shutdown_closes_terminal_registry(
                         thread_id="thread",
                         client=client,
                     )
+                elif forwarder_path == "opencode":
+                    operation = orchestration._supervise_opencode_forwarder(
+                        session,
+                        servers[session],
+                        SimpleNamespace(run=lambda client=client: forward(client=client)),
+                    )
                 else:
                     operation = orchestration._codex_discover_thread_and_forward(
                         session_id=session,
@@ -2702,6 +2734,23 @@ def test_runner_shutdown_closes_terminal_registry(
                 orchestration._register_auto_forwarder_task(session, task)
                 await asyncio.wait_for(client.started.wait(), timeout=2)
                 assert not task.done()
+            if rotated:
+                registry = terminal_registries[0]
+                for session, active_session in active_sessions.items():
+                    instance = registry.get(session, "codex", "main")
+                    assert registry.transfer(session, active_session, "codex", "main")
+                    assert registry.get(active_session, "codex", "main") is instance
+                    codex_bridge.write_bridge_state(
+                        tmp_path / session,
+                        codex_bridge.CodexNativeBridgeState(
+                            session_id=active_session,
+                            socket_path="ws://runner.test",
+                            thread_id="rotated-thread",
+                            codex_home=str(tmp_path / session),
+                        ),
+                    )
+                    assert session in orchestration._AUTO_FORWARDER_TASKS
+                    assert active_session not in orchestration._AUTO_FORWARDER_TASKS
 
     if terminal_failure:
         with pytest.raises(OmnigentError, match="unavailable_probe") as refused:
@@ -2717,9 +2766,9 @@ def test_runner_shutdown_closes_terminal_registry(
             ("failed", "terminal"),
             ("healthy", "terminal"),
             ("healthy", "server"),
-            ("healthy", "process"),
+            (active_sessions["healthy"], "process"),
         ]
-        assert "failed" in orchestration._AUTO_CODEX_APP_SERVERS
+        assert set(servers) == {"failed"}
         assert not process_managers[0].shutdown_called
         assert terminal_registries[0].active_conversation_ids() == []
         return
@@ -2732,11 +2781,12 @@ def test_runner_shutdown_closes_terminal_registry(
     assert closed == [
         ("failed", "terminal"),
         ("failed", "server"),
-        ("failed", "process"),
+        (active_sessions["failed"], "process"),
         ("healthy", "terminal"),
         ("healthy", "server"),
-        ("healthy", "process"),
+        (active_sessions["healthy"], "process"),
     ]
+    assert not servers
     assert process_managers and process_managers[0].started
     assert process_managers[0].shutdown_called
     assert terminal_sweeps == ([] if host_owns_global_cleanup else [1])

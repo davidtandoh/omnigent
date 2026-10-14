@@ -44,7 +44,10 @@ named JSON refusals. Shutdown attempts each independent terminal and releases
 that session's dependencies only after its terminal cleanup succeeds. A shutdown
 refusal reaches the session's forwarder through its existing cancellation path
 before the event loop exits. Both Codex forwarder cleanup paths preserve the
-app-server and routers when cancellation carries that named refusal.
+app-server and routers when cancellation carries that named refusal. After a
+Codex rotation, shutdown resolves the owning launch through the existing bridge
+record. OpenCode also preserves its server when cancellation carries a refusal.
+Successful terminal shutdown still closes the associated native dependencies.
 
 A kill-failed live terminal becomes unregistered without claimed ownership.
 Its private directory and dependent resources remain intact on refusal. This
