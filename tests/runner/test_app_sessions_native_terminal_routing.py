@@ -212,9 +212,7 @@ async def test_codex_terminal_ensure_preserves_named_cleanup_refusal(
     async def refuse(*_args: object, **_kwargs: object) -> SessionResourceView:
         raise TerminalCleanupRefused(code, session_id="refused-owner")
 
-    monkeypatch.setattr(
-        "omnigent.runner.native.orchestration._auto_create_codex_terminal", refuse
-    )
+    monkeypatch.setattr("omnigent.runner.native.orchestration._auto_create_codex_terminal", refuse)
     app = create_runner_app(
         process_manager=_FakeProcessManager(_ScriptedHarnessClient([])),  # type: ignore[arg-type]
         server_client=NullServerClient(),  # type: ignore[arg-type]

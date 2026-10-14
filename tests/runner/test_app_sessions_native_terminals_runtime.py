@@ -5100,7 +5100,6 @@ async def test_codex_tui_recovery_preserves_live_control_plane(
         _CodexNativeLaunchConfig,
         _CodexNativeTuiLaunch,
     )
-
     from omnigent.terminals.registry import TerminalCleanupRefused, TerminalRegistry
     from tests.runner.helpers import make_test_terminal_instance
 
