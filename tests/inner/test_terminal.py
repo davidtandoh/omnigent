@@ -3556,9 +3556,7 @@ async def test_threaded_exit_callback_can_complete_registry_cleanup(
     from omnigent.runner.resource_registry import SessionResourceRegistry, TerminalLifecycle
     from omnigent.terminals.registry import TerminalRegistry
 
-    instance = TerminalInstance(
-        "claude", "main", tmp_path / "tmux.sock", tmp_path, running=True
-    )
+    instance = TerminalInstance("claude", "main", tmp_path / "tmux.sock", tmp_path, running=True)
     lock = threading.Lock()
     instance.operation_lock = lock
     instance.close = AsyncMock()

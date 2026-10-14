@@ -2005,10 +2005,7 @@ async def test_delete_terminal_surfaces_runner_404(
 async def test_delete_terminal_preserves_named_cleanup_refusal(
     client: httpx.AsyncClient, code: str
 ) -> None:
-    path = (
-        "/v1/sessions/79b22ebd2309e48fdeb450c65611d51b"
-        "/resources/terminals/terminal_codex_main"
-    )
+    path = "/v1/sessions/79b22ebd2309e48fdeb450c65611d51b/resources/terminals/terminal_codex_main"
     fake_runner = _FakeRunnerClient(
         responses={path: (500, {"error": {"code": code, "message": "Cleanup refused"}})},
     )

@@ -380,9 +380,7 @@ async def test_delete_session_preserves_runner_cleanup_refusal(
     assert response.status_code >= 400, response.text
     assert response.json().get("error", {}).get("code") == code
     assert SqlAlchemyConversationStore(db_uri).get_conversation(session_id) is not None
-    content = await client.get(
-        f"/v1/sessions/{session_id}/resources/files/{file_id}/content"
-    )
+    content = await client.get(f"/v1/sessions/{session_id}/resources/files/{file_id}/content")
     assert content.status_code == 200
     assert content.content == b"session data"
 
@@ -403,9 +401,7 @@ async def test_delete_session_preserves_offline_runner_fallback(
         runner = AsyncMock()
         runner.delete.side_effect = httpx.ConnectError("Runner disconnected")
         get_runner = AsyncMock(return_value=runner)
-    monkeypatch.setattr(
-        sessions_module, "_get_runner_client_for_resource_access", get_runner
-    )
+    monkeypatch.setattr(sessions_module, "_get_runner_client_for_resource_access", get_runner)
 
     response = await client.delete(f"/v1/sessions/{session_id}")
 

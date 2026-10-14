@@ -476,7 +476,6 @@ async def test_owned_terminal_close_retires_only_proven_released_receipts(
     from unittest.mock import AsyncMock, Mock
 
     from omnigent.inner import terminal as terminal_module
-    from omnigent.inner.datamodel import TerminalEnvSpec
     from omnigent.inner.terminal import TerminalInstance
     from omnigent.runner import custody
     from omnigent.terminals import registry as registry_module

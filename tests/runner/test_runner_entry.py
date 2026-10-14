@@ -2535,7 +2535,6 @@ def test_runner_shutdown_closes_terminal_registry(
     TerminalRegistry, not just harness subprocesses and MCPs.
     """
     import contextlib
-
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
@@ -2561,6 +2560,7 @@ def test_runner_shutdown_closes_terminal_registry(
     closed = []
     forwarders = []
     loop_cancelled = []
+    loop_tasks = []
     for session in ("failed", "healthy"):
         directory = tmp_path / session
         directory.mkdir()
@@ -2787,7 +2787,7 @@ def test_runner_shutdown_closes_terminal_registry(
             finally:
                 loop_cancelled.append(True)
 
-        asyncio.create_task(cancelled_by_loop())
+        loop_tasks.append(asyncio.create_task(cancelled_by_loop()))
         async with app.router.lifespan_context(app):
             for session in ("failed", "healthy"):
                 client = SimpleNamespace(close=AsyncMock(), started=asyncio.Event())
@@ -2889,7 +2889,8 @@ def test_runner_shutdown_closes_terminal_registry(
         assert (tmp_path / "failed" / "turn_router").exists()
         assert not (tmp_path / "healthy" / "router").exists()
         assert not (tmp_path / "healthy" / "turn_router").exists()
-        assert closed == helper_cleanup + [
+        assert closed == [
+            *helper_cleanup,
             ("failed", "terminal"),
             ("healthy", "terminal"),
             ("healthy", "server"),
@@ -2905,7 +2906,8 @@ def test_runner_shutdown_closes_terminal_registry(
     for session in ("failed", "healthy"):
         assert not (tmp_path / session / "router").exists()
         assert not (tmp_path / session / "turn_router").exists()
-    assert closed == helper_cleanup + [
+    assert closed == [
+        *helper_cleanup,
         ("failed", "terminal"),
         ("failed", "server"),
         (active_sessions["failed"], "process"),

@@ -473,15 +473,14 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     :returns: None.
     """
     import errno
-    from types import SimpleNamespace
     from unittest.mock import AsyncMock, Mock
 
     import omnigent.harness_startup_config as startup_config_mod
+    import omnigent.harnesses.codex_native.app_server as codex_app_mod
     from omnigent.inner.terminal import TerminalCreateResult, TerminalInstance
+    from omnigent.runner import app as runner_app_mod
     from omnigent.terminals import TerminalRegistry
     from omnigent.terminals import registry as registry_mod
-    import omnigent.harnesses.codex_native.app_server as codex_app_mod
-    from omnigent.runner import app as runner_app_mod
 
     retained_failure = launch_outcome in {
         "retained",
