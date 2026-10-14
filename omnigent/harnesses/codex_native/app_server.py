@@ -31,6 +31,7 @@ from omnigent.models.model_fallbacks import CODEX_DEFAULT_MODEL
 from omnigent.util.json_types import JsonObject as _JsonObject
 
 if TYPE_CHECKING:
+    from omnigent.errors import OmnigentError
     from omnigent.onboarding.provider_config import ProviderEntry
     from omnigent.spec.types import AgentSpec
 
@@ -2014,6 +2015,7 @@ class CodexNativeAppServer:
     config_profile: str | None = None
     strict_config: bool = False
     session_id: str | None = None
+    terminal_cleanup_refusal: OmnigentError | None = field(default=None, init=False, repr=False)
     stderr_capture_error_type: str | None = field(default=None, init=False)
     # First TLS certificate failure the launcher printed; mirrored into the
     # bridge so the forwarder can fail a stuck turn with the cause.

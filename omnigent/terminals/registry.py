@@ -163,6 +163,9 @@ class TerminalRegistry:
         # Threading lock — see module docstring for the rationale.
         # Protects both ``_by_conversation`` and ``_instance_locks``.
         self._lock = threading.RLock()
+        self.on_cleanup_refused: (
+            Callable[[TerminalInstance, TerminalCleanupRefused], None] | None
+        ) = None
         self.environment_resolver: Callable[[str, OSEnvSpec], OSEnvironment] | None = None
 
     def conversation_link_for_id(self, conversation_id: str) -> str:
@@ -593,12 +596,26 @@ class TerminalRegistry:
             await asyncio.wait_for(instance.close(), timeout=_CLOSE_TIMEOUT_S)
             if custody is not None and receipt is not None:
                 custody.retire_terminal(receipt)
-        except CustodyError as exc:
-            raise TerminalCleanupRefused(str(exc)) from exc
-        except (TimeoutError, asyncio.CancelledError) as exc:
-            raise TerminalCleanupRefused("process_pending") from exc
-        except (RuntimeError, OSError, ValueError, psutil.Error) as exc:
-            raise TerminalCleanupRefused("unavailable_probe") from exc
+        except (
+            CustodyError,
+            TimeoutError,
+            asyncio.CancelledError,
+            RuntimeError,
+            OSError,
+            ValueError,
+            psutil.Error,
+        ) as exc:
+            category = (
+                str(exc)
+                if isinstance(exc, CustodyError)
+                else "process_pending"
+                if isinstance(exc, (TimeoutError, asyncio.CancelledError))
+                else "unavailable_probe"
+            )
+            refusal = TerminalCleanupRefused(category)
+            if self.on_cleanup_refused is not None:
+                self.on_cleanup_refused(instance, refusal)
+            raise refusal from exc
 
     async def close(
         self,

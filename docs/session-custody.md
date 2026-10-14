@@ -48,10 +48,19 @@ app-server and routers when cancellation carries that named refusal. After a
 Codex rotation, shutdown matches terminals to their app-server using the
 runner-generated `--remote` URL. An explicit `CODEX_HOME` override does not
 change this association. It closes that app-server only after registry
-cleanup succeeds for every matching terminal. Session deletion also requires
-successful terminal-close results matched by remote app-server URL. If the session still names a server without that evidence,
-deletion returns `process_pending` and preserves the server and routers. A stale
-bridge label cannot authorize cleanup. OpenCode also preserves its server when
+cleanup succeeds for every matching terminal. Session deletion and reset check
+registered dependents by remote app-server URL. A stale bridge label cannot
+prove that a transferred terminal ended. A successful auxiliary exit keeps the
+app-server turn running and permits TUI recreation; later deletion or reset can
+close its dependencies when no registered dependent remains.
+
+An actual terminal cleanup refusal is latched on its existing Codex app-server
+object before terminal registration is removed. The first named refusal remains
+for that app-server object's lifetime. Later cleanup, shutdown, and replacement
+preserve its dependencies and return the refusal. A different terminal's
+successful exit does not clear it. This fails closed after a true failure; it
+provides no recovery or eventual-clearance guarantee and creates no serialized
+state or terminal ownership claim. OpenCode also preserves its server when
 cancellation carries a refusal.
 A helper terminal left in the launch session cannot authorize cleanup of the
 rotated terminal's dependencies. Nested cleanup and repeated cancellation retain
@@ -62,7 +71,8 @@ A kill-failed live terminal becomes unregistered without claimed ownership.
 Its private directory and dependent resources remain intact on refusal. This
 slice does not track that terminal for subsequent cleanup, guarantee eventual
 cleanup, or prove durable custody. Failed launches have no separate retained
-state, reuse refusal or reaper exclusion. Real custody remains later work.
+terminal state or reaper exclusion. The owner-local cleanup refusal is the only
+new error condition; it is not custody. Real custody remains later work.
 
 Close, launch and transfer retain the existing per-instance exclusion. Transfer
 acquires both source and destination locks; contention refuses with `owner_busy`.

@@ -248,6 +248,10 @@ async def _cancel_auto_forwarder_task(
 async def _cancel_registered_auto_forwarder_task(
     launch_session_id: str, *, refusal: OmnigentError | None = None
 ) -> None:
+    if refusal is None:
+        refusal = getattr(
+            _AUTO_CODEX_APP_SERVERS.get(launch_session_id), "terminal_cleanup_refusal", None
+        )
     task = _AUTO_FORWARDER_TASKS.pop(launch_session_id, None)
     if task is None or task.done():
         return
@@ -261,6 +265,22 @@ async def _cancel_registered_auto_forwarder_task(
         )
 
 
+def _record_codex_terminal_cleanup_refusal(
+    instance: TerminalInstance, refusal: OmnigentError
+) -> None:
+    remote_urls = {
+        value
+        for option, value in zip(instance.args, instance.args[1:], strict=False)
+        if option == "--remote"
+    }
+    for server in _AUTO_CODEX_APP_SERVERS.values():
+        if (
+            server.listen_url in remote_urls
+            and getattr(server, "terminal_cleanup_refusal", None) is None
+        ):
+            server.terminal_cleanup_refusal = refusal
+
+
 async def teardown_codex_native_app_server(
     session_id: str,
     *,
@@ -270,7 +290,7 @@ async def teardown_codex_native_app_server(
     """Close dependencies after their terminals have successfully closed.
 
     Match terminal launch URLs to registered app-servers. Refuse session cleanup
-    when its registered server lacks termination evidence or still has dependents.
+    when its server has an unresolved termination refusal or registered dependents.
     """
     closed_urls = {
         remote_url
@@ -292,18 +312,27 @@ async def teardown_codex_native_app_server(
         else set()
     )
     for launch_session_id, server in list(_AUTO_CODEX_APP_SERVERS.items()):
-        if server.listen_url in closed_urls and server.listen_url not in pending_urls:
-            await _teardown_codex_native_launch(launch_session_id)
-        elif (
-            launch_session_id == session_id
+        if not (
+            server.listen_url in closed_urls
+            or launch_session_id == session_id
             or _codex_native_active_session_id(launch_session_id) == session_id
         ):
+            continue
+        refusal = getattr(server, "terminal_cleanup_refusal", None)
+        if refusal is not None:
+            raise refusal
+        if server.listen_url in pending_urls:
             raise OmnigentError(
                 "Terminal cleanup refused: process_pending", code="process_pending"
             )
+        await _teardown_codex_native_launch(launch_session_id)
 
 
 async def _teardown_codex_native_launch(launch_session_id: str) -> None:
+    server = _AUTO_CODEX_APP_SERVERS.get(launch_session_id)
+    refusal = getattr(server, "terminal_cleanup_refusal", None)
+    if refusal is not None:
+        raise refusal
     await _cancel_registered_auto_forwarder_task(launch_session_id)
     leftover_app_server = _AUTO_CODEX_APP_SERVERS.pop(launch_session_id, None)
     if leftover_app_server is not None:
@@ -334,9 +363,15 @@ async def teardown_all_codex_native_app_servers() -> None:
 
     :returns: None.
     """
+    failure: OmnigentError | None = None
     for session_id in list(_AUTO_CODEX_APP_SERVERS):
-        with contextlib.suppress(Exception):
+        try:
             await _teardown_codex_native_launch(session_id)
+        except OmnigentError as exc:
+            if failure is None:
+                failure = exc
+    if failure is not None:
+        raise failure
 
 
 async def teardown_opencode_native_server(session_id: str) -> None:
@@ -4647,6 +4682,10 @@ async def _launch_codex_native_tui(
     login_required: bool = False,
 ) -> _CodexNativeTuiLaunch:
     """Attach a terminal to an app-server without owning its lifecycle."""
+    if resource_registry.terminal_registry is not None:
+        resource_registry.terminal_registry.on_cleanup_refused = (
+            _record_codex_terminal_cleanup_refusal
+        )
     from omnigent.harnesses.codex_native.app_server import (
         _MIN_BYPASS_HOOK_TRUST_CODEX_VERSION,
         _format_codex_version,
@@ -4924,6 +4963,9 @@ async def _auto_create_codex_terminal(
     socket_path = socket_path_for_bridge_dir(bridge_dir)
     codex_home = codex_home_for_bridge_dir(bridge_dir)
     app_server = _AUTO_CODEX_APP_SERVERS.get(session_id)
+    refusal = getattr(app_server, "terminal_cleanup_refusal", None)
+    if refusal is not None:
+        raise refusal
     forwarder = _AUTO_FORWARDER_TASKS.get(session_id)
     bridge_state = read_bridge_state(bridge_dir)
     process = getattr(app_server, "proc", None)
@@ -6273,7 +6315,15 @@ async def _codex_discover_thread_and_forward(
         )
         with contextlib.suppress(Exception):
             await event_client.close()
-        if not preserve_dependencies:
+        if (
+            not preserve_dependencies
+            and getattr(
+                app_server or _AUTO_CODEX_APP_SERVERS.get(session_id),
+                "terminal_cleanup_refusal",
+                None,
+            )
+            is None
+        ):
             leftover_app_server = app_server
             if app_server is None or _AUTO_CODEX_APP_SERVERS.get(session_id) is app_server:
                 leftover_app_server = _AUTO_CODEX_APP_SERVERS.pop(session_id, None)
@@ -6368,7 +6418,11 @@ async def _codex_forward_known_thread(
                 stage="native_input",
             ),
         )
-        if not preserve_dependencies:
+        if (
+            not preserve_dependencies
+            and getattr(_AUTO_CODEX_APP_SERVERS.get(session_id), "terminal_cleanup_refusal", None)
+            is None
+        ):
             leftover_app_server = app_server
             if app_server is None or _AUTO_CODEX_APP_SERVERS.get(session_id) is app_server:
                 leftover_app_server = _AUTO_CODEX_APP_SERVERS.pop(session_id, None)

@@ -293,3 +293,109 @@ async def test_reset_state_returns_cleanup_evidence_from_bound_controls(
             for router in routers:
                 router.assert_awaited_once_with(session_id)
         assert not servers
+
+
+@pytest.mark.parametrize("operation", ["delete", "reset"])
+@pytest.mark.parametrize("failed_cleanup", [False, True])
+@pytest.mark.parametrize("later_auxiliary", [False, True])
+async def test_auxiliary_exit_then_dependency_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    failed_cleanup: bool,
+    later_auxiliary: bool,
+) -> None:
+    from omnigent.runner.resource_registry import CODEX_NATIVE_TERMINAL_ROLE, TerminalLifecycle
+
+    session_id = "conv_auxiliary_exit"
+    url = "ws://runner.test/auxiliary"
+    registry = TerminalRegistry()
+    turn = asyncio.get_running_loop().create_future()
+
+    async def close_server() -> None:
+        turn.cancel()
+
+    server = SimpleNamespace(
+        listen_url=url, close=AsyncMock(side_effect=close_server), terminal_cleanup_refusal=None
+    )
+    monkeypatch.setattr(orchestration, "_AUTO_CODEX_APP_SERVERS", {session_id: server})
+    monkeypatch.setattr(orchestration, "_AUTO_FORWARDER_TASKS", {})
+    monkeypatch.setattr(orchestration, "_delete_native_bridge_dirs", AsyncMock())
+    routers = [AsyncMock(), AsyncMock()]
+    monkeypatch.setattr(orchestration, "_shutdown_session_router_async", routers[0])
+    monkeypatch.setattr(orchestration, "_shutdown_session_turn_router_async", routers[1])
+    spec = AgentSpec(spec_version=1, name="test", executor=ExecutorSpec(type="omnigent"))
+    app, _ = await _build_app_for_spec(spec, terminal_registry=registry)
+    resources = app.state.session_resource_registry
+    first_refusal = None
+
+    async def observe_and_exit(key: str, fails: bool) -> None:
+        nonlocal first_refusal
+        instance = make_test_terminal_instance("codex", key, tmp_path)
+        instance.args = ["--remote", url]
+        instance.private_dir.mkdir()
+        monkeypatch.setattr(instance, "start_idle_watcher_thread", Mock())
+        monkeypatch.setattr(
+            instance,
+            "_tmux",
+            AsyncMock(side_effect=OSError("synthetic kill failure") if fails else None),
+        )
+        registry._by_conversation.setdefault(session_id, {})[("codex", key)] = instance
+        await resources.observe_auxiliary_terminal(
+            session_id, "codex", key, instance, resource_role=CODEX_NATIVE_TERMINAL_ROLE
+        )
+        exit_call = resources._handle_terminal_exit(
+            session_id=session_id,
+            terminal_name="codex",
+            session_key=key,
+            lifecycle=TerminalLifecycle.AUXILIARY,
+            instance=instance,
+        )
+        if fails:
+            with pytest.raises(TerminalCleanupRefused) as raised:
+                await exit_call
+            first_refusal = raised.value
+            assert instance.private_dir.exists()
+            assert instance.running
+            assert server.terminal_cleanup_refusal is first_refusal
+        else:
+            await exit_call
+            assert not instance.private_dir.exists()
+            assert not instance.running
+        assert not registry.list_for_cleanup(session_id)
+        assert not turn.done()
+        server.close.assert_not_awaited()
+        for router in routers:
+            router.assert_not_awaited()
+
+    await observe_and_exit("main", failed_cleanup)
+    if later_auxiliary:
+        await observe_and_exit("replacement", False)
+    assert server.terminal_cleanup_refusal is first_refusal
+    async with _runner_client(app) as client:
+        for _attempt in range(2):
+            response = (
+                await client.delete(f"/v1/sessions/{session_id}")
+                if operation == "delete"
+                else await client.post(f"/v1/sessions/{session_id}/reset-state")
+            )
+            if failed_cleanup:
+                assert response.status_code >= 400, response.text
+                assert "unavailable_probe" in response.text
+                assert not turn.done()
+                server.close.assert_not_awaited()
+                for router in routers:
+                    router.assert_not_awaited()
+                assert orchestration._AUTO_CODEX_APP_SERVERS[session_id] is server
+                assert server.terminal_cleanup_refusal is first_refusal
+            else:
+                assert response.status_code == 200, response.text
+                assert turn.cancelled()
+                server.close.assert_awaited_once()
+                assert not orchestration._AUTO_CODEX_APP_SERVERS
+    if failed_cleanup:
+        with pytest.raises(TerminalCleanupRefused) as shutdown_refused:
+            await orchestration.teardown_all_codex_native_app_servers()
+        assert shutdown_refused.value is first_refusal
+        server.close.assert_not_awaited()
+        turn.cancel()

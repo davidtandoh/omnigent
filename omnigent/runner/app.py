@@ -1604,6 +1604,10 @@ def create_runner_app(
             runner_workspace=runner_workspace,
             per_session_workspace=per_session_workspace,
         )
+    if resource_registry.terminal_registry is not None:
+        resource_registry.terminal_registry.on_cleanup_refused = (
+            _native_runtime._record_codex_terminal_cleanup_refusal
+        )
     app.state.session_resource_registry = resource_registry
 
     def _publish_terminal_activity(session_id: str, terminal_id: str) -> None:

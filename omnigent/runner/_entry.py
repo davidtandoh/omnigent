@@ -1655,8 +1655,7 @@ def create_app(
             on_conversation_closed=close_dependents,
             on_conversation_refused=preserve_dependents,
         )
-        with contextlib.suppress(Exception):
-            await teardown_all_codex_native_app_servers()
+        await teardown_all_codex_native_app_servers()
         with contextlib.suppress(Exception):
             await teardown_all_opencode_native_servers()
         await pm.shutdown()
