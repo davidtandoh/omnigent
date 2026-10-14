@@ -40,10 +40,12 @@ What works today for every harness:
 Terminal cleanup closes the terminal before releasing its environment, skills,
 native bridge files or app-server. Exit finalization propagates failure before
 publishing `TerminalExitEvent`. Session cleanup and terminal DELETE propagate
-named JSON refusals. Shutdown attempts each independent terminal and releases
-that session's dependencies only after its terminal cleanup succeeds. A shutdown
-refusal reaches the session's forwarder through its existing cancellation path
-before the event loop exits. Both Codex forwarder cleanup paths preserve the
+named JSON refusals. If the runner explicitly refuses session deletion, the API
+preserves the conversation and server-owned files. An offline or unbound runner
+still permits server-side deletion. Shutdown attempts each independent terminal
+and releases that session's dependencies only after its terminal cleanup succeeds.
+A shutdown refusal reaches the session's forwarder through its existing
+cancellation path before the event loop exits. Both Codex forwarder cleanup paths preserve the
 app-server and routers when cancellation carries that named refusal. After a
 Codex rotation, shutdown matches terminals to their app-server using the
 runner-generated `--remote` URL. An explicit `CODEX_HOME` override does not
@@ -62,10 +64,10 @@ successful exit does not clear it. Shared-resource disposal checks this guard
 after terminal cleanup and before closing the primary environment or deleting
 skills. Bridge deletion checks every targeted directory against the same owner
 guard. The refusal retains the failed session ID, so a lost transfer response
-or a failed label lookup cannot hide the successor from its owner. This fails closed after a true failure; it
-provides no recovery or eventual-clearance guarantee and creates no serialized
-state or terminal ownership claim. OpenCode also preserves its server when
-cancellation carries a refusal.
+or a failed label lookup cannot hide the successor from its owner. This fails
+closed after a true failure; it provides no recovery or eventual-clearance
+guarantee and creates no serialized state or terminal ownership claim.
+OpenCode also preserves its server when cancellation carries a refusal.
 A helper terminal left in the launch session cannot authorize cleanup of the
 rotated terminal's dependencies. Nested cleanup and repeated cancellation retain
 the named refusal. Successful terminal shutdown still closes the associated
@@ -85,9 +87,10 @@ rotation refuses, forwarding stops with `native_rotation_refused` in the existin
 bridge error record. It does not consume later events against the old thread or
 claim transfer success. There is no rotation retry in this slice.
 
-What refuses today: `omnigent codex --binding-json`, `--reattach-binding`,
-`runtime session-contract` and `runtime end-session` return
-`unsupported_custody` or `record_mismatch` because no custody record exists.
+The [binding commands](#firstmate-launch-binding-and-reattachment) are not yet
+available for live sessions. `runtime session-contract` and `runtime end-session`
+refuse `unavailable_probe` when the custody directory is absent, or
+`record_mismatch` when that directory exists but its record is missing or invalid.
 
 ## Ownership and adoption
 
@@ -104,8 +107,8 @@ The host never launches another native agent for a live session. Repeated
 adoption by the same attachment is idempotent. Concurrent adoption refuses
 `owner_busy`. A replacement increments the attachment epoch once.
 
-Before relaunching a bound runner, the API asks the authenticated host for that
-exact runner's status. The host adopts verified retained owners before
+Before relaunching a bound Codex runner, the API asks the authenticated host for
+that exact runner's status. The host adopts verified retained owners before
 answering. A live owner keeps its existing binding while its tunnel reconnects.
 If the host connection changes or gives no valid status, the API refuses
 relaunch without changing the binding.
@@ -120,9 +123,9 @@ refuses `scope_mismatch`.
 
 The retained runner owns its inference config, MCP relay, policy callbacks,
 native app-server and terminals. Host replacement does not rebuild them.
-Replacement of the owner and owner-crash survival are outside this contract. An
-operating-system reboot requires recovery; it cannot preserve the same live
-process.
+Replacement of the owner and owner-crash survival are outside this contract.
+A runner restart uses relaunch-and-resume; it does not preserve the same live
+turn. An operating-system reboot also requires recovery.
 
 ## Read the session receipt
 
@@ -151,7 +154,7 @@ tombstone and does not claim resource liveness.
 | `environment_digest` | SHA-256 hex digest of canonical validated explicit native environment values. Values are not persisted here. |
 | `config_files` | Array of `{path: string, digest: string}` for retained inference config. Digests use SHA-256. |
 | `state` | String `starting`, `live` or `ended`. `live` follows terminal publication; it is not a claim that a turn is active. |
-| `terminals` | Array of `{name, session_key, socket, device, inode, tmux, pane}`. Names/socket are strings; device/inode are integers; tmux/pane are exact process identities. |
+| `terminals` | Array of terminal receipts defined by `TerminalReceipt` in [custody.py](../omnigent/runner/custody.py). A pending reservation has null socket identity and process fields; publication fills these fields before the terminal can be used. |
 | `helpers` | Object keyed by helper name. `codex_app_server` identifies the actual native process, with exact PID/start identity. |
 | `resources` | Object keyed by resource name. Values are `{path, digest}` for retained tool/policy bridge config. |
 | `reattachment` | Null or `{schema_version: 1, generation: string, process: process identity, epoch: integer, state: attached or detached, owner_generation: string}`. This records the last attachment claim; it does not independently assert host liveness. |
@@ -175,8 +178,9 @@ The binding is a projection of the custody receipt: schema version `1` with
 `session_id`, `runner_id`, `harness`, `owner_generation`, `host_id`,
 `endpoint`, `workspace`, `config_digest`, `environment_digest`, `owner`,
 `native` and `terminal`. Unknown fields or schema versions refuse. While no
-harness is admitted, `--binding-json` refuses `unsupported_custody` and
-reattachment refuses `record_mismatch`. A consumer that already follows this
+harness is admitted, `--binding-json` and reattachment with a valid binding
+refuse `unsupported_custody`. An unreadable or invalid binding file instead
+refuses `record_mismatch`. A consumer that already follows this
 schema needs no change; the owner-keyed record will add the active conversation
 alongside the launch session under a new schema version.
 
@@ -229,17 +233,22 @@ of an already authorized owner. Adoption and strict reattachment still refuse
 
 1. If the owner lease is held, end verifies the owner and every recorded
    resource. Then it sends SIGTERM to that owner only. The wait is bounded by the
-   owner's recorded cleanup budget: a fixed margin, the Codex app-server close
-   budget per helper and the terminal close budget per terminal.
+   owner's recorded cleanup budget, calculated by `owner_stop_grace_s` in
+   [custody.py](../omnigent/runner/custody.py). Success requires the same owner
+   generation's `ended` tombstone after the owner exits.
 2. If the owner lease is free, end acquires that lease. It then proves that the
    owner, each helper and each terminal tmux/pane process are absent. Each
    terminal socket path and each policy resource path must also be absent.
-3. Under both locks, end rereads the receipt. If the receipt still matches the
-   proven receipt, end writes the `ended` tombstone.
+3. For a released owner, end rereads the receipt under both locks. If the
+   receipt still matches the proven receipt, end writes the `ended` tombstone.
 
-A live, reused or unknown process identity, a held or unknown lease, a retained
-socket, helper or policy resource, a foreign socket inode, a foreign scope or a
-changed receipt refuses. A refusal does not signal, delete or rewrite anything.
+A released-owner proof refuses a live, reused or unknown process identity,
+a held or unknown lease, retained resources, a foreign socket inode or a changed
+receipt. A foreign scope refuses in either path. Failed verification does not
+authorize signaling or deleting resources. After SIGTERM, a timeout or missing
+`ended` tombstone returns `process_pending`; the owner may already have performed
+some cleanup. The caller does not force-kill the owner or delete remaining
+resources on this refusal.
 A concurrent end refuses `owner_busy`; a repeated end returns the same result.
 A dead PID or a free lease alone is not sufficient evidence.
 
@@ -263,7 +272,8 @@ Host relaunch adds `binding_mismatch` and `harness_mismatch`. API maintenance
 uses `record_mismatch`, `config_mismatch`, `occupied_port`, `process_pending`
 and `unavailable_probe`, plus `unsupported_restart` for unqualified launch
 recipes. Errors do not include raw process output or environment values.
-Refusals preserve existing receipts and resources.
+Refusals do not authorize further destructive cleanup. See
+[exact end](#exact-end) for refusals after an authorized SIGTERM.
 
 ## Evidence and next steps
 

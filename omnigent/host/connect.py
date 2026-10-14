@@ -831,9 +831,10 @@ class HostConnectError(Exception):
     reconnecting cannot fix — the Databricks Apps proxy bounced the connection to
     a login page (wrong/absent workspace credentials), the server
     returned a permanent ``4xx`` (unauthenticated, unauthorized, or a
-    build that predates the host API), or a loopback server refused a
-    sustained streak of connects (nothing listens — the local server is
-    gone). The reconnect loop re-raises this instead of backing off, so
+    build that predates the host API), or a loopback endpoint refused the
+    initial connection beyond the retry limit. An already connected host
+    retries loopback refusals to preserve its runners during API maintenance.
+    The reconnect loop re-raises this exception instead of backing off, so
     ``omnigent host`` exits with an actionable message rather than
     looping silently forever.
 

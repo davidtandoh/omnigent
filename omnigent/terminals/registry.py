@@ -23,7 +23,7 @@ The registry is constructed once at Omnigent startup
 ``omnigent.runtime.get_terminal_registry()`` from tools and the
 workflow.
 
-**Locking.** A ``threading.Lock`` (not ``asyncio.Lock``) protects the
+**Locking.** A ``threading.RLock`` (not ``asyncio.Lock``) protects the
 map. Tool invocations run on background threads via
 ``asyncio.to_thread`` (see ``runtime/workflow.py:1787``); each thread
 spins up its own ``asyncio.run`` loop to drive the registry's async
@@ -629,10 +629,9 @@ class TerminalRegistry:
     ) -> bool:
         """Close one terminal and remove it from the registry.
 
-        Idempotent: closing a non-existent or already-closed terminal
-        returns ``False`` without raising. This matches the
-        ``sys_terminal_close`` tool's contract — the LLM may close
-        the same terminal twice without seeing an error.
+        Closing an unregistered terminal returns ``False``. A failed close
+        raises ``TerminalCleanupRefused`` and removes the registration; a later
+        ``False`` result therefore does not prove that the process ended.
 
         :param conversation_id: Owning conversation id.
         :param terminal_name: Terminal spec name.
@@ -643,9 +642,8 @@ class TerminalRegistry:
             reassigned to a successor in the meantime, and closing by key
             alone would terminate that successor instead. Identity is checked
             under the registry lock before close and before removal.
-        :returns: ``True`` if a live instance was closed, ``False``
-            if no live instance was found (already-closed or
-            never-launched), or if *expected* no longer occupies the key.
+        :returns: ``True`` after a successful close, ``False`` if no instance
+            is registered or if *expected* no longer occupies the key.
         """
         key = (terminal_name, session_key)
         lock_key = (conversation_id, terminal_name, session_key)

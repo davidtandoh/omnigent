@@ -32,7 +32,7 @@ SUPPORTED_HARNESSES: frozenset[str] = frozenset()
 
 
 class CustodyError(ValueError):
-    """A refusal category; no resource is signalled or deleted on refusal."""
+    """A named refusal; an authorized cleanup may already have started."""
 
 
 class ConfigFile(BaseModel):

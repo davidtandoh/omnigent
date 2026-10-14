@@ -382,20 +382,12 @@ async def teardown_all_codex_native_app_servers() -> None:
     """
     Tear down every host-spawned codex-native app-server on this runner.
 
-    Called from the runner's shutdown path (``_stop_pm``) so a graceful host
-    or runner stop — the host SIGTERMs its runners on ``host.stop_runner`` and
-    on its own exit — takes the per-session ``codex app-server`` subprocesses
-    down with it. Each app-server is spawned ``start_new_session=True`` (its
-    own process group), so it is NOT killed by the runner's death; without an
-    explicit close here it is reparented to init and lingers as an orphaned
-    ``codex`` process. Per-session teardown normally runs on
-    ``DELETE /v1/sessions``, but a host stop tears the runner down without
-    deleting each session first, so those never fire.
+    Called after terminal cleanup during runner shutdown. Each app-server has
+    its own process group, so runner death alone does not stop it.
 
-    Iterates a snapshot of the registered session ids and delegates to
-    :func:`teardown_codex_native_app_server` (which cancels the forwarder and
-    closes the server). Best-effort and idempotent: a session already torn
-    down is a no-op.
+    Iterates the registered launches through :func:`_teardown_codex_native_launch`.
+    A latched terminal cleanup refusal preserves that launch's dependencies.
+    Other launches are attempted before the first refusal propagates.
 
     :returns: None.
     """

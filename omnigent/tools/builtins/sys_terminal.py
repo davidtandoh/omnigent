@@ -1055,9 +1055,7 @@ class SysTerminalCloseTool(Tool):
         session_key = parsed["session"]
 
         try:
-            closed = asyncio.run(
-                self._registry.close(conversation_id, terminal_name, session_key)
-            )
+            closed = asyncio.run(self._registry.close(conversation_id, terminal_name, session_key))
         except (RuntimeError, OSError) as exc:
             _logger.exception("sys_terminal_close failed")
             return json.dumps({"error": f"close failed: {exc}"})

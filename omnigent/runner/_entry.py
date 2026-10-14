@@ -1205,8 +1205,7 @@ def _run_parent_death_killer(
         if adopted is not None and adopted.is_set():
             return
         time.sleep(poll_interval_s)
-    # Parent is gone (or never set). Honor a late adopt that raced the
-    # parent's exit so an intentional detach is never torn down.
+    # The lease or parent is gone. Honor a late adoption before teardown.
     if adopted is not None and adopted.is_set():
         return
     request_shutdown()
@@ -1608,11 +1607,11 @@ def create_app(
             await _pane_reaper.shutdown()
         # Host shutdown skips per-session deletion, so close native servers here.
         from omnigent.runner.native import (
+            orchestration,
             teardown_all_codex_native_app_servers,
             teardown_all_opencode_native_servers,
             teardown_opencode_native_server,
         )
-        from omnigent.runner.native import orchestration
         from omnigent.runner.resource_registry import _terminal_cleanup_error
 
         terminal_dependencies = [
@@ -1945,7 +1944,7 @@ async def _run_tunnel_from_env() -> None:
         custody = current_custody()
 
         def _request_parent_death_shutdown() -> None:
-            """Attribute the exit to parent death, then stop on the loop.
+            """Attribute the exit to lease loss or parent death, then stop on the loop.
 
             Invoked from the parent-death daemon thread, so the reason is
             recorded and the stop event set via the event loop.

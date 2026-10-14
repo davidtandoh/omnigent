@@ -10929,7 +10929,7 @@ def _end_custodied_sessions(
 @click.option("--server", required=True, help="Exact host endpoint to detach.")
 @click.pass_context
 def host_maintenance_detach(ctx: click.Context, server: str) -> None:
-    """Detach this host attachment while live Codex sessions continue."""
+    """Detach this host, preserving only sessions admitted to durable custody."""
     ctx.invoke(host_stop, server=server, all_targets=False, daemon_only=True, force=False)
 
 
