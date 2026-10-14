@@ -2197,6 +2197,8 @@ class TerminalInstance:
         """
         detector = _IdleDetector(idle_threshold_s=idle_threshold_s)
         interval = poll_interval_s if poll_interval_s is not None else _IDLE_POLL_INTERVAL_SECONDS
+        # Direct loop callers supply a stop event without registering a thread.
+        registered_stop_event = self._idle_stop_event
         consecutive_capture_failures = 0
         self._probe_failures.clear()
         while True:
@@ -2250,7 +2252,7 @@ class TerminalInstance:
                         continue
             # Probes do not exclude lifecycle operations. Discard observations
             # from a stopped watcher or an owner that changed during the probe.
-            if stop_event.is_set() or self._idle_stop_event is not stop_event:
+            if stop_event.is_set() or self._idle_stop_event is not registered_stop_event:
                 return
             if (
                 self.operation_lock is not lock
@@ -2264,7 +2266,7 @@ class TerminalInstance:
                     continue
                 try:
                     # Recheck under the owner lock before committing the exit.
-                    if stop_event.is_set() or self._idle_stop_event is not stop_event:
+                    if stop_event.is_set() or self._idle_stop_event is not registered_stop_event:
                         return
                     if (
                         self.operation_lock is not lock

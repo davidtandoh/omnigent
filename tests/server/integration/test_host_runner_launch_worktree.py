@@ -405,13 +405,14 @@ async def test_cancellation_waits_for_host_binding_before_rollback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cancellation cannot race rollback against the host-binding write."""
-    bind_started = threading.Event()
+    loop = asyncio.get_running_loop()
+    bind_started = asyncio.Event()
     release_bind = threading.Event()
     original_set_host_id = SqlAlchemyConversationStore.set_host_id
 
     def _delayed_set_host_id(*args: Any, **kwargs: Any) -> Any:
-        bind_started.set()
-        assert release_bind.wait(timeout=2.0)
+        loop.call_soon_threadsafe(bind_started.set)
+        release_bind.wait()
         return original_set_host_id(*args, **kwargs)
 
     monkeypatch.setattr(SqlAlchemyConversationStore, "set_host_id", _delayed_set_host_id)
@@ -421,13 +422,21 @@ async def test_cancellation_waits_for_host_binding_before_rollback(
     launch_task = asyncio.create_task(
         _launch(client, session_id, git={"branch_name": "feature/cancel"})
     )
-    assert await asyncio.to_thread(bind_started.wait, 2.0)
-    launch_task.cancel()
-    release_bind.set()
-    with pytest.raises(asyncio.CancelledError):
-        _ = await launch_task
+    try:
+        # Synchronize on binding, not executor scheduling speed. Pytest bounds hangs.
+        await bind_started.wait()
+        launch_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            _ = await launch_task
+        assert cap.remove == [], "rollback must wait for the binding write"
+    finally:
+        release_bind.set()
+        if not launch_task.done():
+            launch_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await launch_task
 
-    await asyncio.wait_for(cap.remove_started.wait(), timeout=1.0)
+    await cap.remove_started.wait()
     assert len(cap.remove) == 1
     assert cap.launch == []
     conv = SqlAlchemyConversationStore(db_uri).get_conversation(session_id)
