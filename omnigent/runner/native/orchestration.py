@@ -281,50 +281,86 @@ def _record_codex_terminal_cleanup_refusal(
             server.terminal_cleanup_refusal = refusal
 
 
-async def teardown_codex_native_app_server(
+async def guard_codex_native_cleanup(
     session_id: str,
     *,
-    closed_terminals: Sequence[TerminalInstance],
+    closed_terminals: Sequence[TerminalInstance] = (),
     terminal_registry: TerminalRegistry | None,
-) -> None:
-    """Close dependencies after their terminals have successfully closed.
+    server_client: httpx.AsyncClient | None = None,
+    bridge_dirs: Sequence[Path] = (),
+) -> list[str]:
+    from omnigent.harnesses.codex_native.bridge import (
+        CODEX_NATIVE_BRIDGE_ID_LABEL_KEY,
+        bridge_dir_for_bridge_id,
+    )
 
-    Match terminal launch URLs to registered app-servers. Refuse session cleanup
-    when its server has an unresolved termination refusal or registered dependents.
-    """
-    closed_urls = {
+    if not _AUTO_CODEX_APP_SERVERS:
+        return []
+    targets = set(bridge_dirs)
+    if server_client is not None:
+        labels = await _session_labels_for_runner_spawn(
+            server_client=server_client, session_id=session_id
+        )
+        targets.add(
+            bridge_dir_for_bridge_id(labels.get(CODEX_NATIVE_BRIDGE_ID_LABEL_KEY) or session_id)
+        )
+    related_urls = {
         remote_url
         for instance in closed_terminals
         for option, remote_url in zip(instance.args, instance.args[1:], strict=False)
         if option == "--remote"
     }
-    pending_urls = (
-        {
-            remote_url
-            for owner in terminal_registry.active_conversation_ids()
-            for entry in terminal_registry.list_for_cleanup(owner)
-            for option, remote_url in zip(
-                entry.instance.args, entry.instance.args[1:], strict=False
-            )
-            if option == "--remote"
-        }
-        if terminal_registry is not None
-        else set()
-    )
+    pending_urls: set[str] = set()
+    if terminal_registry is not None:
+        for owner in terminal_registry.active_conversation_ids():
+            for entry in terminal_registry.list_for_cleanup(owner):
+                urls = {
+                    remote_url
+                    for option, remote_url in zip(
+                        entry.instance.args, entry.instance.args[1:], strict=False
+                    )
+                    if option == "--remote"
+                }
+                pending_urls.update(urls)
+                if owner == session_id:
+                    related_urls.update(urls)
+    launch_ids = []
     for launch_session_id, server in list(_AUTO_CODEX_APP_SERVERS.items()):
+        refusal = getattr(server, "terminal_cleanup_refusal", None)
         if not (
-            server.listen_url in closed_urls
+            server.listen_url in related_urls
             or launch_session_id == session_id
             or _codex_native_active_session_id(launch_session_id) == session_id
+            or getattr(refusal, "session_id", None) == session_id
+            or getattr(server, "bridge_dir", bridge_dir_for_bridge_id(launch_session_id))
+            in targets
         ):
             continue
-        refusal = getattr(server, "terminal_cleanup_refusal", None)
         if refusal is not None:
             raise refusal
         if server.listen_url in pending_urls:
             raise OmnigentError(
                 "Terminal cleanup refused: process_pending", code="process_pending"
             )
+        launch_ids.append(launch_session_id)
+    return launch_ids
+
+
+async def teardown_codex_native_app_server(
+    session_id: str,
+    *,
+    closed_terminals: Sequence[TerminalInstance],
+    terminal_registry: TerminalRegistry | None,
+    server_client: httpx.AsyncClient | None = None,
+) -> None:
+    """Close dependencies after their terminals have successfully closed."""
+    launch_ids = await guard_codex_native_cleanup(
+        session_id,
+        closed_terminals=closed_terminals,
+        terminal_registry=terminal_registry,
+        server_client=server_client,
+    )
+    for launch_session_id in launch_ids:
         await _teardown_codex_native_launch(launch_session_id)
 
 
@@ -9518,6 +9554,7 @@ async def _delete_native_bridge_dirs(
     *,
     server_client: httpx.AsyncClient | None,
     session_id: str,
+    terminal_registry: TerminalRegistry | None = None,
 ) -> None:
     """
     Remove native-harness bridge directories and attachment caches for a session.
@@ -9610,6 +9647,11 @@ async def _delete_native_bridge_dirs(
         pi_bridge_dir(session_id),
         qwen_bridge_dir(session_id),
     }
+    await guard_codex_native_cleanup(
+        session_id,
+        terminal_registry=terminal_registry,
+        bridge_dirs=tuple(targets),
+    )
     # A cache can survive a missing bridge directory, including after a reboot.
     targets.update(attachment_cache_dir(target) for target in tuple(targets))
     for target in targets:

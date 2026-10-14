@@ -19,7 +19,7 @@ import re
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -484,6 +484,9 @@ class SessionResourceRegistry:
         *,
         per_session_workspace: bool = False,
     ) -> None:
+        self.before_session_disposal: (
+            Callable[[str, list[TerminalInstance]], Awaitable[None]] | None
+        ) = None
         self._terminal_registry = terminal_registry
         if terminal_registry is not None:
             terminal_registry.environment_resolver = self._resolve_terminal_environment
@@ -2086,6 +2089,8 @@ class SessionResourceRegistry:
                 closed = await self._terminal_registry.cleanup_conversation(session_id)
             except (RuntimeError, OSError, ValueError, psutil.Error) as exc:
                 raise _terminal_cleanup_error(exc) from exc
+        if self.before_session_disposal is not None:
+            await self.before_session_disposal(session_id, closed)
         self._take_session_status_memo(session_id)
         with self._lock:
             self._session_activity_epoch.pop(session_id, None)

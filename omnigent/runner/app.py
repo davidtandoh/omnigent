@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from omnigent.harnesses.claude_native.bridge import ClaudeNativeToolRelay
     from omnigent.harnesses.claude_native.main import ClaudeNativeUcodeConfig
     from omnigent.harnesses.codex_native.bridge import CodexNativeBridgeState
+    from omnigent.inner.terminal import TerminalInstance
     from omnigent.runner.mcp_manager import RunnerMcpManager
     from omnigent.terminals.registry import TerminalRegistry
 
@@ -1608,6 +1609,18 @@ def create_runner_app(
         resource_registry.terminal_registry.on_cleanup_refused = (
             _native_runtime._record_codex_terminal_cleanup_refusal
         )
+
+    async def _guard_session_disposal(
+        session_id: str, closed_terminals: list[TerminalInstance]
+    ) -> None:
+        await _native_runtime.guard_codex_native_cleanup(
+            session_id,
+            closed_terminals=closed_terminals,
+            terminal_registry=resource_registry.terminal_registry,
+            server_client=server_client,
+        )
+
+    resource_registry.before_session_disposal = _guard_session_disposal
     app.state.session_resource_registry = resource_registry
 
     def _publish_terminal_activity(session_id: str, terminal_id: str) -> None:
@@ -3337,6 +3350,7 @@ def create_runner_app(
             session_id,
             closed_terminals=closed_terminals,
             terminal_registry=resource_registry.terminal_registry,
+            server_client=server_client,
         )
         _session_message_buffers.pop(session_id, None)
         _live_response_id.pop(session_id, None)
@@ -3380,6 +3394,7 @@ def create_runner_app(
         await _delete_native_bridge_dirs(
             server_client=server_client,
             session_id=session_id,
+            terminal_registry=resource_registry.terminal_registry,
         )
 
         # The SDK harnesses' router is started here (not by a terminal launch
@@ -7417,6 +7432,7 @@ def create_runner_app(
             session_id,
             closed_terminals=closed_terminals,
             terminal_registry=resource_registry.terminal_registry,
+            server_client=server_client,
         )
         _required_terminal_exit_errors.pop(session_id, None)
         _codex_terminal_ensure_locks.pop(session_id, None)
@@ -7435,6 +7451,7 @@ def create_runner_app(
         await _delete_native_bridge_dirs(
             server_client=server_client,
             session_id=session_id,
+            terminal_registry=resource_registry.terminal_registry,
         )
         return JSONResponse(
             status_code=200,
@@ -7465,6 +7482,7 @@ def create_runner_app(
             session_id,
             closed_terminals=closed_terminals,
             terminal_registry=resource_registry.terminal_registry,
+            server_client=server_client,
         )
         if process_manager is not None:
             await process_manager.release(session_id)

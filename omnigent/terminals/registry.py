@@ -63,8 +63,9 @@ _logger = logging.getLogger(__name__)
 
 
 class TerminalCleanupRefused(OmnigentError):
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, *, session_id: str | None = None) -> None:
         super().__init__(f"Terminal cleanup refused: {code}", code=code)
+        self.session_id = session_id
 
 
 def conversation_link_for_id(
@@ -612,7 +613,7 @@ class TerminalRegistry:
                 if isinstance(exc, (TimeoutError, asyncio.CancelledError))
                 else "unavailable_probe"
             )
-            refusal = TerminalCleanupRefused(category)
+            refusal = TerminalCleanupRefused(category, session_id=conversation_id)
             if self.on_cleanup_refused is not None:
                 self.on_cleanup_refused(instance, refusal)
             raise refusal from exc
