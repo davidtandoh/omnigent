@@ -7906,7 +7906,12 @@ def _native_terminal_start_error_payload(
         JSON error responses. Known actionable configuration errors surface
         their safe message directly; other causes point to the runner log.
     """
+    from omnigent.terminals.registry import TerminalCleanupRefused
+
     error_id = f"err_{uuid.uuid4().hex}"
+    failure_code = (
+        exc.code if isinstance(exc, TerminalCleanupRefused) else _NATIVE_TERMINAL_START_FAILED_CODE
+    )
     lifecycle_code = (
         exc.code
         if isinstance(exc, OmnigentError) and exc.code in _NATIVE_TERMINAL_LIFECYCLE_ERROR_CODES
@@ -7918,7 +7923,7 @@ def _native_terminal_start_error_payload(
         session_id=session_id,
         error_id=error_id,
         runtime=runtime_name,
-        code=lifecycle_code or _NATIVE_TERMINAL_START_FAILED_CODE,
+        code=lifecycle_code or failure_code,
         exception_type=type(exc).__name__,
         exception_cause_type=type(exc.__cause__).__name__ if exc.__cause__ is not None else None,
         cause_code=exc.code if isinstance(exc, OmnigentError) else None,
@@ -8026,7 +8031,7 @@ def _native_terminal_start_error_payload(
             f"see the runner log for details: {log_reference}"
         )
     return {
-        "code": _NATIVE_TERMINAL_START_FAILED_CODE,
+        "code": failure_code,
         "error_id": error_id,
         "message": f"{message} Error ID: {error_id}.",
     }
