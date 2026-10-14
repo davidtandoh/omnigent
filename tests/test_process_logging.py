@@ -784,9 +784,10 @@ def test_redact_log_text_strips_url_userinfo(text: str, expected: str) -> None:
 
 def test_redact_log_text_handles_large_url_without_userinfo_in_linear_time() -> None:
     text = "https://" + "a" * 200_000 + " " + "://" * 50_000
-    started = time.perf_counter()
+    # Measure regex CPU cost without charging time scheduled to other CI workers.
+    started = time.thread_time()
     output = redact_log_text(text)
-    assert time.perf_counter() - started < 0.5
+    assert time.thread_time() - started < 0.5
     assert output == text
 
 
