@@ -44,7 +44,7 @@ from omnigent.spec.types import AgentSpec
 from omnigent.util.json_types import JsonObject as _JsonObject
 
 if TYPE_CHECKING:
-    pass
+    from omnigent.inner.terminal import TerminalInstance
 
 _logger = logging.getLogger("omnigent.runner.app")
 
@@ -217,7 +217,7 @@ class NativeControls:
     handle_qwen_native_compact: Callable[[str], Coroutine[Any, Any, Response]]
     is_sdk_compact_body: Callable[[dict[str, Any]], bool]
     opencode_native_model_options: Callable[[str], Coroutine[Any, Any, list[_JsonObject]]]
-    teardown_session_terminals: Callable[[str], Coroutine[Any, Any, None]]
+    teardown_session_terminals: Callable[[str], Coroutine[Any, Any, list[TerminalInstance]]]
 
 
 def build_native_controls(
@@ -822,35 +822,29 @@ def build_native_controls(
             )
         return Response(status_code=204)
 
-    async def _teardown_session_terminals(conv_id: str) -> None:
+    async def _teardown_session_terminals(conv_id: str) -> list[TerminalInstance]:
         from omnigent.entities.session_resources import terminal_resource_id
         from omnigent.runner.tool_dispatch import _publish_terminal_deleted_event
 
         terminal_registry = resource_registry.terminal_registry
         if terminal_registry is None:
-            return
-        terminals = [
-            (entry.terminal_name, entry.session_key)
-            for entry in terminal_registry.list_for_conversation(conv_id)
-        ]
-        for terminal_name, session_key in terminals:
+            return []
+        closed_terminals = []
+        terminals = terminal_registry.list_for_cleanup(conv_id)
+        for entry in terminals:
+            terminal_name, session_key = entry.terminal_name, entry.session_key
             terminal_id = terminal_resource_id(terminal_name, session_key)
-            try:
-                await resource_registry.close_terminal(conv_id, terminal_id)
-            except (RuntimeError, OSError):
-                _logger.warning(
-                    "Failed to close terminal %s for session %s during stop",
-                    terminal_id,
-                    conv_id,
-                    exc_info=True,
-                    extra={"session_id": conv_id},
-                )
+            closed = await resource_registry.close_terminal(conv_id, terminal_id)
+            if not closed:
+                continue
+            closed_terminals.append(entry.instance)
             _publish_terminal_deleted_event(
                 conversation_id=conv_id,
                 terminal_name=terminal_name,
                 session_key=session_key,
                 publish_event=_publish_event,
             )
+        return closed_terminals
 
     async def _handle_claude_native_permission_mode_change(
         conv_id: str,

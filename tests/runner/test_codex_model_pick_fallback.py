@@ -92,6 +92,7 @@ async def codex_launch_harness(
     """Keep the real catalog store and launcher isolated from all live CLIs."""
     monkeypatch.setattr(codex_native_bridge, "_BRIDGE_ROOT", tmp_path / "codex-bridge")
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
     monkeypatch.setenv("OMNIGENT_RUNNER_WORKSPACE", str(tmp_path / "workspace"))
     monkeypatch.setenv("RUNNER_SERVER_URL", "http://runner.test")
     monkeypatch.setattr("omnigent.config.load_effective_config", dict)
@@ -187,7 +188,10 @@ async def codex_launch_harness(
     monkeypatch.setattr(codex_app, "build_codex_native_server", build_server)
     monkeypatch.setattr(codex_app, "CodexAppServerClient", lambda **_kwargs: event_client)
     monkeypatch.setattr(runner_native, "_codex_discover_thread_and_forward", forwarder)
-    registry = SimpleNamespace(launch_auxiliary_terminal=AsyncMock(side_effect=launch_terminal))
+    registry = SimpleNamespace(
+        terminal_registry=None,
+        launch_auxiliary_terminal=AsyncMock(side_effect=launch_terminal),
+    )
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(request), base_url="http://runner.test"
     ) as server_client:

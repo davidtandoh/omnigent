@@ -77,3 +77,19 @@ def test_unreadable_linux_namespace_remains_unknown(
     assert owner_claim.current_pid_namespace() is None
     owner_claim.write_owner_claim(tmp_path)
     assert owner_claim.read_owner_claim(tmp_path) is None
+
+
+def test_exact_process_identity_refuses_foreign_uid(monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+    from unittest.mock import Mock
+
+    from omnigent.native.owner_claim import ProcessIdentity
+
+    identity = ProcessIdentity.capture(os.getpid())
+    process = Mock()
+    process.create_time.return_value = identity.started_at
+    process.uids.return_value = Mock(real=os.getuid() + 1)
+    monkeypatch.setattr("psutil.Process", lambda pid: process)
+    with pytest.raises(ValueError, match="record_mismatch"):
+        identity.require_live()
+    process.terminate.assert_not_called()

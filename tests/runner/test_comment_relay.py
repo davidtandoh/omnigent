@@ -34,6 +34,7 @@ from omnigent.harnesses.claude_native.bridge import (
     prepare_bridge_dir,
 )
 from omnigent.inner.datamodel import TerminalEnvSpec
+from omnigent.inner.terminal import TerminalInstance
 from omnigent.runner import create_runner_app
 from omnigent.spec.types import AgentSpec, ToolsConfig
 from omnigent.terminals import TerminalListEntry
@@ -207,14 +208,15 @@ class _StubResourceRegistry:
             ),
         )
 
-    async def cleanup_session(self, session_id: str) -> None:
+    async def cleanup_session(self, session_id: str) -> list[TerminalInstance]:
         """
         No-op session cleanup invoked by ``DELETE /v1/sessions/{id}``.
 
         :param session_id: Session/conversation identifier (unused).
-        :returns: None.
+        :returns: No closed terminals.
         """
         del session_id
+        return []
 
 
 @dataclass

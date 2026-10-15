@@ -1578,9 +1578,11 @@ async def test_liveness_probe_before_first_watcher_tick_still_reports_exit(
         exits.append((instance.last_exit_status(), instance.last_pane_text()))
 
     if watcher == "threaded":
+        stop_event = threading.Event()
+        instance._idle_stop_event = stop_event
         await asyncio.to_thread(
             instance._idle_watch_loop_threaded,
-            threading.Event(),
+            stop_event,
             on_exit=on_exit,
             poll_interval_s=0,
         )
@@ -3546,3 +3548,69 @@ async def test_read_join_wrapped_asks_tmux_to_join_wrapped_rows(tmp_path: Path) 
     assert calls[1] == ("capture-pane", "-t", instance.tmux_target, "-p", "-J")
     assert plain["screen"] == joined["screen"]
     assert "https://signin.example.com/device?user_code=ABCDEFGH" in joined["screen"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_branch", ["already_stopped", "server_gone", "pane_dead"])
+async def test_threaded_exit_callback_can_complete_registry_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exit_branch: str
+) -> None:
+    from omnigent.runner.resource_registry import SessionResourceRegistry, TerminalLifecycle
+    from omnigent.terminals.registry import TerminalRegistry
+
+    instance = TerminalInstance("claude", "main", tmp_path / "tmux.sock", tmp_path, running=True)
+    lock = threading.Lock()
+    instance.operation_lock = lock
+    instance.close = AsyncMock()
+    instance.is_alive = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        instance,
+        "_capture_pane_for_idle_or_none",
+        lambda: None if exit_branch == "server_gone" else "final output",
+    )
+    monkeypatch.setattr(instance, "_tmux_session_exists_sync", lambda: False)
+    monkeypatch.setattr(instance, "_pane_is_dead", lambda: True)
+    monkeypatch.setattr(instance, "_capture_exit_snapshot_sync", lambda: None)
+    registry = TerminalRegistry()
+    registry._by_conversation["conversation"] = {("claude", "main"): instance}
+    registry._instance_locks[("conversation", "claude", "main")] = lock
+    resources = SessionResourceRegistry(terminal_registry=registry)
+    await resources.observe_auxiliary_terminal("conversation", "claude", "main", instance)
+    loop = asyncio.get_running_loop()
+    callbacks = []
+    failures = []
+    finished = threading.Event()
+
+    def on_exit() -> None:
+        callbacks.append(True)
+        future = asyncio.run_coroutine_threadsafe(
+            resources._handle_terminal_exit(
+                session_id="conversation",
+                terminal_name="claude",
+                session_key="main",
+                lifecycle=TerminalLifecycle.AUXILIARY,
+                instance=instance,
+            ),
+            loop,
+        )
+        try:
+            future.result(timeout=2)
+        except Exception as exc:
+            failures.append(exc)
+        finally:
+            finished.set()
+
+    with lock:
+        instance.start_idle_watcher_thread(on_exit=on_exit, poll_interval_s=0.001)
+        if exit_branch == "already_stopped":
+            instance.running = False
+    try:
+        assert await asyncio.to_thread(finished.wait, 3)
+        assert failures == []
+        assert callbacks == [True]
+        instance.close.assert_awaited_once()
+        assert registry.get("conversation", "claude", "main") is None
+        assert registry.get_instance_lock("conversation", "claude", "main") is None
+        assert not lock.locked()
+    finally:
+        await asyncio.to_thread(instance._stop_idle_watcher_thread)

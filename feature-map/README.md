@@ -159,7 +159,7 @@ map an area, remove it here in the same change.
 - Install lifecycle: `omnigent upgrade`, `omnigent update`, `omnigent uninstall`
 - Running agents and servers: `omnigent run`, `omnigent start`, `omnigent stop`,
   `omnigent server`, `omnigent attach`, `omnigent resume`, `omnigent session`,
-  `omnigent import`
+  `omnigent import`, `omnigent runtime`
 - Bundled agents and the Copilot harness: `omnigent polly`, `omnigent debby`,
   `omnigent copilot`
 - Installing reusable agents: `omnigent agent`

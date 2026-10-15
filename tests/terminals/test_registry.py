@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from omnigent.errors import OmnigentError
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec, TerminalEnvSpec
 from omnigent.inner.terminal import TerminalCreateResult, TerminalInstance
 from omnigent.terminals import TerminalRegistry
@@ -304,6 +305,285 @@ async def test_launch_replaces_stale_running_entry(
     assert created.lifecycle_trace.session_id == "conv_x"
 
 
+async def test_sequential_launch_reuses_then_replaces_closed_instance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import Mock
+
+    instances = [
+        TerminalInstance("bash", "s1", tmp_path / f"{index}.sock", tmp_path, running=True)
+        for index in range(2)
+    ]
+    for instance in instances:
+        monkeypatch.setattr(instance, "launch", AsyncMock())
+        monkeypatch.setattr(instance, "is_alive", AsyncMock(return_value=True))
+        monkeypatch.setattr(instance, "close", AsyncMock())
+    create = Mock(side_effect=[TerminalCreateResult(instance, tmp_path) for instance in instances])
+    monkeypatch.setattr(registry_mod, "create_terminal_instance", create)
+    registry = TerminalRegistry()
+    args = ("conv_sequential", "bash", "s1", TerminalEnvSpec(command="bash"))
+    assert await registry.launch(*args) is instances[0]
+    first_lock = registry.get_instance_lock(*args[:3])
+    assert first_lock is not None and not first_lock.locked()
+    assert await registry.launch(*args) is instances[0]
+    create.assert_called_once()
+    assert registry.get_instance_lock(*args[:3]) is first_lock
+    assert await registry.close(*args[:3])
+    instances[0].close.assert_awaited_once()
+    assert registry.get_instance_lock(*args[:3]) is None
+    assert await registry.launch(*args) is instances[1]
+    assert create.call_count == 2
+    assert registry.get_instance_lock(*args[:3]) is not first_lock
+
+
+@pytest.mark.parametrize("first_operation", ["launch", "close"])
+async def test_close_and_relaunch_share_exclusion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first_operation: str
+) -> None:
+    from unittest.mock import Mock
+
+    registry = TerminalRegistry()
+    args = ("conv_race", "bash", "s1", TerminalEnvSpec(command="bash"))
+    stale = TerminalInstance("bash", "s1", tmp_path / "old.sock", tmp_path / "old")
+    replacement = TerminalInstance(
+        "bash", "s1", tmp_path / "new.sock", tmp_path / "new", running=True
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def close_stale() -> None:
+        entered.set()
+        await release.wait()
+
+    stale.close = AsyncMock(side_effect=close_stale)
+    replacement.launch = AsyncMock()
+    replacement.is_alive = AsyncMock(return_value=True)
+    create = Mock(return_value=TerminalCreateResult(replacement, tmp_path))
+    monkeypatch.setattr(registry_mod, "create_terminal_instance", create)
+    lock = threading.Lock()
+    registry._by_conversation[args[0]] = {("bash", "s1"): stale}
+    registry._instance_locks[args[:3]] = lock
+    operation = asyncio.create_task(
+        registry.launch(*args)
+        if first_operation == "launch"
+        else registry.close(*args[:3], expected=stale)
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        assert lock.locked()
+        with pytest.raises(RuntimeError, match="owner_busy"):
+            await registry.close(*args[:3], expected=stale)
+        with pytest.raises(RuntimeError, match="owner_busy"):
+            await registry.launch(*args)
+        assert registry.get_instance_lock(*args[:3]) is lock
+        create.assert_not_called()
+    finally:
+        release.set()
+        await operation
+    assert not lock.locked()
+    stale.close.assert_awaited_once()
+    assert await registry.launch(*args) is replacement
+    create.assert_called_once()
+    assert registry.get(*args[:3]) is replacement
+    assert not await registry.close(*args[:3], expected=stale)
+
+    import json
+
+    from omnigent.tools.base import ToolContext
+    from omnigent.tools.builtins.sys_terminal import SysTerminalCloseTool
+
+    replacement.close = AsyncMock()
+    result = await asyncio.to_thread(
+        SysTerminalCloseTool(registry).invoke,
+        json.dumps({"terminal": "bash", "session": "s1"}),
+        ToolContext(task_id="test", agent_id="test", workspace=tmp_path, conversation_id=args[0]),
+    )
+    assert json.loads(result)["status"] == "closed"
+    assert registry.get_instance_lock(*args[:3]) is None
+    replacement.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["close", "relaunch", "transfer"])
+@pytest.mark.parametrize("pane_dead", [False, True])
+async def test_watcher_probe_does_not_exclude_lifecycle_operations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, pane_dead: bool
+) -> None:
+    from unittest.mock import Mock
+
+    from omnigent.inner import terminal as terminal_mod
+
+    registry = TerminalRegistry()
+    instance = TerminalInstance(
+        "claude", "main", tmp_path / "old" / "tmux.sock", tmp_path / "old", running=True
+    )
+    lock = threading.Lock()
+    instance.operation_lock = lock
+    instance.lifecycle_trace.transfer_session("source")
+    registry._by_conversation["source"] = {("claude", "main"): instance}
+    registry._instance_locks[("source", "claude", "main")] = lock
+    instance._tmux = AsyncMock()
+    entered = threading.Event()
+    release = threading.Event()
+    next_probe = threading.Event()
+    finish = threading.Event()
+    probes = 0
+
+    def probe() -> bool:
+        nonlocal probes
+        probes += 1
+        if probes == 1:
+            entered.set()
+            assert release.wait(3)
+        else:
+            next_probe.set()
+            assert finish.wait(3)
+        return pane_dead
+
+    monkeypatch.setattr(instance, "_capture_pane_for_idle_or_none", lambda: "pane")
+    monkeypatch.setattr(instance, "_pane_is_dead", probe)
+    snapshot = Mock()
+    monkeypatch.setattr(instance, "_capture_exit_snapshot_sync", snapshot)
+    # Exercise close's existing bounded-join path while the probe is paused.
+    monkeypatch.setattr(terminal_mod, "_IDLE_WATCHER_JOIN_TIMEOUT_S", 0)
+    exited = Mock()
+    instance.start_idle_watcher_thread(on_exit=exited, poll_interval_s=0.001)
+    watcher = instance._idle_thread
+    assert watcher is not None
+    replacement = TerminalInstance(
+        "claude", "main", tmp_path / "new.sock", tmp_path / "new", running=True
+    )
+    replacement.launch = AsyncMock()
+    replacement.is_alive = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        registry_mod,
+        "create_terminal_instance",
+        Mock(return_value=TerminalCreateResult(replacement, tmp_path)),
+    )
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        if operation == "transfer":
+            assert registry.transfer("source", "destination", "claude", "main")
+            assert registry.get("destination", "claude", "main") is instance
+            assert registry.get_instance_lock("destination", "claude", "main") is lock
+        elif operation == "relaunch":
+            instance.is_alive = AsyncMock(return_value=False)
+            assert (
+                await registry.launch(
+                    "source", "claude", "main", TerminalEnvSpec(command="claude")
+                )
+                is replacement
+            )
+        else:
+            assert await registry.close("source", "claude", "main", expected=instance)
+            assert registry.get("source", "claude", "main") is None
+        release.set()
+        if operation == "transfer":
+            assert await asyncio.to_thread(next_probe.wait, 3)
+            assert instance.running
+        else:
+            await asyncio.to_thread(watcher.join, 3)
+            assert not watcher.is_alive()
+            assert not instance.running
+            instance._tmux.assert_awaited_once_with("kill-server")
+        exited.assert_not_called()
+        snapshot.assert_not_called()
+        assert not lock.locked()
+    finally:
+        instance._stop_idle_watcher_thread()
+        release.set()
+        finish.set()
+        await asyncio.to_thread(watcher.join, 3)
+
+
+@pytest.mark.asyncio
+async def test_watcher_exit_transition_keeps_lifecycle_exclusion(tmp_path: Path) -> None:
+    registry = TerminalRegistry()
+    instance = TerminalInstance("claude", "main", tmp_path / "tmux.sock", tmp_path, running=True)
+    lock = threading.Lock()
+    instance.operation_lock = lock
+    registry._by_conversation["source"] = {("claude", "main"): instance}
+    registry._instance_locks[("source", "claude", "main")] = lock
+    entered = threading.Event()
+    release = threading.Event()
+    exited = threading.Event()
+
+    def capture_exit() -> None:
+        entered.set()
+        assert release.wait(3)
+
+    instance._capture_pane_for_idle_or_none = lambda: "pane"
+    instance._pane_is_dead = lambda: True
+    instance._capture_exit_snapshot_sync = capture_exit
+    instance.start_idle_watcher_thread(on_exit=exited.set, poll_interval_s=0.001)
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        with pytest.raises(RuntimeError, match="owner_busy"):
+            await registry.close("source", "claude", "main")
+        with pytest.raises(RuntimeError, match="owner_busy"):
+            await registry.launch("source", "claude", "main", TerminalEnvSpec(command="claude"))
+        with pytest.raises(RuntimeError, match="owner_busy"):
+            registry.transfer("source", "destination", "claude", "main")
+        assert registry.get("source", "claude", "main") is instance
+        assert registry.get("destination", "claude", "main") is None
+        release.set()
+        assert await asyncio.to_thread(exited.wait, 3)
+        assert not instance.running
+        assert not lock.locked()
+    finally:
+        release.set()
+        await asyncio.to_thread(instance._stop_idle_watcher_thread)
+
+
+@pytest.mark.asyncio
+async def test_watcher_exit_defers_to_an_in_progress_close(tmp_path: Path) -> None:
+    registry = TerminalRegistry()
+    instance = TerminalInstance("claude", "main", tmp_path / "tmux.sock", tmp_path, running=True)
+    lock = threading.Lock()
+    instance.operation_lock = lock
+    registry._by_conversation["source"] = {("claude", "main"): instance}
+    registry._instance_locks[("source", "claude", "main")] = lock
+    closing = asyncio.Event()
+    release_close = asyncio.Event()
+    reprobed = threading.Event()
+    exited = threading.Event()
+    probes = 0
+    original_close = instance.close
+
+    async def close() -> None:
+        closing.set()
+        await release_close.wait()
+        await original_close()
+
+    def probe() -> bool:
+        nonlocal probes
+        probes += 1
+        if probes > 1:
+            reprobed.set()
+        return True
+
+    instance.close = close
+    instance._tmux = AsyncMock()
+    instance._capture_pane_for_idle_or_none = lambda: "pane"
+    instance._pane_is_dead = probe
+    task = asyncio.create_task(registry.close("source", "claude", "main"))
+    try:
+        await asyncio.wait_for(closing.wait(), 3)
+        instance.start_idle_watcher_thread(on_exit=exited.set, poll_interval_s=0.001)
+        assert await asyncio.to_thread(reprobed.wait, 3)
+        assert instance.running
+        assert not exited.is_set()
+        release_close.set()
+        assert await task
+        assert not instance.running
+        assert not exited.is_set()
+        assert registry.get("source", "claude", "main") is None
+    finally:
+        release_close.set()
+        await task
+        await asyncio.to_thread(instance._stop_idle_watcher_thread)
+
+
 def test_transfer_moves_terminal_without_closing_tmux(tmp_path: Path) -> None:
     """
     Terminal transfer changes ownership without touching the instance.
@@ -334,6 +614,66 @@ def test_transfer_moves_terminal_without_closing_tmux(tmp_path: Path) -> None:
     assert reg.get_instance_lock("conv_old", "claude", "main") is None
     assert reg.get_instance_lock("conv_new", "claude", "main") is lock
     assert reg.active_conversation_ids() == ["conv_new"]
+
+
+@pytest.mark.parametrize("operation", ["source_close", "destination_launch"])
+async def test_transfer_refuses_in_flight_terminal_operation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    from unittest.mock import Mock
+
+    registry = TerminalRegistry()
+    source = TerminalInstance("claude", "main", tmp_path / "source.sock", tmp_path, running=True)
+    source_lock = threading.Lock()
+    registry._by_conversation["source"] = {("claude", "main"): source}
+    registry._instance_locks[("source", "claude", "main")] = source_lock
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def pause(**_kwargs) -> None:
+        entered.set()
+        await release.wait()
+
+    source.close = AsyncMock(side_effect=pause)
+    destination = TerminalInstance(
+        "claude", "main", tmp_path / "destination.sock", tmp_path, running=True
+    )
+    destination.launch = AsyncMock(side_effect=pause)
+    destination.is_alive = AsyncMock(return_value=True)
+    destination.close = AsyncMock()
+    monkeypatch.setattr(
+        registry_mod,
+        "create_terminal_instance",
+        Mock(return_value=TerminalCreateResult(destination, tmp_path)),
+    )
+    task = asyncio.create_task(
+        registry.close("source", "claude", "main", expected=source)
+        if operation == "source_close"
+        else registry.launch("destination", "claude", "main", TerminalEnvSpec(command="claude"))
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        destination_lock = registry.get_instance_lock("destination", "claude", "main")
+        with pytest.raises(RuntimeError, match="owner_busy"):
+            registry.transfer("source", "destination", "claude", "main")
+        assert registry.get("source", "claude", "main") is source
+        assert registry.get("destination", "claude", "main") is None
+        assert registry.get_instance_lock("source", "claude", "main") is source_lock
+        assert registry.get_instance_lock("destination", "claude", "main") is destination_lock
+    finally:
+        release.set()
+        await task
+    if operation == "source_close":
+        assert registry.active_conversation_ids() == []
+        assert not registry.transfer("source", "destination", "claude", "main")
+    else:
+        assert registry.get("destination", "claude", "main") is destination
+        assert await registry.close("destination", "claude", "main")
+        assert registry.transfer("source", "destination", "claude", "main")
+        assert registry.get("destination", "claude", "main") is source
+        assert registry.get_instance_lock("destination", "claude", "main") is source_lock
+        source.close.assert_not_awaited()
+    assert not source_lock.locked()
 
 
 def test_transfer_rejects_target_collision_without_moving_source(tmp_path: Path) -> None:
@@ -782,12 +1122,8 @@ async def test_close_removes_instance_lock(tmp_path: Path) -> None:
     instance.close.assert_awaited_once()
 
 
-async def test_close_with_timeout_still_returns_true(tmp_path: Path) -> None:
-    """
-    If ``instance.close()`` times out, ``close`` still returns ``True``
-    (the instance was found and removal from the registry succeeded).
-    The timeout is logged but does not propagate.
-    """
+async def test_close_with_timeout_releases_registration(tmp_path: Path) -> None:
+    """A timed-out close releases registration and reports failure."""
     reg = TerminalRegistry()
     instance = TerminalInstance(
         name="bash",
@@ -811,21 +1147,17 @@ async def test_close_with_timeout_still_returns_true(tmp_path: Path) -> None:
     original = reg_mod._CLOSE_TIMEOUT_S
     reg_mod._CLOSE_TIMEOUT_S = 0.01
     try:
-        result = await reg.close("conv_a", "bash", "s1")
+        with pytest.raises(OmnigentError, match="process_pending"):
+            await reg.close("conv_a", "bash", "s1")
     finally:
         reg_mod._CLOSE_TIMEOUT_S = original
 
-    assert result is True
     assert reg.get("conv_a", "bash", "s1") is None
+    assert reg.get_instance_lock("conv_a", "bash", "s1") is None
 
 
-async def test_cleanup_conversation_tolerates_close_exception(tmp_path: Path) -> None:
-    """
-    ``cleanup_conversation`` swallows exceptions from individual
-    ``instance.close()`` calls and continues closing the remaining
-    terminals. This ensures a wedged terminal cannot block cleanup
-    of its siblings.
-    """
+async def test_cleanup_conversation_propagates_close_exception(tmp_path: Path) -> None:
+    """Failed cleanup preserves resources and refuses session teardown."""
     reg = TerminalRegistry()
     good_instance = TerminalInstance(
         name="bash",
@@ -855,21 +1187,22 @@ async def test_cleanup_conversation_tolerates_close_exception(tmp_path: Path) ->
     reg._instance_locks[("conv_a", "bash", "s1")] = threading.Lock()
     reg._instance_locks[("conv_a", "bash", "s2")] = threading.Lock()
 
-    # Should not raise despite bad_instance.close() exploding.
-    await reg.cleanup_conversation("conv_a")
+    with pytest.raises(OmnigentError, match="unavailable_probe"):
+        await reg.cleanup_conversation("conv_a")
 
     assert reg.active_conversation_ids() == []
+    assert reg.get("conv_a", "bash", "s2") is None
+    assert reg.get_instance_lock("conv_a", "bash", "s2") is None
+    assert reg.get("conv_a", "bash", "s1") is None
+    assert reg.get_instance_lock("conv_a", "bash", "s1") is None
     # The good instance's close was still called.
     good_instance.close.assert_awaited_once()
 
 
-async def test_shutdown_tolerates_close_exception(tmp_path: Path) -> None:
-    """
-    ``shutdown`` swallows exceptions from individual ``instance.close()``
-    calls, just like ``cleanup_conversation``. A stuck instance in one
-    conversation must not prevent cleanup of instances in other
-    conversations.
-    """
+async def test_shutdown_attempts_all_terminals_before_propagating_incomplete_cleanup(
+    tmp_path: Path,
+) -> None:
+    """One shutdown pass attempts every terminal and propagates failure."""
     reg = TerminalRegistry()
     good = TerminalInstance(
         name="bash",
@@ -892,15 +1225,29 @@ async def test_shutdown_tolerates_close_exception(tmp_path: Path) -> None:
 
     bad.close = _explode  # type: ignore[method-assign]
 
-    reg._by_conversation["conv_a"] = {("bash", "s1"): bad}
+    sibling = TerminalInstance(
+        name="bash",
+        session_key="s2",
+        socket_path=tmp_path / "sibling.sock",
+        private_dir=tmp_path / "sibling",
+        running=True,
+    )
+    sibling.close = AsyncMock()
+    reg._by_conversation["conv_a"] = {("bash", "s1"): bad, ("bash", "s2"): sibling}
     reg._by_conversation["conv_b"] = {("bash", "s1"): good}
     reg._instance_locks[("conv_a", "bash", "s1")] = threading.Lock()
     reg._instance_locks[("conv_b", "bash", "s1")] = threading.Lock()
 
-    await reg.shutdown()
+    with pytest.raises(OmnigentError, match="unavailable_probe"):
+        await reg.shutdown()
 
     assert reg.active_conversation_ids() == []
+    assert reg.get("conv_a", "bash", "s1") is None
+    assert reg.get_instance_lock("conv_a", "bash", "s1") is None
+    assert reg.get("conv_a", "bash", "s2") is None
+    assert reg.get_instance_lock("conv_b", "bash", "s1") is None
     good.close.assert_awaited_once()
+    sibling.close.assert_awaited_once()
 
 
 def test_multiple_terminals_per_conversation(tmp_path: Path) -> None:

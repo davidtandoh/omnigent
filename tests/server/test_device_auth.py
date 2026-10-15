@@ -984,3 +984,28 @@ def test_app_skips_device_grant_for_github_oidc_without_crashing(
     # why the skip matters — then confirm the gate keeps it unreached.
     with pytest.raises(RuntimeError, match="GitHub OAuth"):
         create_device_auth_router(provider, None)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("failure", ["database", "filesystem"])
+def test_refresh_survives_expected_purge_failure(disabled_app, tmp_path, monkeypatch, failure):
+    import os
+
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from omnigent.server.routes.device_auth import issue_login_grant
+
+    store = DeviceGrantStore(f"sqlite:///{tmp_path}/test.db")
+    secret = bytes.fromhex(os.environ["OMNIGENT_ACCOUNTS_COOKIE_SECRET"])
+    refresh = issue_login_grant(store, user_id="admin", cookie_secret=secret)
+
+    def fail_purge(*args, **kwargs):
+        raise SQLAlchemyError("unavailable") if failure == "database" else OSError("unavailable")
+
+    monkeypatch.setattr(DeviceGrantStore, "purge_expired", fail_purge)
+    response = disabled_app.post(
+        "/oauth/token",
+        data={"grant_type": "refresh_token", "refresh_token": refresh},
+    )
+    assert response.status_code == 200
+    assert response.json()["refresh_token"] == refresh
+    assert response.json()["access_token"]

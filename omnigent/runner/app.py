@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from omnigent.harnesses.claude_native.bridge import ClaudeNativeToolRelay
     from omnigent.harnesses.claude_native.main import ClaudeNativeUcodeConfig
     from omnigent.harnesses.codex_native.bridge import CodexNativeBridgeState
+    from omnigent.inner.terminal import TerminalInstance
     from omnigent.runner.mcp_manager import RunnerMcpManager
     from omnigent.terminals.registry import TerminalRegistry
 
@@ -1604,6 +1605,22 @@ def create_runner_app(
             runner_workspace=runner_workspace,
             per_session_workspace=per_session_workspace,
         )
+    if resource_registry.terminal_registry is not None:
+        resource_registry.terminal_registry.on_cleanup_refused = (
+            _native_runtime._record_codex_terminal_cleanup_refusal
+        )
+
+    async def _guard_session_disposal(
+        session_id: str, closed_terminals: list[TerminalInstance]
+    ) -> None:
+        await _native_runtime.guard_codex_native_cleanup(
+            session_id,
+            closed_terminals=closed_terminals,
+            terminal_registry=resource_registry.terminal_registry,
+            server_client=server_client,
+        )
+
+    resource_registry.before_session_disposal = _guard_session_disposal
     app.state.session_resource_registry = resource_registry
 
     def _publish_terminal_activity(session_id: str, terminal_id: str) -> None:
@@ -1796,7 +1813,13 @@ def create_runner_app(
         # A required terminal exit ends the session. Tear down any registered
         # Codex app-server alongside it; this is a no-op for other harnesses.
         _teardown_task = asyncio.create_task(
-            _native_runtime.teardown_codex_native_app_server(event.session_id)
+            _native_runtime.teardown_codex_native_app_server(
+                event.session_id,
+                closed_terminals=[event.closed_terminal]
+                if event.closed_terminal is not None
+                else [],
+                terminal_registry=resource_registry.terminal_registry,
+            )
         )
         _teardown_task.add_done_callback(_background_tasks.discard)
         _background_tasks.add(_teardown_task)
@@ -3322,6 +3345,18 @@ def create_runner_app(
             with contextlib.suppress(asyncio.CancelledError):
                 await turn_task
         await mcp_execution_registry.cancel_session(session_id)
+        if process_manager is not None:
+            await process_manager.forward_cancel(session_id)
+        closed_terminals = await _teardown_session_terminals(session_id)
+        await _native_runtime.teardown_codex_native_app_server(
+            session_id,
+            closed_terminals=closed_terminals,
+            terminal_registry=resource_registry.terminal_registry,
+            server_client=server_client,
+        )
+        if process_manager is not None:
+            await process_manager.release(session_id)
+        await resource_registry.cleanup_session(session_id)
         _session_message_buffers.pop(session_id, None)
         _live_response_id.pop(session_id, None)
         # Clear all desync/turn state so a recreated same-id session starts clean.
@@ -3351,21 +3386,14 @@ def create_runner_app(
         # Close any OpenCode server that no forwarder adopted.
         await _native_runtime.teardown_opencode_native_server(session_id)
 
-        if process_manager is not None:
-            await process_manager.forward_cancel(session_id)
-
         queue = _session_event_queues.get(session_id)
         if queue is not None:
             queue.put_nowait(None)
 
-        if process_manager is not None:
-            await process_manager.release(session_id)
-
-        await resource_registry.cleanup_session(session_id)
-
         await _delete_native_bridge_dirs(
             server_client=server_client,
             session_id=session_id,
+            terminal_registry=resource_registry.terminal_registry,
         )
 
         # The SDK harnesses' router is started here (not by a terminal launch
@@ -3402,8 +3430,8 @@ def create_runner_app(
         _session_tool_schemas.pop(session_id, None)
         _instruction_delivery_warned.pop(session_id, None)
         _session_sub_agent_resolved.pop(session_id, None)
-        if _binding := _session_comment_relays.pop(session_id, None):
-            _binding.relay.close()
+        if _binding := _session_comment_relays.get(session_id):
+            _discard_comment_relay(session_id, _binding.relay)
         _session_histories.pop(session_id, None)
         _last_server_item_id.pop(session_id, None)
         _session_event_queues.pop(session_id, None)
@@ -4575,8 +4603,15 @@ def create_runner_app(
         binding = _session_comment_relays.get(session_id)
         if binding is None or binding.relay is not relay:
             return
+        from omnigent.runner.custody import current_custody
+
+        custody = current_custody()
+        name = f"tool_policy_bridge:{session_id}"
+        resource = custody.record.resources.get(name) if custody is not None else None
         del _session_comment_relays[session_id]
         relay.close()
+        if custody is not None and resource is not None:
+            custody.retire_resource(name, resource)
 
     async def _ensure_comment_relay_started(
         session_id: str,
@@ -4739,12 +4774,22 @@ def create_runner_app(
                 extra={"session_id": session_id},
             )
             return
+        for previous_session, previous_binding in list(_session_comment_relays.items()):
+            if previous_session != session_id and previous_binding.bridge_dir == bridge_dir:
+                _discard_comment_relay(previous_session, previous_binding.relay)
         superseded = _session_comment_relays.get(session_id)
         _session_comment_relays[session_id] = _CommentRelayBinding(
             relay=relay,
             spec_entry=spec_entry,
             bridge_dir=bridge_dir,
         )
+        from omnigent.runner.custody import current_custody
+
+        custody = current_custody()
+        if custody is not None:
+            custody.publish_resource(
+                f"tool_policy_bridge:{session_id}", bridge_dir / "tool_relay.json"
+            )
         # Close last: the new advertisement is already written, and
         # ClaudeNativeToolRelay.close only unlinks a tool_relay.json that
         # still points at the relay being closed, so a shared bridge dir
@@ -7381,6 +7426,16 @@ def create_runner_app(
     async def cleanup_session_resources(
         session_id: str,
     ) -> JSONResponse:
+        closed_terminals = await _teardown_session_terminals(session_id)
+        await _native_runtime.teardown_codex_native_app_server(
+            session_id,
+            closed_terminals=closed_terminals,
+            terminal_registry=resource_registry.terminal_registry,
+            server_client=server_client,
+        )
+        if process_manager is not None:
+            await process_manager.release(session_id)
+        await resource_registry.cleanup_session(session_id)
         _required_terminal_exit_errors.pop(session_id, None)
         _codex_terminal_ensure_locks.pop(session_id, None)
         _claude_terminal_ensure_locks.pop(session_id, None)
@@ -7393,12 +7448,10 @@ def create_runner_app(
         _kimi_terminal_ensure_locks.pop(session_id, None)
         _hermes_terminal_ensure_locks.pop(session_id, None)
         _repl_terminal_ensure_locks.pop(session_id, None)
-        if process_manager is not None:
-            await process_manager.release(session_id)
-        await resource_registry.cleanup_session(session_id)
         await _delete_native_bridge_dirs(
             server_client=server_client,
             session_id=session_id,
+            terminal_registry=resource_registry.terminal_registry,
         )
         return JSONResponse(
             status_code=200,
@@ -7423,7 +7476,13 @@ def create_runner_app(
         _kimi_terminal_ensure_locks.pop(session_id, None)
         _hermes_terminal_ensure_locks.pop(session_id, None)
         _repl_terminal_ensure_locks.pop(session_id, None)
-        await _teardown_session_terminals(session_id)
+        closed_terminals = await _teardown_session_terminals(session_id)
+        await _native_runtime.teardown_codex_native_app_server(
+            session_id,
+            closed_terminals=closed_terminals,
+            terminal_registry=resource_registry.terminal_registry,
+            server_client=server_client,
+        )
         if process_manager is not None:
             await process_manager.release(session_id)
         await resource_registry.cleanup_session(session_id)
@@ -7654,21 +7713,21 @@ def create_runner_app(
             )
 
         async def _reap_native_pane(pane: PaneRef) -> None:
-            try:
-                await resource_registry.close_terminal(pane.conversation_id, pane.terminal_id)
-            finally:
-                # Closing the codex TUI pane leaves its per-session app-server
-                # (and forwarder) running — no-op for other harnesses. Tear it
-                # down in ``finally`` so an idle-reaped codex session can't orphan
-                # a ``codex app-server`` for the runner's lifetime even when the
-                # pane close above partially fails (the very leak this guards).
-                await _native_runtime.teardown_codex_native_app_server(pane.conversation_id)
-                _publish_terminal_deleted_event(
-                    conversation_id=pane.conversation_id,
-                    terminal_name=pane.terminal_name,
-                    session_key="main",
-                    publish_event=_publish_event,
-                )
+            instance = _pane_reaper_registry.get(pane.conversation_id, pane.terminal_name, "main")
+            closed = await resource_registry.close_terminal(pane.conversation_id, pane.terminal_id)
+            if not closed:
+                return
+            await _native_runtime.teardown_codex_native_app_server(
+                pane.conversation_id,
+                closed_terminals=[instance] if instance is not None else [],
+                terminal_registry=_pane_reaper_registry,
+            )
+            _publish_terminal_deleted_event(
+                conversation_id=pane.conversation_id,
+                terminal_name=pane.terminal_name,
+                session_key="main",
+                publish_event=_publish_event,
+            )
 
         app.state.native_pane_reaper = NativePaneReaper(
             list_native_panes=_native_panes_for_reaper,

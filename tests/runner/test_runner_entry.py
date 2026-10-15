@@ -2496,16 +2496,35 @@ def test_install_crash_logging_is_idempotent() -> None:
         sys.excepthook = original_hook
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("host_owns_global_cleanup", "expected_sweep_orphans"),
     [(True, False), (False, True)],
 )
-async def test_runner_shutdown_closes_terminal_registry(
+@pytest.mark.parametrize("terminal_failure", [False, True])
+@pytest.mark.parametrize(
+    ("forwarder_path", "rotated", "lost_response", "override_codex_home"),
+    [
+        ("known", False, False, False),
+        ("discovery", False, False, False),
+        ("known", True, False, False),
+        ("known", True, True, False),
+        ("discovery", True, False, False),
+        ("opencode", False, False, False),
+        ("known", False, False, True),
+        ("discovery", False, False, True),
+        ("known", True, True, True),
+    ],
+)
+def test_runner_shutdown_closes_terminal_registry(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     host_owns_global_cleanup: bool,
     expected_sweep_orphans: bool,
+    terminal_failure: bool,
+    forwarder_path: str,
+    rotated: bool,
+    lost_response: bool,
+    override_codex_home: bool,
 ) -> None:
     """The --server local runner shuts down terminal-owned resources.
 
@@ -2515,10 +2534,119 @@ async def test_runner_shutdown_closes_terminal_registry(
     startup/shutdown hooks directly and verifies shutdown includes the
     TerminalRegistry, not just harness subprocesses and MCPs.
     """
+    import contextlib
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
     import omnigent.runner._entry as entry_mod
+    from omnigent.errors import OmnigentError
+    from omnigent.harnesses.codex_native import bridge as codex_bridge
+    from omnigent.harnesses.codex_native import forwarder as codex_forwarder
+    from omnigent.harnesses.codex_native.app_server import (
+        build_codex_remote_args,
+        codex_terminal_env,
+    )
+    from omnigent.inner.terminal import TerminalInstance
+    from omnigent.native.launch_environment import validate_native_launch_environment
+    from omnigent.runner.native import orchestration
+    from omnigent.terminals.registry import TerminalRegistry
+
+    terminal_name = "opencode" if forwarder_path == "opencode" else "codex"
+    active_sessions = {
+        session: f"{session}-rotated" if rotated else session for session in ("failed", "healthy")
+    }
+    real_async_client = httpx.AsyncClient
+    rotation_requested = asyncio.Event()
+    closed = []
+    forwarders = []
+    loop_cancelled = []
+    loop_tasks = []
+    for session in ("failed", "healthy"):
+        directory = tmp_path / session
+        directory.mkdir()
+        for resource in ("router", "turn_router"):
+            (directory / resource).write_text("dependent resource")
+
+    async def close_router(session_id, _router=None):
+        (tmp_path / session_id / "router").unlink()
+
+    async def close_turn_router(session_id, _router=None):
+        (tmp_path / session_id / "turn_router").unlink()
+
+    async def forward(*, client, **_kwargs):
+        client.started.set()
+        await asyncio.Event().wait()
+
+    async def discover(client, **_kwargs):
+        client.started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        codex_bridge, "bridge_dir_for_bridge_id", lambda session: tmp_path / session
+    )
+    if not lost_response:
+        monkeypatch.setattr(codex_forwarder, "supervise_forwarder", forward)
+    else:
+        from omnigent import cli_auth
+
+        async def transfer_response(request):
+            if request.url.path == "/v1/sessions":
+                import json
+
+                launch = json.loads(request.content)["labels"][
+                    codex_bridge.CODEX_NATIVE_BRIDGE_ID_LABEL_KEY
+                ]
+                return httpx.Response(200, json={"id": active_sessions[launch]})
+            session = request.url.path.split("/")[3]
+            if request.method == "GET":
+                return httpx.Response(200, json={"agent_id": "agent", "runner_id": "runner"})
+            if request.url.path.endswith("/transfer"):
+                assert terminal_registries[0].transfer(
+                    session, active_sessions[session], "codex", "main"
+                )
+                raise httpx.ReadTimeout("transfer applied; response lost", request=request)
+            return httpx.Response(200, json={})
+
+        @contextlib.asynccontextmanager
+        async def open_client(base_url, **_kwargs):
+            async with real_async_client(
+                base_url=base_url, transport=httpx.MockTransport(transfer_response)
+            ) as client:
+                yield client
+
+        monkeypatch.setattr(
+            codex_forwarder, "_seed_mcp_startup_round", AsyncMock(return_value=None)
+        )
+        monkeypatch.setattr(codex_forwarder, "_subscribe_until_ready", AsyncMock())
+        monkeypatch.setattr(codex_forwarder, "_drive_side_chat_requests", AsyncMock())
+    monkeypatch.setattr(codex_forwarder, "wait_for_thread_started", discover)
+    monkeypatch.setattr(orchestration, "_shutdown_session_router_async", close_router)
+    monkeypatch.setattr(orchestration, "_shutdown_session_turn_router_async", close_turn_router)
+    monkeypatch.setattr(orchestration, "_AUTO_CODEX_APP_SERVERS", {})
+    monkeypatch.setattr(orchestration, "_AUTO_FORWARDER_TASKS", {})
+    monkeypatch.setattr(orchestration, "_AUTO_OPENCODE_SERVERS", {})
+    servers = (
+        orchestration._AUTO_OPENCODE_SERVERS
+        if forwarder_path == "opencode"
+        else orchestration._AUTO_CODEX_APP_SERVERS
+    )
+    for session in ("failed", "healthy"):
+
+        async def close_server(session=session):
+            closed.append((session, "server"))
+            if forwarder_path == "opencode":
+                await close_router(session, None)
+                await close_turn_router(session, None)
+
+        servers[session] = SimpleNamespace(
+            close=close_server,
+            codex_home=tmp_path / session,
+            listen_url=f"ws://runner.test/{session}",
+            env={},
+        )
 
     process_managers: list[_FakeProcessManager] = []
-    terminal_registries: list[_TrackingTerminalRegistry] = []
+    terminal_registries: list[TerminalRegistry] = []
     mcp_managers: list[_TrackingMcpManager] = []
     async_clients: list[_TrackingAsyncClient] = []
     sync_clients: list[_TrackingSyncClient] = []
@@ -2536,16 +2664,69 @@ async def test_runner_shutdown_closes_terminal_registry(
             assert sweep_orphans is expected_sweep_orphans
             self.started = True
 
+        async def release(self, session_id: str) -> None:
+            closed.append((session_id, "process"))
+
         async def shutdown(self) -> None:
             self.shutdown_called = True
 
     def _terminal_registry_factory(
         *,
         conversation_link_base_url: str | None = None,
-    ) -> _TrackingTerminalRegistry:
-        registry = _TrackingTerminalRegistry(
-            conversation_link_base_url=conversation_link_base_url,
-        )
+    ) -> TerminalRegistry:
+        class Registry(TerminalRegistry):
+            shutdown_called = False
+
+            async def shutdown(self, **kwargs):
+                self.shutdown_called = True
+                await super().shutdown(**kwargs)
+
+        registry = Registry(conversation_link_base_url=conversation_link_base_url)
+        for session in ("failed", "healthy"):
+            launch_env = (
+                validate_native_launch_environment({"CODEX_HOME": str(tmp_path / "custom-home")})
+                if override_codex_home
+                else {}
+            )
+            instance = TerminalInstance(
+                terminal_name,
+                "main",
+                tmp_path / session,
+                tmp_path,
+                running=True,
+                args=build_codex_remote_args(
+                    codex_args=(),
+                    thread_id=None,
+                    remote_url=servers[session].listen_url,
+                )
+                if terminal_name == "codex"
+                else [],
+                env={**codex_terminal_env(servers[session]), **launch_env}
+                if terminal_name == "codex"
+                else {},
+            )
+
+            if override_codex_home:
+                assert instance.env["CODEX_HOME"] != str(servers[session].codex_home)
+
+            async def close_terminal(session=session):
+                closed.append((session, "terminal"))
+                if session == "failed" and terminal_failure:
+                    raise OSError("synthetic exhaustion")
+
+            instance.close = AsyncMock(side_effect=close_terminal)
+            instance.is_alive = AsyncMock(return_value=True)
+            registry._by_conversation[session] = {(terminal_name, "main"): instance}
+            if rotated:
+                helper = TerminalInstance(
+                    "shell", "helper", tmp_path / session, tmp_path, running=True
+                )
+
+                async def close_helper(session=session):
+                    closed.append((session, "helper"))
+
+                helper.close = AsyncMock(side_effect=close_helper)
+                registry._by_conversation[session][("shell", "helper")] = helper
         terminal_registries.append(registry)
         return registry
 
@@ -2596,16 +2777,154 @@ async def test_runner_shutdown_closes_terminal_registry(
     )
 
     app = entry_mod.create_app()
-    # starlette 1.x removed Router.startup/shutdown; drive the lifespan instead.
-    async with app.router.lifespan_context(app):
-        pass
+    if lost_response:
+        monkeypatch.setattr(cli_auth, "open_server_client", open_client)
 
+    async def run_lifespan():
+        async def cancelled_by_loop():
+            try:
+                await asyncio.Event().wait()
+            finally:
+                loop_cancelled.append(True)
+
+        loop_tasks.append(asyncio.create_task(cancelled_by_loop()))
+        async with app.router.lifespan_context(app):
+            for session in ("failed", "healthy"):
+                client = SimpleNamespace(close=AsyncMock(), started=asyncio.Event())
+                if lost_response:
+
+                    async def events(client=client):
+                        client.started.set()
+                        await rotation_requested.wait()
+                        yield {
+                            "method": "thread/started",
+                            "params": {"thread": {"id": "rotated-thread"}},
+                        }
+
+                    client.iter_events = events
+                    codex_bridge.write_bridge_state(
+                        tmp_path / session,
+                        codex_bridge.CodexNativeBridgeState(
+                            session_id=session,
+                            socket_path=servers[session].listen_url,
+                            thread_id="thread",
+                            codex_home=str(tmp_path / session),
+                        ),
+                    )
+                if forwarder_path == "known":
+                    operation = orchestration._codex_forward_known_thread(
+                        session_id=session,
+                        bridge_dir=tmp_path / session,
+                        codex_ws_url=servers[session].listen_url,
+                        thread_id="thread",
+                        client=client,
+                    )
+                elif forwarder_path == "opencode":
+                    operation = orchestration._supervise_opencode_forwarder(
+                        session,
+                        servers[session],
+                        SimpleNamespace(run=lambda client=client: forward(client=client)),
+                    )
+                else:
+                    operation = orchestration._codex_discover_thread_and_forward(
+                        session_id=session,
+                        bridge_dir=tmp_path / session,
+                        codex_ws_url=servers[session].listen_url,
+                        codex_home=tmp_path / session,
+                        workspace=str(tmp_path),
+                        event_client=client,
+                        app_server=orchestration._AUTO_CODEX_APP_SERVERS[session],
+                        routing_summary="synthetic",
+                        terminal_instance=terminal_registries[0].get(session, "codex", "main"),
+                    )
+                task = asyncio.create_task(operation)
+                forwarders.append(task)
+                orchestration._register_auto_forwarder_task(session, task)
+                await asyncio.wait_for(client.started.wait(), timeout=2)
+                assert not task.done()
+            if lost_response:
+                rotation_requested.set()
+                for task in forwarders:
+                    with pytest.raises(OmnigentError) as rotation:
+                        await asyncio.wait_for(task, timeout=2)
+                    assert rotation.value.code == "native_rotation_refused"
+                for session, active in active_sessions.items():
+                    assert terminal_registries[0].get(active, "codex", "main") is not None
+                    assert codex_bridge.read_bridge_state(tmp_path / session).session_id == session
+                    assert (tmp_path / session / "router").exists()
+            elif rotated:
+                registry = terminal_registries[0]
+                for session, active_session in active_sessions.items():
+                    instance = registry.get(session, "codex", "main")
+                    assert registry.transfer(session, active_session, "codex", "main")
+                    assert registry.get(active_session, "codex", "main") is instance
+                    codex_bridge.write_bridge_state(
+                        tmp_path / session,
+                        codex_bridge.CodexNativeBridgeState(
+                            session_id=active_session,
+                            socket_path=servers[session].listen_url,
+                            thread_id="rotated-thread",
+                            codex_home=str(tmp_path / session),
+                        ),
+                    )
+                    assert session in orchestration._AUTO_FORWARDER_TASKS
+                    assert active_session not in orchestration._AUTO_FORWARDER_TASKS
+
+    helper_cleanup = (
+        [
+            (session, resource)
+            for session in ("failed", "healthy")
+            for resource in ("helper", "process")
+        ]
+        if rotated
+        else []
+    )
+    if terminal_failure:
+        with pytest.raises(OmnigentError, match="unavailable_probe") as refused:
+            asyncio.run(run_lifespan())
+        assert refused.value.code == "unavailable_probe"
+        assert loop_cancelled == [True]
+        assert all(task.done() and (lost_response or task.cancelled()) for task in forwarders)
+        assert (tmp_path / "failed" / "router").exists()
+        assert (tmp_path / "failed" / "turn_router").exists()
+        assert not (tmp_path / "healthy" / "router").exists()
+        assert not (tmp_path / "healthy" / "turn_router").exists()
+        assert closed == [
+            *helper_cleanup,
+            ("failed", "terminal"),
+            ("healthy", "terminal"),
+            ("healthy", "server"),
+            (active_sessions["healthy"], "process"),
+        ]
+        assert set(servers) == {"failed"}
+        assert not process_managers[0].shutdown_called
+        assert terminal_registries[0].active_conversation_ids() == []
+        return
+    asyncio.run(run_lifespan())
+    assert loop_cancelled == [True]
+    assert all(task.done() and (lost_response or task.cancelled()) for task in forwarders)
+    for session in ("failed", "healthy"):
+        assert not (tmp_path / session / "router").exists()
+        assert not (tmp_path / session / "turn_router").exists()
+    assert closed == [
+        *helper_cleanup,
+        ("failed", "terminal"),
+        ("failed", "server"),
+        (active_sessions["failed"], "process"),
+        ("healthy", "terminal"),
+        ("healthy", "server"),
+        (active_sessions["healthy"], "process"),
+    ]
+    assert not servers
     assert process_managers and process_managers[0].started
     assert process_managers[0].shutdown_called
     assert terminal_sweeps == ([] if host_owns_global_cleanup else [1])
     assert bridge_sweeps == ([] if host_owns_global_cleanup else [1])
     assert terminal_registries and terminal_registries[0].shutdown_called
-    assert terminal_registries[0].conversation_link_base_url == "http://runner.test"
+    assert (
+        terminal_registries[0].conversation_link_for_id("session")
+        == "http://runner.test/c/session"
+    )
     # In Omnigent mode (P1) the entry point passes mcp_manager=None; MCP calls are
     # routed per-session through ProxyMcpManager (runner/proxy_mcp_manager.py)
     # instead of a shared RunnerMcpManager. No RunnerMcpManager is created on

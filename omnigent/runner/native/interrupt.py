@@ -54,6 +54,7 @@ if TYPE_CHECKING:
 
     from omnigent.harness_plugins import NativeCodingAgent
     from omnigent.harnesses.codex_native.bridge import CodexNativeBridgeState
+    from omnigent.inner.terminal import TerminalInstance
 
 
 class SubagentDeliveryAck(Protocol):
@@ -527,34 +528,29 @@ class NativeInterruptRunner:
                 delivery_ack.reason,
             )
 
-    async def _teardown_session_terminals(self, conv_id: str) -> None:
+    async def _teardown_session_terminals(self, conv_id: str) -> list[TerminalInstance]:
         from omnigent.entities.session_resources import terminal_resource_id
         from omnigent.runner.tool_dispatch import _publish_terminal_deleted_event
 
         terminal_registry = self._resource_registry.terminal_registry
         if terminal_registry is None:
-            return
-        terminals = [
-            (entry.terminal_name, entry.session_key)
-            for entry in terminal_registry.list_for_conversation(conv_id)
-        ]
-        for terminal_name, session_key in terminals:
+            return []
+        closed_terminals = []
+        terminals = terminal_registry.list_for_cleanup(conv_id)
+        for entry in terminals:
+            terminal_name, session_key = entry.terminal_name, entry.session_key
             terminal_id = terminal_resource_id(terminal_name, session_key)
-            try:
-                await self._resource_registry.close_terminal(conv_id, terminal_id)
-            except (RuntimeError, OSError):
-                self._logger.warning(
-                    "Failed to close terminal %s for session %s during stop",
-                    terminal_id,
-                    conv_id,
-                    exc_info=True,
-                )
+            closed = await self._resource_registry.close_terminal(conv_id, terminal_id)
+            if not closed:
+                continue
+            closed_terminals.append(entry.instance)
             _publish_terminal_deleted_event(
                 conversation_id=conv_id,
                 terminal_name=terminal_name,
                 session_key=session_key,
                 publish_event=self._publish_event,
             )
+        return closed_terminals
 
     async def _uniform_interrupt(
         self, spec: _UniformInterrupt, conv_id: str, *, terminal_role: str | None = None

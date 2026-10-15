@@ -1818,7 +1818,7 @@ async def test_watch_runner_silent_on_intentional_stop(
 
     runner_id = token_bound_runner_id("tok_stop")
     stop_result = await host._handle_stop(
-        HostStopRunnerFrame(request_id="req_stop_2", runner_id=runner_id)
+        HostStopRunnerFrame(request_id="req_stop_2", runner_id=runner_id, session_id=None)
     )
     assert stop_result.status == "stopped"
 
@@ -2142,6 +2142,7 @@ async def test_connect_watchdog_silent_on_intentional_stop(
             HostStopRunnerFrame(
                 request_id="req_conn_stop_2",
                 runner_id=token_bound_runner_id("tok_conn_stop"),
+                session_id=None,
             )
         )
         assert stop_result.status == "stopped"
@@ -3234,6 +3235,7 @@ async def test_handle_stop_terminates_process(tmp_path: Path) -> None:
     frame = HostStopRunnerFrame(
         request_id="req_003",
         runner_id="runner_aaa",
+        session_id=None,
     )
     result = await host._handle_stop(frame)
 
@@ -3257,6 +3259,7 @@ async def test_handle_stop_unknown_runner() -> None:
     frame = HostStopRunnerFrame(
         request_id="req_004",
         runner_id="runner_nonexistent",
+        session_id=None,
     )
     result = await host._handle_stop(frame)
 
@@ -3275,7 +3278,7 @@ async def test_stop_trigger_waits_for_termination_after_cancellation(
     stop_started = threading.Event()
     release_stop = threading.Event()
 
-    def _blocking_stop(_proc: object) -> None:
+    def _blocking_stop(_proc: object, grace_s: float | None = None) -> None:
         stop_started.set()
         release_stop.wait(5.0)
 
@@ -6141,34 +6144,49 @@ async def test_remote_host_retries_connection_refused_past_threshold(
     assert spy.call_count == 5
 
 
+async def test_connected_local_host_preserves_runners_beyond_refusal_horizon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A previously usable local endpoint can return after long maintenance."""
+    monkeypatch.setattr("omnigent.host.connect._RECONNECT_BASE_S", 0.0)
+    refused = _refused_exc()
+    spy = _ConnectSpy([refused] * 101 + [None, asyncio.CancelledError()])
+    _patch_connect(monkeypatch, spy)
+    host = _host("http://127.0.0.1:8123")
+    host._ever_connected = True
+    monkeypatch.setattr("omnigent.host.connect.configured_harness_map", dict)
+    process = Mock()
+    process.poll.return_value = None
+    host._runners["runner_synthetic"] = _RunnerHandle(
+        proc=process,
+        log_path=Path("/tmp/synthetic.log"),
+        session_id="synthetic",
+        durable=True,
+    )
+    await host.run()
+    assert spy.call_count == 103
+    process.terminate.assert_not_called()
+    process.kill.assert_not_called()
+
+
 async def test_accepted_connect_resets_loopback_refused_streak(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A successful connect resets the loopback refused streak.
-
-    Only CONSECUTIVE refusals may kill the host: a streak interrupted by
-    a real connection (server came back, then died again) must start
-    counting from zero, not inherit pre-recovery refusals.
-    """
+    """A successful connect qualifies the endpoint for maintenance retries."""
     monkeypatch.setattr("omnigent.host.connect._RECONNECT_BASE_S", 0.0)
     monkeypatch.setattr("omnigent.host.connect._LOOPBACK_REFUSED_FATAL_ATTEMPTS", 3)
     # The accepted connect sends a real hello; skip its slow CLI probes —
     # only the streak accounting is under test here.
     monkeypatch.setattr("omnigent.host.connect.configured_harness_map", dict)
     refused = _refused_exc()
-    # 2 refusals (one short of fatal), an accepted upgrade (its tunnel
-    # drops on first recv), then refusals repeating until fatal.
-    spy = _ConnectSpy([refused, refused, None, refused])
+    spy = _ConnectSpy(
+        [refused, refused, None, refused, refused, refused, refused, asyncio.CancelledError()]
+    )
     _patch_connect(monkeypatch, spy)
     host = _host("http://localhost:5566")
 
-    with pytest.raises(HostConnectError):
-        await host.run()
-
-    # 6 = 2 refusals + accepted connect + 3 FRESH refusals to reach the
-    # threshold. 5 would mean the accepted connect did not reset the
-    # streak (pre-recovery refusals were counted toward the exit).
-    assert spy.call_count == 6
+    await host.run()
+    assert spy.call_count == 8
 
 
 def test_run_host_process_exits_nonzero_on_fatal(
@@ -7129,7 +7147,9 @@ async def test_frame_handler_failure_serializes_decoded_attribution(
             path="/unused",
             session_id="session-b",
         ),
-        HostStopRunnerFrame(request_id="req_runner", runner_id="runner-a"),
+        HostStopRunnerFrame(
+            request_id="req_runner", runner_id="runner-a", session_id="session-runner"
+        ),
         HostModelOptionsFrame(request_id="req_identity_poor", harness="claude-native"),
     ]
 
@@ -7158,7 +7178,7 @@ async def test_frame_handler_failure_serializes_decoded_attribution(
         assert "runner_id" not in attrs
 
     runner_row = by_request["req_runner"]
-    assert runner_row["session_id"] is None
+    assert runner_row["session_id"] == "session-runner"
     assert runner_row["attributes"]["runner_id"] == "runner-a"
     assert runner_row["attributes"]["frame_kind"] == "host.stop_runner"
 
@@ -7432,7 +7452,9 @@ async def test_stop_frame_never_overtakes_launch(
     )
     host._start_frame_task(
         ws,  # type: ignore[arg-type] — duck-typed ws
-        encode_host_frame(HostStopRunnerFrame(request_id="rq2", runner_id="runner_x")),
+        encode_host_frame(
+            HostStopRunnerFrame(request_id="rq2", runner_id="runner_x", session_id=None)
+        ),
     )
     await asyncio.sleep(0.05)
     # The stop is parked behind the lifecycle lock, not run concurrently.
@@ -8809,3 +8831,423 @@ def test_run_host_process_classifies_how_the_host_ended(
         )
 
     assert _host_exit_reasons(caplog) == [expected]
+
+
+@pytest.mark.parametrize(
+    "drift,category", [("environment", "config_mismatch"), ("harness", "harness_mismatch")]
+)
+async def test_live_custody_refuses_relaunch_drift_without_replacing_native(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, drift: str, category: str
+) -> None:
+    import hashlib
+
+    from omnigent.native.state_files import canonical_json
+    from omnigent.runner.identity import token_bound_runner_id
+
+    host = _make_host_process()
+    monkeypatch.setattr("omnigent.host.connect.SUPPORTED_HARNESSES", frozenset({"codex-native"}))
+    monkeypatch.setattr(host, "_adopt_custodied_runners", lambda: None)
+    monkeypatch.setattr("omnigent.host.connect.harness_is_configured", lambda harness: False)
+    process = Mock()
+    process.poll.return_value = None
+    handle = _RunnerHandle(
+        proc=process,
+        log_path=tmp_path / "synthetic.log",
+        session_id="conv_synthetic",
+        durable=True,
+    )
+    handle.environment_digest = hashlib.sha256(
+        canonical_json({"SYNTHETIC": "original"}).encode()
+    ).hexdigest()
+    runner_id = token_bound_runner_id("synthetic-binding")
+    host._runners[runner_id] = handle
+    result = await host._handle_launch(
+        HostLaunchRunnerFrame(
+            request_id="repeat",
+            binding_token="synthetic-binding",
+            session_id="conv_synthetic",
+            workspace=str(tmp_path),
+            harness="claude-native" if drift == "harness" else "codex-native",
+            native_env={"SYNTHETIC": "changed"} if drift == "environment" else None,
+        )
+    )
+    assert result.status == "failed" and result.error_code == category
+    assert host._runners[runner_id] is handle
+    process.terminate.assert_not_called()
+    process.kill.assert_not_called()
+    _cleanup_host(host)
+
+
+async def test_ended_custodian_releases_attachment_for_a_new_session_generation(
+    tmp_path: Path,
+) -> None:
+    host = _make_host_process()
+    process = Mock()
+    process.poll.return_value = 0
+    process.returncode = 0
+    attachment = Mock()
+    attachment.__exit__ = Mock()
+    host._custody_attachments["conv_synthetic"] = attachment
+    host._runners["runner_synthetic"] = _RunnerHandle(
+        proc=process,
+        log_path=tmp_path / "owner.log",
+        session_id="conv_synthetic",
+        durable=True,
+    )
+    await host._watch_runner("runner_synthetic")
+    assert "conv_synthetic" not in host._custody_attachments
+    attachment.__exit__.assert_called_once_with(None, None, None)
+    _cleanup_host(host)
+
+
+async def test_stale_custody_does_not_block_healthy_adoption_or_allow_relaunch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from omnigent.runner.custody import SessionCustody, custody_session_key
+    from tests.runner.test_session_custody import context
+
+    host = _make_host_process()
+    monkeypatch.setattr("omnigent.process_logging.data_dir", lambda: tmp_path)
+    monkeypatch.setattr("omnigent.host.connect.host_config_digest", lambda: "a" * 64)
+    monkeypatch.setattr("omnigent.host.connect.SUPPORTED_HARNESSES", frozenset({"codex-native"}))
+    common = {**context(), "host_id": host._identity.host_id, "endpoint": host._server_url}
+    stale = SessionCustody.create(
+        tmp_path, {**common, "session_id": "stale", "runner_id": "stale_runner"}
+    )
+    stale._lock.release()
+    stale_before = stale.record_path.read_bytes()
+    with SessionCustody.create(
+        tmp_path, {**common, "session_id": "healthy", "runner_id": "healthy_runner"}
+    ):
+        host._adopt_custodied_runners()
+        assert host._runners["healthy_runner"].session_id == "healthy"
+        assert host._custody_refusals == {custody_session_key("stale"): "stale_attachment"}
+        result = await host._handle_launch(
+            HostLaunchRunnerFrame(
+                request_id="stale-relaunch",
+                binding_token="synthetic-binding",
+                session_id="stale",
+                workspace=str(tmp_path),
+                harness="codex-native",
+            )
+        )
+        assert result.status == "failed" and result.error_code == "stale_attachment"
+        assert stale.record_path.read_bytes() == stale_before
+        assert "healthy_runner" in host._runners
+        host._cleanup_runners()
+    _cleanup_host(host)
+
+
+async def test_custody_status_refuses_drift_then_adopts_same_owner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from omnigent.runner.custody import SessionCustody
+    from tests.runner.test_session_custody import context
+
+    host = _make_host_process()
+    monkeypatch.setattr("omnigent.process_logging.data_dir", lambda: tmp_path)
+    digest = "d" * 64
+    monkeypatch.setattr("omnigent.host.connect.host_config_digest", lambda: digest)
+    common = {**context(), "host_id": host._identity.host_id, "endpoint": host._server_url}
+    with SessionCustody.create(tmp_path, common) as owner:
+        before = owner.record_path.read_bytes()
+        query = HostRunnerStatusFrame(
+            request_id="drift",
+            runner_id=owner.record.runner_id,
+            session_id=owner.record.session_id,
+        )
+        refused = await host._handle_runner_status(query)
+        assert refused.status == "refused"
+        assert not host._runners
+        assert owner.still_owner()
+        assert owner.record_path.read_bytes() == before
+        digest = str(common["config_digest"])
+        accepted = await host._handle_runner_status(query)
+        assert accepted.status == "alive"
+        assert host._runners[owner.record.runner_id].proc.pid == owner.record.owner.pid
+        assert owner.record_path.read_bytes() == before
+        foreign = await host._handle_runner_status(
+            HostRunnerStatusFrame(
+                request_id="foreign", runner_id="other_runner", session_id=owner.record.session_id
+            )
+        )
+        assert foreign.status == "refused"
+        host._cleanup_runners()
+    _cleanup_host(host)
+
+
+@pytest.mark.parametrize("publication", ["directory", "owner_lock", "malformed"])
+async def test_incomplete_custody_refuses_only_affected_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, publication: str
+) -> None:
+    from omnigent.runner.custody import CustodyError, SessionCustody, custody_session_key
+    from tests.runner.test_session_custody import context
+
+    host = _make_host_process()
+    monkeypatch.setattr("omnigent.process_logging.data_dir", lambda: tmp_path)
+    monkeypatch.setattr("omnigent.host.connect.host_config_digest", lambda: "a" * 64)
+    monkeypatch.setattr("omnigent.host.connect.SUPPORTED_HARNESSES", frozenset({"codex-native"}))
+    common = {**context(), "host_id": host._identity.host_id, "endpoint": host._server_url}
+    with SessionCustody.create(tmp_path, common) as owner:
+        directory = tmp_path / "custody" / custody_session_key("incomplete")
+        directory.mkdir(mode=0o700)
+        if publication in {"owner_lock", "malformed"}:
+            (directory / "owner.lock").touch(mode=0o600)
+        if publication == "malformed":
+            (directory / "session.json").write_text("{")
+        contents = {p.name: p.read_bytes() for p in directory.iterdir()}
+        healthy = await host._handle_runner_status(
+            HostRunnerStatusFrame(
+                request_id="healthy",
+                runner_id=owner.record.runner_id,
+                session_id=owner.record.session_id,
+            )
+        )
+        assert healthy.status == "alive"
+        refused = await host._handle_runner_status(
+            HostRunnerStatusFrame(
+                request_id="incomplete", runner_id="missing", session_id="incomplete"
+            )
+        )
+        assert refused.status == "refused"
+        launch = await host._handle_launch(
+            HostLaunchRunnerFrame(
+                request_id="relaunch",
+                binding_token="synthetic",
+                session_id="incomplete",
+                workspace=str(tmp_path),
+                harness="codex-native",
+            )
+        )
+        assert launch.status == "failed" and launch.error_code == "record_mismatch"
+        with pytest.raises(CustodyError, match="record_mismatch"):
+            SessionCustody.create(tmp_path, {**common, "session_id": "incomplete"})
+        assert {p.name: p.read_bytes() for p in directory.iterdir()} == contents
+        assert owner.still_owner()
+        host._cleanup_runners()
+    _cleanup_host(host)
+
+
+@pytest.mark.parametrize("eviction", ["watcher", "reconnect_race", "status"])
+async def test_exited_custodian_eviction_preserves_status_refusal(
+    monkeypatch, tmp_path, eviction
+) -> None:
+    import threading
+
+    from omnigent.runner.custody import SessionAttachment, SessionCustody
+    from tests.runner.test_session_custody import context
+
+    host = _make_host_process()
+    monkeypatch.setattr("omnigent.process_logging.data_dir", lambda: tmp_path)
+    monkeypatch.setattr("omnigent.host.connect.host_config_digest", lambda: "a" * 64)
+    common = {**context(), "host_id": host._identity.host_id, "endpoint": host._server_url}
+    with SessionCustody.create(tmp_path, common) as owner:
+        session, runner = owner.record.session_id, owner.record.runner_id
+        attachment = SessionAttachment(tmp_path, session, generation="host-test")
+        attachment.__enter__()
+        attachment.adopt(
+            host_id=host._identity.host_id, endpoint=host._server_url, config_digest="a" * 64
+        )
+        host._custody_attachments[session] = attachment
+        process = Mock(returncode=0)
+        entered, release = threading.Event(), threading.Event()
+
+        def poll():
+            if eviction == "reconnect_race" and not entered.is_set():
+                entered.set()
+                assert release.wait(5)
+            return 0
+
+        process.poll.side_effect = poll
+        host._runners[runner] = _RunnerHandle(
+            proc=process,
+            log_path=tmp_path / "owner.log",
+            session_id=session,
+            durable=True,
+        )
+        owner._lock.release()
+        before = owner.record_path.read_bytes()
+        if eviction != "status":
+            watcher = asyncio.create_task(host._watch_runner(runner))
+            try:
+                if eviction == "reconnect_race":
+                    assert await asyncio.to_thread(entered.wait, 5)
+                    assert host._alive_runner_ids() == []
+            finally:
+                release.set()
+                await watcher
+            assert session not in host._custody_attachments
+            assert runner not in host._runners
+        response = await host._handle_runner_status(
+            HostRunnerStatusFrame(
+                request_id="status",
+                runner_id=runner,
+                session_id=session,
+            )
+        )
+        assert response.status == "refused"
+        assert session not in host._custody_attachments
+        assert runner not in host._runners
+        assert owner.record_path.read_bytes() == before
+        process.terminate.assert_not_called()
+        process.kill.assert_not_called()
+    _cleanup_host(host)
+
+
+async def test_dead_custodian_status_allows_verified_ended_receipt(monkeypatch, tmp_path):
+    from omnigent.runner.custody import SessionAttachment, SessionCustody
+    from tests.runner.test_session_custody import context
+
+    host = _make_host_process()
+    monkeypatch.setattr("omnigent.process_logging.data_dir", lambda: tmp_path)
+    monkeypatch.setattr("omnigent.host.connect.host_config_digest", lambda: "a" * 64)
+    common = {**context(), "host_id": host._identity.host_id, "endpoint": host._server_url}
+    with SessionCustody.create(tmp_path, common) as owner:
+        session, runner = owner.record.session_id, owner.record.runner_id
+        attachment = SessionAttachment(tmp_path, session, generation="ended-host")
+        attachment.__enter__()
+        host._custody_attachments[session] = attachment
+        process = Mock(returncode=0)
+        process.poll.return_value = 0
+        host._runners[runner] = _RunnerHandle(
+            proc=process,
+            log_path=tmp_path / "owner.log",
+            session_id=session,
+            durable=True,
+        )
+        owner.finish()
+        before = owner.record_path.read_bytes()
+        response = await host._handle_runner_status(
+            HostRunnerStatusFrame(
+                request_id="ended",
+                runner_id=runner,
+                session_id=session,
+            )
+        )
+        assert response.status == "dead"
+        assert session not in host._custody_attachments
+        assert runner not in host._runners
+        assert owner.record_path.read_bytes() == before
+        process.terminate.assert_not_called()
+    _cleanup_host(host)
+
+
+async def test_authenticated_successor_status_and_stop_use_retained_runner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    host = _make_host_process()
+    monkeypatch.setattr("omnigent.process_logging.data_dir", lambda: tmp_path)
+    process = Mock()
+    process.poll.return_value = None
+    handle = _RunnerHandle(
+        proc=process, log_path=tmp_path / "runner.log", session_id="launch-session"
+    )
+    host._runners["retained-runner"] = handle
+    try:
+        status = await host._handle_runner_status(
+            HostRunnerStatusFrame(
+                request_id="status", runner_id="retained-runner", session_id="successor"
+            )
+        )
+        assert status.status == "alive"
+        stopped = await host._handle_stop(
+            HostStopRunnerFrame(
+                request_id="stop", runner_id="retained-runner", session_id="successor"
+            )
+        )
+        assert stopped.status == "stopped"
+        process.terminate.assert_called_once()
+        assert "retained-runner" not in host._runners
+    finally:
+        _cleanup_host(host)
+
+
+@pytest.mark.parametrize("scope", ["none", "foreign-host", "foreign-endpoint", "matching"])
+async def test_symlink_config_restricts_only_in_scope_custody_adoption(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scope: str
+) -> None:
+    from omnigent.config import load_global_config
+    from omnigent.runner.custody import SessionCustody, custody_session_key
+    from tests.runner.test_session_custody import context
+
+    config = tmp_path / "actual.yaml"
+    config.write_text("{}\n")
+    link = tmp_path / "config.yaml"
+    link.symlink_to(config)
+    monkeypatch.setattr("omnigent.config.global_config_path", lambda: link)
+    monkeypatch.setattr("omnigent.process_logging.data_dir", lambda: tmp_path)
+    assert load_global_config() == {}
+    host = _make_host_process()
+    common = {**context(), "host_id": host._identity.host_id, "endpoint": host._server_url}
+    if scope == "foreign-host":
+        common["host_id"] = "other-host"
+    elif scope == "foreign-endpoint":
+        common["endpoint"] = "http://other-endpoint:8000"
+    with contextlib.ExitStack() as resources:
+        if scope != "none":
+            owner = resources.enter_context(SessionCustody.create(tmp_path, common))
+            before = owner.record_path.read_bytes()
+        try:
+            host._adopt_custodied_runners()
+            assert not host._runners
+            if scope == "matching":
+                assert host._custody_refusals == {
+                    custody_session_key(str(common["session_id"])): "record_mismatch"
+                }
+            else:
+                assert not host._custody_refusals
+            if scope != "none":
+                assert owner.record_path.read_bytes() == before
+        finally:
+            _cleanup_host(host)
+
+
+@pytest.mark.parametrize("mismatch", ["session", "runner", "host", "endpoint", "process"])
+async def test_custody_stop_retains_exact_scope_checks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mismatch: str
+) -> None:
+    from omnigent.runner.custody import SessionCustody
+    from tests.runner.test_session_custody import context
+
+    host = _make_host_process()
+    monkeypatch.setattr("omnigent.process_logging.data_dir", lambda: tmp_path)
+    monkeypatch.setattr("omnigent.host.connect.host_config_digest", lambda: "a" * 64)
+    common = {**context(), "host_id": host._identity.host_id, "endpoint": host._server_url}
+    if mismatch == "host":
+        common["host_id"] = "foreign-host"
+    elif mismatch == "endpoint":
+        common["endpoint"] = "http://foreign-endpoint:8000"
+    with SessionCustody.create(tmp_path, common) as owner:
+        session = owner.record.session_id
+        runner = owner.record.runner_id
+        if mismatch == "session":
+            session = "foreign-session"
+        elif mismatch == "runner":
+            runner = "foreign-runner"
+        process = Mock(pid=owner.record.owner.pid, poll=Mock(return_value=None))
+        if mismatch == "process":
+            process.pid += 100000000
+        host._runners[runner] = _RunnerHandle(
+            proc=process,
+            log_path=tmp_path / "runner.log",
+            session_id=owner.record.session_id,
+            durable=True,
+        )
+        try:
+            stopped = await host._handle_stop(
+                HostStopRunnerFrame(request_id="stop", runner_id=runner, session_id=session)
+            )
+            assert stopped.status == "failed"
+            process.terminate.assert_not_called()
+            process.kill.assert_not_called()
+            assert runner in host._runners
+            if mismatch in {"session", "runner"}:
+                status = await host._handle_runner_status(
+                    HostRunnerStatusFrame(
+                        request_id="status", runner_id=runner, session_id=session
+                    )
+                )
+                assert status.status == "refused"
+        finally:
+            _cleanup_host(host)

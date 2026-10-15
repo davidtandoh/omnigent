@@ -417,7 +417,6 @@ async def test_auto_create_codex_terminal_keeps_loop_responsive_during_profile_r
         "version",
         "permission_args",
         "retain_subscription",
-        "cancel_launch",
         "use_envelope",
         "provider_profile",
     ),
@@ -426,25 +425,24 @@ async def test_auto_create_codex_terminal_keeps_loop_responsive_during_profile_r
             version,
             permission_args,
             retain_subscription,
-            cancel_launch,
             use_envelope,
             None,
-            id=f"{version}-{'cancel' if cancel_launch else 'launch'}-"
-            f"{'envelope' if use_envelope else 'legacy'}",
+            id=f"{version}-{'envelope' if use_envelope else 'legacy'}",
         )
         for version, permission_args, retain_subscription in [
             ((0, 153, 1), ["--config", "approval_policy=on-request"], False),
             ((0, 154, 0), [], True),
             (None, [], True),
         ]
-        for cancel_launch in (False, True)
         for use_envelope in (False, True)
     ]
     + [
-        pytest.param(
-            (0, 154, 0), [], True, False, True, "configured-workspace", id="configured-provider"
-        )
+        pytest.param((0, 154, 0), [], True, True, "configured-workspace", id="configured-provider")
     ],
+)
+@pytest.mark.parametrize(
+    "launch_outcome",
+    ["success", "cancelled", "retained", "observation_cancelled", "observation_exited"],
 )
 async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     tmp_path: Path,
@@ -452,7 +450,7 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     version: tuple[int, int, int] | None,
     permission_args: list[str],
     retain_subscription: bool,
-    cancel_launch: bool,
+    launch_outcome: str,
     use_envelope: bool,
     provider_profile: str | None,
     caplog: pytest.LogCaptureFixture,
@@ -472,10 +470,21 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     :param monkeypatch: Pytest monkeypatch fixture.
     :returns: None.
     """
+    import errno
+    from unittest.mock import AsyncMock, Mock
+
     import omnigent.harness_startup_config as startup_config_mod
     import omnigent.harnesses.codex_native.app_server as codex_app_mod
+    from omnigent.inner.terminal import TerminalCreateResult, TerminalInstance
     from omnigent.runner import app as runner_app_mod
+    from omnigent.terminals import TerminalRegistry
+    from omnigent.terminals import registry as registry_mod
 
+    retained_failure = launch_outcome in {
+        "retained",
+        "observation_cancelled",
+        "observation_exited",
+    }
     session_id = "76cbdcbbf84d4149b2a7d7441b6966c1"
     thread_id = "019e96aa-0be2-7343-8d3b-6f914d60936b"
     monkeypatch.setattr(codex_native_bridge, "_BRIDGE_ROOT", tmp_path / "codex-bridge")
@@ -659,7 +668,7 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     retained_client = _RetainedClient()
     launched_specs: list[Any] = []
 
-    class _FakeResourceRegistry:
+    class _FakeResourceRegistry(SessionResourceRegistry):
         """Resource registry that records the launched terminal spec."""
 
         async def launch_auxiliary_terminal(
@@ -694,8 +703,17 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
             assert preloaded_state is not None
             assert preloaded_state.thread_id == thread_id
             launched_specs.append(spec)
-            if cancel_launch:
+            if launch_outcome == "cancelled":
                 raise asyncio.CancelledError
+            if retained_failure:
+                return await super().launch_auxiliary_terminal(
+                    session_id=session_id,
+                    terminal_name=terminal_name,
+                    session_key=session_key,
+                    spec=spec,
+                    resource_role=resource_role,
+                    parent_os_env=parent_os_env,
+                )
             return SessionResourceView(
                 id="terminal_codex_main",
                 type="terminal",
@@ -779,8 +797,64 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
         ),
     )
 
+    terminal_registry = TerminalRegistry()
+    resources = _FakeResourceRegistry(terminal_registry=terminal_registry)
+    if retained_failure:
+        private_dir = tmp_path / "terminal"
+        private_dir.mkdir()
+        instance = TerminalInstance("codex", "main", private_dir / "tmux.sock", private_dir)
+
+        async def start_terminal(**_kwargs: Any) -> None:
+            instance.running = True
+            instance.socket_path.touch()
+            if launch_outcome == "retained":
+                raise asyncio.CancelledError
+
+        probe_count = 0
+
+        async def probe_terminal() -> bool:
+            nonlocal probe_count
+            probe_count += 1
+            if probe_count == 1:
+                return True
+            if launch_outcome == "observation_cancelled":
+                raise asyncio.CancelledError
+            instance.running = False
+            return False
+
+        instance.launch = start_terminal
+        instance.is_alive = probe_terminal
+        monkeypatch.setattr(
+            registry_mod,
+            "create_terminal_instance",
+            Mock(return_value=TerminalCreateResult(instance, tmp_path)),
+        )
+        spawn = AsyncMock(side_effect=OSError(errno.EAGAIN, "synthetic exhaustion"))
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+
     try:
-        if cancel_launch:
+        if retained_failure:
+            with pytest.raises(registry_mod.TerminalCleanupRefused, match="unavailable_probe"):
+                await _auto_create_codex_terminal(
+                    session_id,
+                    resources,
+                    lambda _sid, event: published_events.append(event),
+                    agent_spec=agent_spec,
+                    server_client=_SnapshotServerClient(),
+                    session_init=session_init,
+                )
+            assert instance.running is (launch_outcome != "observation_exited")
+            assert private_dir.exists()
+            assert terminal_registry.list_for_conversation(session_id) == []
+            assert not app_server.closed
+            assert runner_app_mod._AUTO_CODEX_APP_SERVERS[session_id] is app_server
+            assert not forward_calls
+            assert not published_events
+            assert resources.terminal_resource_role(session_id, "terminal_codex_main") is None
+            assert terminal_registry.get_instance_lock(session_id, "codex", "main") is None
+            assert len(build_calls) == 1
+            return
+        if launch_outcome == "cancelled":
             with pytest.raises(asyncio.CancelledError):
                 await _auto_create_codex_terminal(
                     session_id,
@@ -1104,6 +1178,8 @@ async def test_auto_create_codex_terminal_fork_clones_rollout_and_resumes(
     class _FakeResourceRegistry:
         """Resource registry that records the launched terminal spec."""
 
+        terminal_registry = None
+
         async def launch_auxiliary_terminal(
             self,
             *,
@@ -1402,6 +1478,8 @@ async def test_auto_create_codex_terminal_fork_builds_rollout_from_items_and_res
     class _FakeResourceRegistry:
         """Resource registry that records the launched terminal spec."""
 
+        terminal_registry = None
+
         async def launch_auxiliary_terminal(
             self,
             *,
@@ -1673,6 +1751,8 @@ async def test_auto_create_codex_terminal_uses_worktree_workspace_not_bundle_dir
     class _FakeResourceRegistry:
         """Resource registry that records the launched terminal spec."""
 
+        terminal_registry = None
+
         async def launch_auxiliary_terminal(
             self,
             *,
@@ -1902,6 +1982,8 @@ async def test_auto_create_codex_terminal_fresh_launch_loads_relaunch_graph(
     class _FakeResourceRegistry:
         """Resource registry that accepts the launched terminal."""
 
+        terminal_registry = None
+
         async def launch_auxiliary_terminal(self, **kwargs: Any) -> SessionResourceView:
             """
             Return a terminal resource view for the launch.
@@ -2088,6 +2170,8 @@ async def test_auto_create_codex_terminal_starts_relay_at_session_creation(
 
     class _FakeResourceRegistry:
         """Resource registry returning a fixed terminal view."""
+
+        terminal_registry = None
 
         async def launch_auxiliary_terminal(
             self,
@@ -3640,11 +3724,14 @@ async def test_codex_session_needs_runner_terminal_false_without_client() -> Non
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("outcome", ["success", "setup_error", "forward_error", "cancelled"])
+@pytest.mark.parametrize(
+    "outcome", ["success", "setup_error", "forward_error", "rotation_refused", "cancelled"]
+)
 async def test_codex_known_thread_forwarder_closes_retained_subscription(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, outcome: str
 ) -> None:
     """Ownership transfer must close the preload client on every forwarder exit."""
+    from omnigent.errors import OmnigentError
     from omnigent.harnesses.codex_native import forwarder as codex_forwarder
     from omnigent.runner import _entry
     from omnigent.runner.native import orchestration
@@ -3669,6 +3756,8 @@ async def test_codex_known_thread_forwarder_closes_retained_subscription(
     async def forward(**kwargs: Any) -> None:
         assert kwargs["client"] is client
         assert not closed
+        if outcome == "rotation_refused":
+            raise OmnigentError("rotation refused", code="native_rotation_refused")
         if outcome == "forward_error":
             raise RuntimeError("forward failed")
         if outcome == "cancelled":
@@ -3689,9 +3778,20 @@ async def test_codex_known_thread_forwarder_closes_retained_subscription(
     if outcome == "success":
         await operation
     else:
-        error = asyncio.CancelledError if outcome == "cancelled" else RuntimeError
+        error = (
+            OmnigentError
+            if outcome == "rotation_refused"
+            else asyncio.CancelledError
+            if outcome == "cancelled"
+            else RuntimeError
+        )
         with pytest.raises(error):
             await operation
+    if outcome == "rotation_refused":
+        assert closed == ["client"]
+        assert session_id in orchestration._AUTO_CODEX_APP_SERVERS
+        orchestration._AUTO_CODEX_APP_SERVERS.pop(session_id)
+        return
     assert closed == ["client", "server"]
     assert session_id not in orchestration._AUTO_CODEX_APP_SERVERS
 
@@ -4695,6 +4795,8 @@ async def test_auto_create_codex_terminal_default_pin_requires_a_fresh_catalog(
     class _FakeResourceRegistry:
         """Resource registry that accepts the terminal launch."""
 
+        terminal_registry = None
+
         async def launch_auxiliary_terminal(
             self,
             *,
@@ -4925,6 +5027,8 @@ async def test_auto_create_codex_terminal_accepts_gateway_spelled_override(
     class _FakeResourceRegistry:
         """Resource registry that accepts the terminal launch."""
 
+        terminal_registry = None
+
         async def launch_auxiliary_terminal(
             self,
             *,
@@ -4975,9 +5079,23 @@ async def test_auto_create_codex_terminal_accepts_gateway_spelled_override(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("launch_fails", [False, True])
+@pytest.mark.parametrize(
+    "launch_fails,rotation,terminal_state",
+    [
+        (False, "none", "ended"),
+        (True, "none", "ended"),
+        (False, "published", "refused"),
+        (False, "lost_response", "refused"),
+        (False, "published", "live"),
+        (False, "lost_response", "live"),
+    ],
+)
 async def test_codex_tui_recovery_preserves_live_control_plane(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_fails: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    launch_fails: bool,
+    rotation: str,
+    terminal_state: str,
 ) -> None:
     """A lost TUI reattaches to the live app-server without cancelling the forwarder.
 
@@ -4986,16 +5104,21 @@ async def test_codex_tui_recovery_preserves_live_control_plane(
     launch.
     """
     from types import SimpleNamespace
-    from unittest.mock import AsyncMock
+    from unittest.mock import AsyncMock, Mock
 
+    from omnigent.errors import OmnigentError
     from omnigent.harnesses.codex_native.bridge import CodexNativeBridgeState
+    from omnigent.harnesses.codex_native.forwarder import _create_thread_replacement_session
     from omnigent.runner.native import orchestration as native
     from omnigent.runner.native.orchestration import (
         _CodexNativeLaunchConfig,
         _CodexNativeTuiLaunch,
     )
+    from omnigent.terminals.registry import TerminalCleanupRefused, TerminalRegistry
+    from tests.runner.helpers import make_test_terminal_instance
 
     session_id = "tui-recovery-test-session"
+    launch_session_id = session_id
     server_url = "ws://127.0.0.1:9876"
     thread_id = "thread-live-1234"
     monkeypatch.setattr(codex_native_bridge, "_BRIDGE_ROOT", tmp_path)
@@ -5024,11 +5147,76 @@ async def test_codex_tui_recovery_preserves_live_control_plane(
         proc=SimpleNamespace(returncode=None),
         listen_url=server_url,
         codex_home=tmp_path,
+        bridge_dir=bridge_dir,
+        close=AsyncMock(),
+        terminal_cleanup_refusal=None,
     )
     forwarder = asyncio.create_task(asyncio.Event().wait())
     monkeypatch.setitem(native._AUTO_CODEX_APP_SERVERS, session_id, fake_server)
     monkeypatch.setitem(native._AUTO_FORWARDER_TASKS, session_id, forwarder)
-    monkeypatch.setattr(native, "_codex_native_launch_config", AsyncMock(return_value=config))
+    resolve_config = AsyncMock(return_value=config)
+    monkeypatch.setattr(native, "_codex_native_launch_config", resolve_config)
+    registry = TerminalRegistry()
+    registry.on_cleanup_refused = native._record_codex_terminal_cleanup_refusal
+    resources = SessionResourceRegistry(terminal_registry=registry)
+    labels = {}
+
+    async def response(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/labels"):
+            return httpx.Response(200, json={"labels": labels})
+        if request.method == "GET":
+            return httpx.Response(200, json={"agent_id": "agent", "runner_id": "runner"})
+        if request.url.path == "/v1/sessions":
+            labels.update(json.loads(request.content)["labels"])
+            return httpx.Response(200, json={"id": "successor"})
+        if request.url.path.endswith("/transfer"):
+            assert registry.transfer(launch_session_id, "successor", "codex", "main")
+            if rotation == "lost_response":
+                raise httpx.ReadTimeout("transfer applied; response lost", request=request)
+        return httpx.Response(200, json={})
+
+    client = httpx.AsyncClient(base_url="http://server", transport=httpx.MockTransport(response))
+    refusal = None
+    if rotation != "none":
+        terminal = make_test_terminal_instance("codex", "main", tmp_path)
+        terminal.args = ["--remote", server_url]
+        monkeypatch.setattr(terminal, "_tmux", AsyncMock(side_effect=OSError("kill failed")))
+        registry._by_conversation[launch_session_id] = {("codex", "main"): terminal}
+        transfer = _create_thread_replacement_session(
+            client=client,
+            old_session_id=launch_session_id,
+            bridge_dir=bridge_dir,
+            app_server_url=server_url,
+            new_thread_id=thread_id,
+        )
+        if rotation == "lost_response":
+            with pytest.raises(httpx.ReadTimeout):
+                await transfer
+            assert (
+                codex_native_bridge.read_bridge_state(bridge_dir).session_id == launch_session_id
+            )
+        else:
+            assert await transfer == "successor"
+        session_id = "successor"
+        if terminal_state == "refused":
+            with pytest.raises(TerminalCleanupRefused) as failed:
+                await registry.close(session_id, "codex", "main")
+            refusal = failed.value
+            assert not registry.list_for_cleanup(session_id)
+            assert fake_server.terminal_cleanup_refusal is refusal
+    relay = claude_native_bridge.start_tool_relay(
+        bridge_dir=bridge_dir,
+        tools=[],
+        tool_executor=AsyncMock(),
+        loop=asyncio.get_running_loop(),
+        session_id=session_id,
+    )
+    monkeypatch.setattr(relay, "close", Mock(wraps=relay.close))
+    relay_file = bridge_dir / "tool_relay.json"
+    advertisement = relay_file.read_bytes()
+    ensure_relay = AsyncMock()
+    prepare = Mock(wraps=codex_native_bridge.prepare_bridge_dir)
+    monkeypatch.setattr(codex_native_bridge, "prepare_bridge_dir", prepare)
     cancel = AsyncMock()
     monkeypatch.setattr(native, "_cancel_auto_forwarder_task", cancel)
     fake_view = SessionResourceView(
@@ -5041,26 +5229,183 @@ async def test_codex_tui_recovery_preserves_live_control_plane(
     )
     monkeypatch.setattr(native, "_launch_codex_native_tui", launch)
     try:
-        if launch_fails:
+        if terminal_state != "ended":
+            with pytest.raises(OmnigentError) as refused:
+                await native._auto_create_codex_terminal(
+                    session_id,
+                    resources,
+                    lambda *_: None,
+                    server_client=client,
+                    ensure_comment_relay=ensure_relay,
+                )
+            if refusal is not None:
+                assert refused.value is refusal
+            else:
+                assert refused.value.code == "process_pending"
+            resolve_config.assert_not_awaited()
+            prepare.assert_not_called()
+            launch.assert_not_awaited()
+            assert terminal.running
+        elif launch_fails:
             with pytest.raises(RuntimeError, match="TUI launch failed"):
                 await native._auto_create_codex_terminal(
-                    session_id, cast(Any, None), lambda *_: None
+                    session_id,
+                    resources,
+                    lambda *_: None,
+                    server_client=client,
+                    ensure_comment_relay=ensure_relay,
                 )
         else:
             result = await native._auto_create_codex_terminal(
-                session_id, cast(Any, None), lambda *_: None
+                session_id,
+                resources,
+                lambda *_: None,
+                server_client=client,
+                ensure_comment_relay=ensure_relay,
             )
             assert result is fake_view
         cancel.assert_not_awaited()
         assert not forwarder.done()
-        assert native._AUTO_CODEX_APP_SERVERS.get(session_id) is fake_server
-        assert launch.await_count == 1
-        assert launch.await_args is not None
-        assert launch.await_args.kwargs["app_server"] is fake_server
-        assert launch.await_args.kwargs["thread_id"] == thread_id
+        assert native._AUTO_CODEX_APP_SERVERS.get(launch_session_id) is fake_server
+        fake_server.close.assert_not_awaited()
+        ensure_relay.assert_not_awaited()
+        relay.close.assert_not_called()
+        assert relay_file.read_bytes() == advertisement
+        if terminal_state == "ended":
+            assert launch.await_count == 1
+            assert launch.await_args is not None
+            assert launch.await_args.kwargs["app_server"] is fake_server
+            assert launch.await_args.kwargs["thread_id"] == thread_id
     finally:
+        relay.close()
+        await client.aclose()
         forwarder.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await forwarder
-        native._AUTO_CODEX_APP_SERVERS.pop(session_id, None)
-        native._AUTO_FORWARDER_TASKS.pop(session_id, None)
+        native._AUTO_CODEX_APP_SERVERS.pop(launch_session_id, None)
+        native._AUTO_FORWARDER_TASKS.pop(launch_session_id, None)
+
+
+@pytest.mark.parametrize("forwarder_path", ["known", "discovery"])
+@pytest.mark.parametrize("termination_refused", [False, True])
+def test_codex_shutdown_refusal_survives_cancelled_usage_flush(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    forwarder_path: str,
+    termination_refused: bool,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from omnigent import cli_auth
+    from omnigent.errors import OmnigentError
+    from omnigent.harnesses.codex_native import forwarder
+    from omnigent.runner import _entry
+    from omnigent.runner.native import orchestration
+
+    started = asyncio.Event()
+    flushing = asyncio.Event()
+    flush_cancelled = []
+    tasks = []
+    refusal = OmnigentError("Terminal cleanup refused", code="unavailable_probe")
+    server = SimpleNamespace(close=AsyncMock())
+    router = AsyncMock()
+    turn_router = AsyncMock()
+
+    async def events():
+        started.set()
+        await asyncio.Event().wait()
+        yield {}
+
+    client = SimpleNamespace(iter_events=events, close=AsyncMock())
+
+    async def subscribe(*_args, usage_coalescer, **_kwargs):
+        usage_coalescer.record({"tokenUsage": {"total": {"inputTokens": 1000}}})
+        await asyncio.Event().wait()
+
+    async def post(request):
+        if request.method == "POST":
+            payload = json.loads(request.content)
+            assert payload["type"] == "external_session_usage"
+            flushing.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                flush_cancelled.append(True)
+                raise
+        return httpx.Response(200, json={})
+
+    @contextlib.asynccontextmanager
+    async def open_client(base_url, **_kwargs):
+        async with httpx.AsyncClient(
+            base_url=base_url, transport=httpx.MockTransport(post)
+        ) as ap_client:
+            yield ap_client
+
+    monkeypatch.setenv("RUNNER_SERVER_URL", "http://runner.test")
+    monkeypatch.setattr(_entry, "_make_auth_token_factory", lambda: None)
+    monkeypatch.setattr(cli_auth, "open_server_client", open_client)
+    monkeypatch.setattr(forwarder, "_seed_mcp_startup_round", AsyncMock(return_value=None))
+    monkeypatch.setattr(forwarder, "_subscribe_until_ready", subscribe)
+    monkeypatch.setattr(forwarder, "_drive_side_chat_requests", AsyncMock())
+    monkeypatch.setattr(forwarder, "wait_for_thread_started", AsyncMock(return_value="thread"))
+    monkeypatch.setattr(orchestration, "_AUTO_CODEX_APP_SERVERS", {"session": server})
+    monkeypatch.setattr(orchestration, "_AUTO_FORWARDER_TASKS", {})
+    monkeypatch.setattr(orchestration, "_AUTO_FORWARDER_CANCEL_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(orchestration, "_shutdown_session_router_async", router)
+    monkeypatch.setattr(orchestration, "_shutdown_session_turn_router_async", turn_router)
+    monkeypatch.setattr(codex_native_bridge, "bridge_dir_for_bridge_id", lambda _session: tmp_path)
+
+    async def run():
+        if forwarder_path == "known":
+            operation = orchestration._codex_forward_known_thread(
+                session_id="session",
+                bridge_dir=tmp_path,
+                codex_ws_url="ws://runner.test",
+                thread_id="thread",
+                client=client,
+            )
+        else:
+            operation = orchestration._codex_discover_thread_and_forward(
+                session_id="session",
+                bridge_dir=tmp_path,
+                codex_ws_url="ws://runner.test",
+                codex_home=tmp_path,
+                workspace=str(tmp_path),
+                event_client=client,
+                app_server=server,
+                routing_summary="synthetic",
+            )
+        task = asyncio.create_task(operation)
+        tasks.append(task)
+        orchestration._register_auto_forwarder_task("session", task)
+        await asyncio.wait_for(started.wait(), timeout=2)
+        await orchestration._cancel_auto_forwarder_task(
+            "session",
+            refusal=refusal if termination_refused else None,
+        )
+        assert flushing.is_set()
+        assert not task.done()
+        if termination_refused:
+            raise refusal
+
+    if termination_refused:
+        with pytest.raises(OmnigentError) as raised:
+            asyncio.run(run())
+        assert raised.value is refusal
+        server.close.assert_not_awaited()
+        router.assert_not_awaited()
+        turn_router.assert_not_awaited()
+        assert orchestration._AUTO_CODEX_APP_SERVERS["session"] is server
+    else:
+        asyncio.run(run())
+        server.close.assert_awaited_once()
+        router.assert_awaited_once()
+        turn_router.assert_awaited_once()
+        assert not orchestration._AUTO_CODEX_APP_SERVERS
+    assert flush_cancelled == [True]
+    assert tasks[0].cancelled()
+    with pytest.raises(asyncio.CancelledError) as cancelled:
+        tasks[0].result()
+    if termination_refused:
+        assert cancelled.value.args == (refusal,)

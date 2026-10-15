@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from omnigent._platform import IS_LINUX
+from omnigent._platform import IS_LINUX, IS_POSIX
+
+if TYPE_CHECKING:
+    import psutil
 
 OWNER_PID_FILENAME = "owner.pid"
 
@@ -19,6 +23,49 @@ class OwnerClaim:
     pid: int
     pid_ns: str
     boot_id: str | None
+
+
+@dataclass(frozen=True)
+class ProcessIdentity:
+    """An exact local process, including start time to reject PID reuse."""
+
+    pid: int
+    started_at: float
+    pid_ns: str
+    boot_id: str | None
+
+    @classmethod
+    def capture(cls, pid: int) -> ProcessIdentity:
+        import psutil
+
+        namespace = current_pid_namespace()
+        boot = current_boot_id()
+        if namespace is None or (IS_LINUX and boot is None):
+            raise ValueError("unavailable_probe")
+        process = psutil.Process(pid)
+        if IS_POSIX and process.uids().real != os.getuid():
+            raise ValueError("record_mismatch")
+        if not process.is_running() or process.status() == psutil.STATUS_ZOMBIE:
+            raise ValueError("process_pending")
+        return cls(pid, process.create_time(), namespace, boot)
+
+    def as_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+    def require_live(self) -> psutil.Process:
+        """Return a psutil handle only after exact local identity verification."""
+        import psutil
+
+        if self.pid_ns != current_pid_namespace() or self.boot_id != current_boot_id():
+            raise ValueError("record_mismatch")
+        process = psutil.Process(self.pid)
+        if IS_POSIX and process.uids().real != os.getuid():
+            raise ValueError("record_mismatch")
+        if process.create_time() != self.started_at:
+            raise ValueError("record_mismatch")
+        if not process.is_running() or process.status() == psutil.STATUS_ZOMBIE:
+            raise ValueError("process_pending")
+        return process
 
 
 def current_pid_namespace() -> str | None:

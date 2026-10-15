@@ -1161,19 +1161,20 @@ def _run_parent_death_killer(
     request_shutdown: Callable[[], None],
     *,
     adopted: threading.Event | None = None,
+    owner_alive: Callable[[], bool] | None = None,
     poll_interval_s: float = 0.5,
     grace_s: float = 2.0,
     exit_fn: Callable[[int], None] = os._exit,
 ) -> None:
-    """Force the runner to exit once its parent (host daemon) dies.
+    """Exit on custody lease loss, or parent death when no lease is supplied.
 
     Runs on a dedicated daemon thread, NOT the event loop: when the parent
     dies while a harness subprocess is mid-boot, the runner's own teardown
     removes the harness instance dir out from under it and the asyncio
     shutdown wedges the event loop — so an event-loop watchdog would never
     fire and the WS tunnel would stay open, leaving the server seeing the
-    runner online forever. On detecting the parent's death this requests a
-    graceful shutdown, then after *grace_s* hard-exits as a backstop. When
+    runner online forever. On detecting lease loss or parent death, request
+    graceful shutdown, then after *grace_s* hard-exit as a backstop. When
     graceful shutdown wins the race the process is already gone and this
     daemon thread dies with it, so the hard exit is a no-op in practice.
 
@@ -1190,7 +1191,9 @@ def _run_parent_death_killer(
     :param adopted: Event set when the runner has been adopted; once set,
         the watcher returns without requesting shutdown. ``None`` disables
         adoption (watch until parent death).
-    :param poll_interval_s: Seconds between parent-liveness probes, e.g.
+    :param owner_alive: Durable session lease probe. When supplied, monitor
+        that lease across threads instead of the replaceable launch parent.
+    :param poll_interval_s: Seconds between lease or parent-liveness probes, e.g.
         ``0.5``.
     :param grace_s: Seconds to allow graceful shutdown before the hard
         exit, e.g. ``2.0``.
@@ -1198,12 +1201,11 @@ def _run_parent_death_killer(
         injectable so tests can observe it without killing the runner.
     :returns: None.
     """
-    while not _parent_is_orphaned(parent_pid):
+    while owner_alive() if owner_alive is not None else not _parent_is_orphaned(parent_pid):
         if adopted is not None and adopted.is_set():
             return
         time.sleep(poll_interval_s)
-    # Parent is gone (or never set). Honor a late adopt that raced the
-    # parent's exit so an intentional detach is never torn down.
+    # The lease or parent is gone. Honor a late adoption before teardown.
     if adopted is not None and adopted.is_set():
         return
     request_shutdown()
@@ -1213,8 +1215,9 @@ def _run_parent_death_killer(
     # exit-reason logging in _run_tunnel_from_env's finally block. The file
     # handler flushes per record, so this lands even though os._exit follows.
     _logger.warning(
-        "runner exiting: parent process died and graceful shutdown did not "
+        "runner exiting: %s and graceful shutdown did not "
         "complete within %.1fs; forcing hard exit",
+        "session custody lost" if owner_alive is not None else "parent process died",
         grace_s,
         extra={"session_id": runner_primary_session_id()},
     )
@@ -1604,16 +1607,57 @@ def create_app(
             await _pane_reaper.shutdown()
         # Host shutdown skips per-session deletion, so close native servers here.
         from omnigent.runner.native import (
+            orchestration,
             teardown_all_codex_native_app_servers,
             teardown_all_opencode_native_servers,
+            teardown_opencode_native_server,
         )
+        from omnigent.runner.resource_registry import _terminal_cleanup_error
 
-        with contextlib.suppress(Exception):
-            await teardown_all_codex_native_app_servers()
+        terminal_dependencies = [
+            (session_id, remote_url)
+            for session_id in _terminal_registry.active_conversation_ids()
+            for entry in _terminal_registry.list_for_cleanup(session_id)
+            for option, remote_url in zip(
+                entry.instance.args, entry.instance.args[1:], strict=False
+            )
+            if option == "--remote"
+        ]
+        closed_sessions: set[str] = set()
+
+        async def preserve_dependents(session_id: str, refusal: Exception) -> None:
+            named_refusal = _terminal_cleanup_error(refusal)
+            for launch_id, server in list(orchestration._AUTO_CODEX_APP_SERVERS.items()):
+                if (session_id, server.listen_url) in terminal_dependencies:
+                    await orchestration._cancel_registered_auto_forwarder_task(
+                        launch_id, refusal=named_refusal
+                    )
+            if session_id not in orchestration._AUTO_CODEX_APP_SERVERS:
+                await orchestration._cancel_registered_auto_forwarder_task(
+                    session_id, refusal=named_refusal
+                )
+
+        async def close_dependents(session_id: str) -> None:
+            closed_sessions.add(session_id)
+            for launch_id, server in list(orchestration._AUTO_CODEX_APP_SERVERS.items()):
+                dependents = {
+                    owner
+                    for owner, remote_url in terminal_dependencies
+                    if remote_url == server.listen_url
+                }
+                if dependents and dependents <= closed_sessions:
+                    await orchestration._teardown_codex_native_launch(launch_id)
+            await teardown_opencode_native_server(session_id)
+            await pm.release(session_id)
+
+        await _terminal_registry.shutdown(
+            on_conversation_closed=close_dependents,
+            on_conversation_refused=preserve_dependents,
+        )
+        await teardown_all_codex_native_app_servers()
         with contextlib.suppress(Exception):
             await teardown_all_opencode_native_servers()
         await pm.shutdown()
-        await _terminal_registry.shutdown()
         if mcp_manager is not None:
             await mcp_manager.shutdown()
         await server_client.aclose()
@@ -1895,16 +1939,21 @@ async def _run_tunnel_from_env() -> None:
             name=f"runner-idle-monitor:{runner_id}",
         )
     if parent_pid is not None:
+        from omnigent.runner.custody import current_custody
+
+        custody = current_custody()
 
         def _request_parent_death_shutdown() -> None:
-            """Attribute the exit to parent death, then stop on the loop.
+            """Attribute the exit to lease loss or parent death, then stop on the loop.
 
             Invoked from the parent-death daemon thread, so the reason is
             recorded and the stop event set via the event loop.
 
             :returns: None.
             """
-            _record_exit_reason("parent process died")
+            _record_exit_reason(
+                "session custody lost" if custody is not None else "parent process died"
+            )
             loop.call_soon_threadsafe(stop_event.set)
 
         # Orphan guard runs on a dedicated daemon thread, not the event
@@ -1915,7 +1964,10 @@ async def _run_tunnel_from_env() -> None:
         threading.Thread(
             target=_run_parent_death_killer,
             args=(parent_pid, _request_parent_death_shutdown),
-            kwargs={"adopted": adopted_event},
+            kwargs={
+                "adopted": None if custody is not None else adopted_event,
+                "owner_alive": custody.still_owner if custody is not None else None,
+            },
             name=f"runner-parent-killer:{parent_pid}",
             daemon=True,
         ).start()
@@ -2136,6 +2188,31 @@ def main() -> None:
     configure_process_logging("runner", force=True)
     _install_crash_logging()
     _maybe_prewarm_ambient_detection()
+    from omnigent.runner.custody import CUSTODY_ENV_VAR, install_custody
+    from omnigent.runner.identity import get_stable_runner_id
+
+    custody = None
+    raw_custody = os.environ.pop(CUSTODY_ENV_VAR, None)
+    if raw_custody is not None:
+        from omnigent.native.launch_environment import (
+            native_launch_environment,
+            native_launch_environment_digest,
+        )
+        from omnigent.process_logging import data_dir
+
+        if len(raw_custody.encode()) > 65536:
+            raise RuntimeError("record_mismatch")
+        context = json.loads(raw_custody)
+        if (
+            not isinstance(context, dict)
+            or context.get("runner_id") != get_stable_runner_id()
+            or context.get("session_id") != runner_primary_session_id()
+        ):
+            raise RuntimeError("scope_mismatch")
+        actual_environment_digest = native_launch_environment_digest(native_launch_environment())
+        if context.get("environment_digest") != actual_environment_digest:
+            raise RuntimeError("config_mismatch")
+        custody = install_custody(data_dir(), context)
     try:
         asyncio.run(_run_tunnel_from_env())
     except RuntimeError as exc:
@@ -2146,6 +2223,9 @@ def main() -> None:
         _logger.error("runner exiting: %s", exc, extra={"session_id": runner_primary_session_id()})
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(1) from None
+    finally:
+        if custody is not None:
+            custody.finish()
 
 
 if __name__ == "__main__":

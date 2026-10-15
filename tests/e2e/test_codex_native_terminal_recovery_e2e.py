@@ -145,10 +145,20 @@ def test_codex_terminal_recovery_preserves_inflight_turn(
         assert response.status_code == 200, response.text[:1000]
         return response.json()
 
-    def terminal_gone() -> bool:
-        response = http_client.get(f"{terminal_url}/terminal_codex_main", timeout=10)
-        assert response.status_code in (200, 404), response.text[:1000]
-        return response.status_code == 404
+    def terminal_cleaned(expected_exits: int) -> bool:
+        # A terminal GET can return 404 before its exit cleanup releases the lock.
+        response = http_client.get(
+            f"/v1/sessions/{session_id}/items", params={"limit": 100}, timeout=10
+        )
+        assert response.is_success, response.text[:1000]
+        exits = [
+            item
+            for item in response.json()["data"]
+            if item["type"] == "resource_event"
+            and item["event_type"] == "session.resource.deleted"
+            and item["resource_id"] == "terminal_codex_main"
+        ]
+        return len(exits) == expected_exits
 
     try:
         terminal = ensure_terminal()
@@ -164,7 +174,7 @@ def test_codex_terminal_recovery_preserves_inflight_turn(
         _poll_for_assistant_marker(http_client, session_id=session_id, marker=marker, timeout=60)
         previous_reply = marker
 
-        for failure in ("tui_exit", "tmux_server_loss"):
+        for expected_exits, failure in enumerate(("tui_exit", "tmux_server_loss"), start=1):
             marker = f"RECOVERED_{uuid.uuid4().hex}"
             prompt = f"Recovery probe {failure}"
             # Codex also generates titles on this model; only the recovery
@@ -192,7 +202,10 @@ def test_codex_terminal_recovery_preserves_inflight_turn(
                 os.kill(pane_pid, signal.SIGTERM)
             else:
                 _tmux(socket, "kill-server")
-            _wait_for(terminal_gone, "terminal resource eviction")
+            _wait_for(
+                lambda expected_exits=expected_exits: terminal_cleaned(expected_exits),
+                "terminal exit cleanup",
+            )
             assert _app_server_pid(state.socket_path) == original_pid
 
             terminal = ensure_terminal()

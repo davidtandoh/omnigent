@@ -35,7 +35,7 @@ class _FakeTerminalRegistry:
     def __init__(self) -> None:
         self.closed: list[str] = []
 
-    def list_for_conversation(self, conv_id: str) -> list[Any]:
+    def list_for_cleanup(self, conv_id: str) -> list[Any]:
         return []
 
 

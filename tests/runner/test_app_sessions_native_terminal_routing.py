@@ -202,6 +202,33 @@ async def test_create_session_terminal_ensure_routes_claude_native(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["process_pending", "unavailable_probe"])
+async def test_codex_terminal_ensure_preserves_named_cleanup_refusal(
+    monkeypatch: pytest.MonkeyPatch, code: str
+) -> None:
+    """Recreation callers can distinguish an owner refusal from a launch defect."""
+    from omnigent.terminals.registry import TerminalCleanupRefused
+
+    async def refuse(*_args: object, **_kwargs: object) -> SessionResourceView:
+        raise TerminalCleanupRefused(code, session_id="refused-owner")
+
+    monkeypatch.setattr("omnigent.runner.native.orchestration._auto_create_codex_terminal", refuse)
+    app = create_runner_app(
+        process_manager=_FakeProcessManager(_ScriptedHarnessClient([])),  # type: ignore[arg-type]
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+        terminal_registry=TerminalRegistry(),
+    )
+    async with _runner_client(app) as client:
+        response = await client.post(
+            "/v1/sessions/refused-owner/resources/terminals",
+            json={"terminal": "codex", "session_key": "main", "ensure_native_terminal": True},
+        )
+
+    assert response.status_code >= 400
+    assert response.json()["error"]["code"] == code
+
+
+@pytest.mark.asyncio
 async def test_create_session_terminal_ensure_failure_returns_json_without_live_error(
     monkeypatch: pytest.MonkeyPatch,
     pinned_runner_log: Path,

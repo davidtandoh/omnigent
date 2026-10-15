@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import subprocess
+import sys
 import uuid
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
@@ -118,6 +119,8 @@ def _seed_registry(
 
 class _CapturingResourceRegistry:
     """Resource registry stub that records terminal launch specs."""
+
+    terminal_registry = None
 
     def __init__(self, tmp_path: Path, *, runner_workspace: Path | None = None) -> None:
         """
@@ -551,6 +554,7 @@ async def test_reset_state_rematerializes_env_from_new_agent_spec(tmp_path: Path
     workspace.mkdir()
 
     # Two agents with DISTINCT sandboxes so the captured spec is unambiguous.
+    sandbox_type = "darwin_seatbelt" if sys.platform == "darwin" else "linux_bwrap"
     spec_a = AgentSpec(
         spec_version=1,
         name="agent_a",
@@ -562,7 +566,7 @@ async def test_reset_state_rematerializes_env_from_new_agent_spec(tmp_path: Path
         os_env=OSEnvSpec(
             type="caller_process",
             cwd=".",
-            sandbox=OSEnvSandboxSpec(type="linux_bwrap"),
+            sandbox=OSEnvSandboxSpec(type=sandbox_type),
         ),
     )
 
@@ -619,11 +623,11 @@ async def test_reset_state_rematerializes_env_from_new_agent_spec(tmp_path: Path
         resp2 = await c.get(env_path)
         assert resp2.status_code == 200, resp2.text
 
-    # After the reset the next access resolved agent_b (sandbox=linux_bwrap).
+    # After the reset the next access resolved agent_b with its sandbox.
     # If reset-state had NOT dropped the spec/snapshot caches, this would
     # still be agent_a/"none" — the cross-agent sandbox leak this guards.
     assert captured_specs[-1].name == "agent_b"
-    assert captured_specs[-1].os_env.sandbox.type == "linux_bwrap"
+    assert captured_specs[-1].os_env.sandbox.type == sandbox_type
 
 
 @pytest.mark.asyncio

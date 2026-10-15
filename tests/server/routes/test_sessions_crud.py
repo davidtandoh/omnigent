@@ -21,6 +21,7 @@ import pytest_asyncio
 
 from omnigent.db.utils import generate_agent_id
 from omnigent.entities import USER_SESSION_TITLE_MAX_CHARS
+from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.harnesses.opencode_native.app_server import OpenCodeNativeServer
 from omnigent.runner import create_runner_app
 from omnigent.server.routes import sessions as sessions_module
@@ -343,6 +344,70 @@ async def test_delete_session_calls_full_runner_teardown(
     assert deleted_paths == [f"/v1/sessions/{session_id}"], (
         f"server-side delete should call full runner teardown, got: {deleted_paths}"
     )
+
+
+@pytest.mark.parametrize("code", ["process_pending", "unavailable_probe"])
+async def test_delete_session_preserves_runner_cleanup_refusal(
+    client: httpx.AsyncClient,
+    session_id: str,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+    code: str,
+) -> None:
+    """A runner refusal preserves the conversation and its file contents."""
+    upload = await client.post(
+        f"/v1/sessions/{session_id}/resources/files",
+        files={"file": ("keep.txt", b"session data", "text/plain")},
+    )
+    assert upload.status_code == 201, upload.text
+    file_id = upload.json()["id"]
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                500, json={"error": {"code": code, "message": "Cleanup refused"}}
+            )
+        ),
+        base_url="http://runner",
+    ) as runner:
+        monkeypatch.setattr(
+            sessions_module,
+            "_get_runner_client_for_resource_access",
+            AsyncMock(return_value=runner),
+        )
+
+        response = await client.delete(f"/v1/sessions/{session_id}")
+
+    assert response.status_code >= 400, response.text
+    assert response.json().get("error", {}).get("code") == code
+    assert SqlAlchemyConversationStore(db_uri).get_conversation(session_id) is not None
+    content = await client.get(f"/v1/sessions/{session_id}/resources/files/{file_id}/content")
+    assert content.status_code == 200
+    assert content.content == b"session data"
+
+
+@pytest.mark.parametrize("failure", ["offline", "disconnected"])
+async def test_delete_session_preserves_offline_runner_fallback(
+    client: httpx.AsyncClient,
+    session_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    """An unreachable runner still permits server-side session deletion."""
+    if failure == "offline":
+        get_runner = AsyncMock(
+            side_effect=OmnigentError("Runner offline", code=ErrorCode.RUNNER_UNAVAILABLE)
+        )
+    else:
+        runner = AsyncMock()
+        runner.delete.side_effect = httpx.ConnectError("Runner disconnected")
+        get_runner = AsyncMock(return_value=runner)
+    monkeypatch.setattr(sessions_module, "_get_runner_client_for_resource_access", get_runner)
+
+    response = await client.delete(f"/v1/sessions/{session_id}")
+
+    assert response.status_code == 200
+    assert response.json()["deleted"] is True
+    assert (await client.get(f"/v1/sessions/{session_id}")).status_code == 404
 
 
 @pytest.mark.posix_only

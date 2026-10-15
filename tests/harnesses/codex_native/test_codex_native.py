@@ -8109,6 +8109,7 @@ def test_run_codex_native_does_not_require_local_codex_binary(
         prompt: str | None,
         auto_open_conversation: bool,
         launch_env: dict[str, str] | None = None,
+        binding_json: bool = False,
     ) -> None:
         """
         Record that the remote daemon path was selected.
@@ -8116,6 +8117,7 @@ def test_run_codex_native_does_not_require_local_codex_binary(
         :returns: None.
         """
         nonlocal remote_called
+        assert binding_json is False
         del (
             base_url,
             spec_path,
@@ -13280,3 +13282,64 @@ def test_codex_discover_thread_login_required_clears_error_on_thread_start(
     state = read_bridge_state(bridge_dir)
     assert state is not None
     assert state.thread_id == "thread_after_signin"
+
+
+def test_forwarder_propagates_contended_transfer_without_consuming_next_event(
+    tmp_path: Path,
+) -> None:
+    import threading
+
+    from omnigent.errors import OmnigentError
+    from omnigent.harnesses.codex_native.bridge import read_bridge_startup_failure
+    from omnigent.inner.terminal import TerminalInstance
+    from omnigent.terminals.registry import TerminalRegistry
+
+    registry = TerminalRegistry()
+    terminal = TerminalInstance("codex", "main", tmp_path / "tmux.sock", tmp_path, running=True)
+    registry._by_conversation["conv_old"] = {("codex", "main"): terminal}
+    lock = threading.Lock()
+    registry._instance_locks[("conv_old", "codex", "main")] = lock
+    consumed = []
+    client = _FakeCodexAppServerClient(events=[])
+
+    async def events():
+        consumed.append("rotation")
+        yield _thread_started_event("thread_new")
+        consumed.append("output")
+        yield _started_event("turn_new")
+
+    client.iter_events = events
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json={"agent_id": "agent", "runner_id": "runner"})
+        if request.url.path == "/v1/sessions":
+            return httpx.Response(200, json={"id": "conv_new"})
+        if request.url.path.endswith("/transfer"):
+            try:
+                registry.transfer("conv_old", "conv_new", "codex", "main")
+            except RuntimeError:
+                return httpx.Response(409, json={"error": {"code": "owner_busy"}})
+            pytest.fail("contended transfer succeeded")
+        return httpx.Response(200, json={})
+
+    async def run():
+        with pytest.raises(OmnigentError) as refused:
+            await codex_native_forwarder.supervise_forwarder(
+                base_url="http://runner",
+                headers={},
+                session_id="conv_old",
+                bridge_dir=tmp_path,
+                app_server_url="ws://localhost:9876",
+                thread_id="thread_old",
+                client=client,
+                ap_transport=httpx.MockTransport(handler),
+            )
+        assert refused.value.code == "native_rotation_refused"
+
+    with lock:
+        asyncio.run(run())
+    assert consumed == ["rotation"]
+    assert registry.get("conv_old", "codex", "main") is terminal
+    assert registry.get("conv_new", "codex", "main") is None
+    assert read_bridge_startup_failure(tmp_path).code == "native_rotation_refused"

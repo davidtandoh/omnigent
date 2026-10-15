@@ -405,3 +405,23 @@ def test_reset_and_reconfigure_restore_inference(monkeypatch):
         response = client.post("/v1/responses", json={"input": "title"})
         assert "skill-call" not in response.text
         assert mock_llm_server._state.queues["default"].index == 0
+
+
+def test_responses_tool_call_preserves_native_namespace() -> None:
+    body = mock_llm_server.sse_tool_call_response(
+        [
+            {
+                "call_id": "scoped-call",
+                "namespace": "mcp__synthetic",
+                "name": "read",
+                "arguments": "{}",
+            }
+        ]
+    )
+    events = [json.loads(line[6:]) for line in body.splitlines() if line.startswith("data: ")]
+    items = [event["item"] for event in events if "item" in event]
+    items.extend(events[-1]["response"]["output"])
+    assert items
+    assert all(
+        item.get("namespace") == "mcp__synthetic" and item["name"] == "read" for item in items
+    )

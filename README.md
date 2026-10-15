@@ -400,6 +400,15 @@ Open the server URL it prints, hit **New Chat**, pick your machine, and go.
 Check status with `omnigent server status`; stop everything with
 `omnigent stop`.
 
+For machine-readable runtime discovery, see the
+[runtime launch contract](docs/runtime-launch-contract.md). For session custody
+records, launch bindings and exact session end, see
+[session custody](docs/session-custody.md).
+
+To keep native sessions running during API maintenance, use the
+[maintenance operations](docs/session-custody.md#maintenance-and-intentional-end).
+That reference defines the supported scope and distinguishes detach from end.
+
 <a id="fixed-local-backend-port"></a>
 
 To keep the daemon-owned local backend on a fixed loopback port, set

@@ -21,7 +21,7 @@ import sys
 import time
 import urllib.parse
 import uuid
-from collections.abc import Awaitable, Callable, Coroutine, Mapping, MutableMapping
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, MutableMapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from omnigent.runner.subagent_routing import SubagentRouter
     from omnigent.runner.turn_routing import TurnRouter
     from omnigent.spec.types import MCPServerConfig
+    from omnigent.terminals.registry import TerminalRegistry
 
 import click
 import httpx
@@ -192,7 +193,38 @@ class _CodexNativeModelOptionsNotReady(RuntimeError):
     """Raised when Codex model options are requested before bridge startup."""
 
 
-async def _cancel_auto_forwarder_task(session_id: str) -> None:
+def _codex_native_active_session_id(launch_session_id: str) -> str:
+    """Resolve a Codex launch's active session from its existing bridge record."""
+    from omnigent.harnesses.codex_native.bridge import bridge_dir_for_bridge_id, read_bridge_state
+
+    state = read_bridge_state(bridge_dir_for_bridge_id(launch_session_id))
+    return state.session_id if state is not None else launch_session_id
+
+
+def _codex_native_launch_session_ids(session_id: str) -> list[str]:
+    """Resolve registered Codex launches through their existing active bridge records."""
+    return [
+        launch_session_id
+        for launch_session_id in _AUTO_CODEX_APP_SERVERS
+        if _codex_native_active_session_id(launch_session_id) == session_id
+    ]
+
+
+def _forwarder_cancellation_refusal(exc: BaseException) -> OmnigentError | None:
+    """Read a named refusal through nested cancellation exceptions."""
+    current: BaseException | None = exc
+    while current is not None:
+        if isinstance(current, asyncio.CancelledError) and current.args:
+            refusal = current.args[0]
+            if isinstance(refusal, OmnigentError):
+                return refusal
+        current = current.__context__
+    return None
+
+
+async def _cancel_auto_forwarder_task(
+    session_id: str, *, refusal: OmnigentError | None = None
+) -> None:
     """
     Cancel and await the session's registered transcript forwarder, if any.
 
@@ -206,72 +238,168 @@ async def _cancel_auto_forwarder_task(session_id: str) -> None:
     :param session_id: Session/conversation id, e.g. ``"conv_abc123"``.
     :returns: None.
     """
-    task = _AUTO_FORWARDER_TASKS.pop(session_id, None)
+    launch_session_ids = _codex_native_launch_session_ids(session_id)
+    if session_id not in _AUTO_CODEX_APP_SERVERS:
+        launch_session_ids.append(session_id)
+    for launch_session_id in launch_session_ids:
+        await _cancel_registered_auto_forwarder_task(launch_session_id, refusal=refusal)
+
+
+async def _cancel_registered_auto_forwarder_task(
+    launch_session_id: str, *, refusal: OmnigentError | None = None
+) -> None:
+    if refusal is None:
+        refusal = getattr(
+            _AUTO_CODEX_APP_SERVERS.get(launch_session_id), "terminal_cleanup_refusal", None
+        )
+    task = _AUTO_FORWARDER_TASKS.pop(launch_session_id, None)
     if task is None or task.done():
         return
-    task.cancel()
-    # asyncio.wait absorbs the CancelledError and bounds the wait on a hung cancellation.
+    task.cancel(refusal)
     _done, pending = await asyncio.wait({task}, timeout=_AUTO_FORWARDER_CANCEL_TIMEOUT_S)
     if pending:
         _logger.warning(
             "Cancelled transcript forwarder for %s did not finish within %.0fs",
-            session_id,
+            launch_session_id,
             _AUTO_FORWARDER_CANCEL_TIMEOUT_S,
         )
 
 
-async def teardown_codex_native_app_server(session_id: str) -> None:
-    """
-    Tear down a host-spawned codex-native session's app-server subprocess.
+def _record_codex_terminal_cleanup_refusal(
+    instance: TerminalInstance, refusal: OmnigentError
+) -> None:
+    remote_urls = {
+        value
+        for option, value in zip(instance.args, instance.args[1:], strict=False)
+        if option == "--remote"
+    }
+    for server in _AUTO_CODEX_APP_SERVERS.values():
+        if (
+            server.listen_url in remote_urls
+            and getattr(server, "terminal_cleanup_refusal", None) is None
+        ):
+            server.terminal_cleanup_refusal = refusal
 
-    ``DELETE /v1/sessions``, runner shutdown, and the idle pane reaper use
-    this helper for full native cleanup. An unexpected auxiliary-TUI exit
-    deliberately leaves the app-server running so an active response is not
-    cancelled; the next native-terminal ensure can recreate the TUI.
 
-    Cancelling the forwarder closes the app-server via the forwarder's own
-    ``finally`` (see :func:`_codex_discover_thread_and_forward`); the pop
-    below is the belt-and-suspenders close for the discovery-failed case
-    where no forwarder ever adopted the server. No-op for a session that
-    has no registered codex app-server, so this is safe to call from the
-    required-session teardown paths regardless of harness.
+async def guard_codex_native_cleanup(
+    session_id: str,
+    *,
+    closed_terminals: Sequence[TerminalInstance] = (),
+    terminal_registry: TerminalRegistry | None,
+    server_client: httpx.AsyncClient | None = None,
+    bridge_dirs: Sequence[Path] = (),
+) -> list[str]:
+    from omnigent.harnesses.codex_native.bridge import (
+        CODEX_NATIVE_BRIDGE_ID_LABEL_KEY,
+        bridge_dir_for_bridge_id,
+    )
 
-    :param session_id: Session/conversation id, e.g. ``"conv_abc123"``.
-    :returns: None.
-    """
-    if session_id not in _AUTO_CODEX_APP_SERVERS:
-        return
-    await _cancel_auto_forwarder_task(session_id)
-    leftover_app_server = _AUTO_CODEX_APP_SERVERS.pop(session_id, None)
+    if not _AUTO_CODEX_APP_SERVERS:
+        return []
+    targets = set(bridge_dirs)
+    if server_client is not None:
+        labels = await _session_labels_for_runner_spawn(
+            server_client=server_client, session_id=session_id
+        )
+        targets.add(
+            bridge_dir_for_bridge_id(labels.get(CODEX_NATIVE_BRIDGE_ID_LABEL_KEY) or session_id)
+        )
+    related_urls = {
+        remote_url
+        for instance in closed_terminals
+        for option, remote_url in zip(instance.args, instance.args[1:], strict=False)
+        if option == "--remote"
+    }
+    pending_urls: set[str] = set()
+    if terminal_registry is not None:
+        for owner in terminal_registry.active_conversation_ids():
+            for entry in terminal_registry.list_for_cleanup(owner):
+                urls = {
+                    remote_url
+                    for option, remote_url in zip(
+                        entry.instance.args, entry.instance.args[1:], strict=False
+                    )
+                    if option == "--remote"
+                }
+                pending_urls.update(urls)
+                if owner == session_id:
+                    related_urls.update(urls)
+    launch_ids = []
+    for launch_session_id, server in list(_AUTO_CODEX_APP_SERVERS.items()):
+        refusal = getattr(server, "terminal_cleanup_refusal", None)
+        if not (
+            server.listen_url in related_urls
+            or launch_session_id == session_id
+            or _codex_native_active_session_id(launch_session_id) == session_id
+            or getattr(refusal, "session_id", None) == session_id
+            or getattr(server, "bridge_dir", bridge_dir_for_bridge_id(launch_session_id))
+            in targets
+        ):
+            continue
+        if refusal is not None:
+            raise refusal
+        if server.listen_url in pending_urls:
+            raise OmnigentError(
+                "Terminal cleanup refused: process_pending", code="process_pending"
+            )
+        launch_ids.append(launch_session_id)
+    return launch_ids
+
+
+async def teardown_codex_native_app_server(
+    session_id: str,
+    *,
+    closed_terminals: Sequence[TerminalInstance],
+    terminal_registry: TerminalRegistry | None,
+    server_client: httpx.AsyncClient | None = None,
+) -> None:
+    """Close dependencies after their terminals have successfully closed."""
+    launch_ids = await guard_codex_native_cleanup(
+        session_id,
+        closed_terminals=closed_terminals,
+        terminal_registry=terminal_registry,
+        server_client=server_client,
+    )
+    for launch_session_id in launch_ids:
+        await _teardown_codex_native_launch(launch_session_id)
+
+
+async def _teardown_codex_native_launch(launch_session_id: str) -> None:
+    server = _AUTO_CODEX_APP_SERVERS.get(launch_session_id)
+    refusal = getattr(server, "terminal_cleanup_refusal", None)
+    if refusal is not None:
+        raise refusal
+    await _cancel_registered_auto_forwarder_task(launch_session_id)
+    leftover_app_server = _AUTO_CODEX_APP_SERVERS.pop(launch_session_id, None)
     if leftover_app_server is not None:
         with contextlib.suppress(Exception):
             await leftover_app_server.close()
+        await _shutdown_session_router_async(launch_session_id)
+        await _shutdown_session_turn_router_async(launch_session_id)
 
 
 async def teardown_all_codex_native_app_servers() -> None:
     """
     Tear down every host-spawned codex-native app-server on this runner.
 
-    Called from the runner's shutdown path (``_stop_pm``) so a graceful host
-    or runner stop — the host SIGTERMs its runners on ``host.stop_runner`` and
-    on its own exit — takes the per-session ``codex app-server`` subprocesses
-    down with it. Each app-server is spawned ``start_new_session=True`` (its
-    own process group), so it is NOT killed by the runner's death; without an
-    explicit close here it is reparented to init and lingers as an orphaned
-    ``codex`` process. Per-session teardown normally runs on
-    ``DELETE /v1/sessions``, but a host stop tears the runner down without
-    deleting each session first, so those never fire.
+    Called after terminal cleanup during runner shutdown. Each app-server has
+    its own process group, so runner death alone does not stop it.
 
-    Iterates a snapshot of the registered session ids and delegates to
-    :func:`teardown_codex_native_app_server` (which cancels the forwarder and
-    closes the server). Best-effort and idempotent: a session already torn
-    down is a no-op.
+    Iterates the registered launches through :func:`_teardown_codex_native_launch`.
+    A latched terminal cleanup refusal preserves that launch's dependencies.
+    Other launches are attempted before the first refusal propagates.
 
     :returns: None.
     """
+    failure: OmnigentError | None = None
     for session_id in list(_AUTO_CODEX_APP_SERVERS):
-        with contextlib.suppress(Exception):
-            await teardown_codex_native_app_server(session_id)
+        try:
+            await _teardown_codex_native_launch(session_id)
+        except OmnigentError as exc:
+            if failure is None:
+                failure = exc
+    if failure is not None:
+        raise failure
 
 
 async def teardown_opencode_native_server(session_id: str) -> None:
@@ -1883,12 +2011,15 @@ async def _auto_create_opencode_terminal(
                 "resource": session_resource_view_to_dict(terminal_view),
             },
         )
-    except BaseException:
-        # Terminal startup failure or cancellation must also release the server.
-        await _cancel_auto_forwarder_task(session_id)
-        _AUTO_OPENCODE_SERVERS.pop(session_id, None)
-        with contextlib.suppress(Exception):
-            await server.close()
+    except BaseException as exc:
+        from omnigent.terminals.registry import TerminalCleanupRefused
+
+        refusal = exc if isinstance(exc, TerminalCleanupRefused) else None
+        await _cancel_auto_forwarder_task(session_id, refusal=refusal)
+        if refusal is None:
+            _AUTO_OPENCODE_SERVERS.pop(session_id, None)
+            with contextlib.suppress(Exception):
+                await server.close()
         raise
 
     _logger.info(
@@ -1917,16 +2048,24 @@ async def _supervise_opencode_forwarder(
     :param forwarder: The :class:`OpenCodeNativeForwarder` to run.
     :returns: None.
     """
+    preserve_dependencies = False
     try:
         await forwarder.run()
+    except asyncio.CancelledError as exc:
+        refusal = _forwarder_cancellation_refusal(exc)
+        preserve_dependencies = refusal is not None
+        if refusal is not None:
+            raise asyncio.CancelledError(refusal) from exc
+        raise
     finally:
-        leftover = _AUTO_OPENCODE_SERVERS.pop(session_id, None)
-        if leftover is not None:
-            with contextlib.suppress(Exception):
-                await leftover.close()
-        elif server is not None:
-            with contextlib.suppress(Exception):
-                await server.close()
+        if not preserve_dependencies:
+            leftover = _AUTO_OPENCODE_SERVERS.pop(session_id, None)
+            if leftover is not None:
+                with contextlib.suppress(Exception):
+                    await leftover.close()
+            elif server is not None:
+                with contextlib.suppress(Exception):
+                    await server.close()
 
 
 # Permission decisions can park a human approval card server-side
@@ -4571,6 +4710,10 @@ async def _launch_codex_native_tui(
     login_required: bool = False,
 ) -> _CodexNativeTuiLaunch:
     """Attach a terminal to an app-server without owning its lifecycle."""
+    if resource_registry.terminal_registry is not None:
+        resource_registry.terminal_registry.on_cleanup_refused = (
+            _record_codex_terminal_cleanup_refusal
+        )
     from omnigent.harnesses.codex_native.app_server import (
         _MIN_BYPASS_HOOK_TRUST_CODEX_VERSION,
         _format_codex_version,
@@ -4837,6 +4980,12 @@ async def _auto_create_codex_terminal(
     )
     from omnigent.inner.codex_executor import codex_extended_catalog_env
 
+    if _AUTO_CODEX_APP_SERVERS:
+        await guard_codex_native_cleanup(
+            session_id,
+            terminal_registry=resource_registry.terminal_registry,
+            server_client=server_client,
+        )
     launch_config = await _codex_native_launch_config(
         session_id=session_id,
         server_client=server_client,
@@ -5377,6 +5526,12 @@ async def _auto_create_codex_terminal(
     app_server.listen_url = codex_ws_url
     await app_server.start()
     _AUTO_CODEX_APP_SERVERS[session_id] = app_server
+    from omnigent.runner.custody import current_custody
+
+    custody = current_custody()
+    if custody is not None and custody.record.session_id == session_id:
+        assert app_server.proc is not None
+        custody.publish_helper("codex_app_server", app_server.proc.pid)
 
     event_client = CodexAppServerClient(
         ws_url=codex_ws_url,
@@ -5514,12 +5669,15 @@ async def _auto_create_codex_terminal(
         terminal_view = launched.view
         terminal_instance = launched.terminal_instance
         thread_start_timeout_seconds = launched.thread_start_timeout_seconds
-    except BaseException:
+    except BaseException as exc:
+        from omnigent.terminals.registry import TerminalCleanupRefused
+
         with contextlib.suppress(Exception):
             await event_client.close()
-        with contextlib.suppress(Exception):
-            await app_server.close()
-        _AUTO_CODEX_APP_SERVERS.pop(session_id, None)
+        if not isinstance(exc, TerminalCleanupRefused):
+            with contextlib.suppress(Exception):
+                await app_server.close()
+            _AUTO_CODEX_APP_SERVERS.pop(session_id, None)
         raise
 
     # Known-thread resumes publish bridge state before the terminal starts;
@@ -5899,6 +6057,7 @@ async def _codex_discover_thread_and_forward(
     discovery_started_at = time.monotonic()
     startup_pending_recorded = False
     cancelled = False
+    preserve_dependencies = False
     try:
         while True:
             try:
@@ -6164,17 +6323,18 @@ async def _codex_discover_thread_and_forward(
             client=event_client,
             auth=_RunnerDatabricksAuth(auth_factory),
         )
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as exc:
         cancelled = True
+        refusal = _forwarder_cancellation_refusal(exc)
+        preserve_dependencies = refusal is not None
+        if refusal is not None:
+            raise asyncio.CancelledError(refusal) from exc
+        raise
+    except OmnigentError as exc:
+        if exc.code == "native_rotation_refused":
+            preserve_dependencies = True
         raise
     finally:
-        # Tear down the listener and the per-session app-server whenever
-        # forwarding ends — discovery failed, the app-server connection dropped
-        # (``supervise_forwarder`` returned), or the task was cancelled on
-        # session teardown. ``supervise_forwarder`` also closes ``event_client``
-        # in its own ``finally``; ``close()`` is idempotent. The app-server
-        # subprocess is ours to stop, else it orphans one process per session.
-        # Pop first so the dict never holds a closed reference.
         _logger.info(
             "Codex native input stopped",
             extra=debug_event(
@@ -6184,19 +6344,28 @@ async def _codex_discover_thread_and_forward(
                 stage="native_input",
             ),
         )
-        leftover_app_server = app_server
-        if app_server is None or _AUTO_CODEX_APP_SERVERS.get(session_id) is app_server:
-            leftover_app_server = _AUTO_CODEX_APP_SERVERS.pop(session_id, None)
-            if not cancelled:
-                # The pane outlives its app-server; mark it so the next ensure replaces it.
-                record_app_server_stopped(bridge_dir)
         with contextlib.suppress(Exception):
             await event_client.close()
-        if leftover_app_server is not None:
-            with contextlib.suppress(Exception):
-                await leftover_app_server.close()
-        await _shutdown_session_router_async(session_id, subagent_router)
-        await _shutdown_session_turn_router_async(session_id, turn_router)
+        if (
+            not preserve_dependencies
+            and getattr(
+                app_server or _AUTO_CODEX_APP_SERVERS.get(session_id),
+                "terminal_cleanup_refusal",
+                None,
+            )
+            is None
+        ):
+            leftover_app_server = app_server
+            if app_server is None or _AUTO_CODEX_APP_SERVERS.get(session_id) is app_server:
+                leftover_app_server = _AUTO_CODEX_APP_SERVERS.pop(session_id, None)
+                if not cancelled:
+                    # The pane outlives its app-server; mark it so the next ensure replaces it.
+                    record_app_server_stopped(bridge_dir)
+            if leftover_app_server is not None:
+                with contextlib.suppress(Exception):
+                    await leftover_app_server.close()
+            await _shutdown_session_router_async(session_id, subagent_router)
+            await _shutdown_session_turn_router_async(session_id, turn_router)
 
 
 async def _codex_forward_known_thread(
@@ -6240,6 +6409,7 @@ async def _codex_forward_known_thread(
     )
 
     cancelled = False
+    preserve_dependencies = False
     try:
         server_url = _required_runner_env("RUNNER_SERVER_URL")
         auth_factory = _make_auth_token_factory()
@@ -6255,8 +6425,16 @@ async def _codex_forward_known_thread(
             client=client,
             auth=_RunnerDatabricksAuth(auth_factory),
         )
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as exc:
         cancelled = True
+        refusal = _forwarder_cancellation_refusal(exc)
+        preserve_dependencies = refusal is not None
+        if refusal is not None:
+            raise asyncio.CancelledError(refusal) from exc
+        raise
+    except OmnigentError as exc:
+        if exc.code == "native_rotation_refused":
+            preserve_dependencies = True
         raise
     finally:
         if client is not None:
@@ -6271,17 +6449,22 @@ async def _codex_forward_known_thread(
                 stage="native_input",
             ),
         )
-        leftover_app_server = app_server
-        if app_server is None or _AUTO_CODEX_APP_SERVERS.get(session_id) is app_server:
-            leftover_app_server = _AUTO_CODEX_APP_SERVERS.pop(session_id, None)
-            if not cancelled:
-                # The pane outlives its app-server; mark it so the next ensure replaces it.
-                record_app_server_stopped(bridge_dir)
-        if leftover_app_server is not None:
-            with contextlib.suppress(Exception):
-                await leftover_app_server.close()
-        await _shutdown_session_router_async(session_id, subagent_router)
-        await _shutdown_session_turn_router_async(session_id, turn_router)
+        if (
+            not preserve_dependencies
+            and getattr(_AUTO_CODEX_APP_SERVERS.get(session_id), "terminal_cleanup_refusal", None)
+            is None
+        ):
+            leftover_app_server = app_server
+            if app_server is None or _AUTO_CODEX_APP_SERVERS.get(session_id) is app_server:
+                leftover_app_server = _AUTO_CODEX_APP_SERVERS.pop(session_id, None)
+                if not cancelled:
+                    # The pane outlives its app-server; mark it so the next ensure replaces it.
+                    record_app_server_stopped(bridge_dir)
+            if leftover_app_server is not None:
+                with contextlib.suppress(Exception):
+                    await leftover_app_server.close()
+            await _shutdown_session_router_async(session_id, subagent_router)
+            await _shutdown_session_turn_router_async(session_id, turn_router)
 
 
 async def _run_antigravity_reader(
@@ -7723,7 +7906,12 @@ def _native_terminal_start_error_payload(
         JSON error responses. Known actionable configuration errors surface
         their safe message directly; other causes point to the runner log.
     """
+    from omnigent.terminals.registry import TerminalCleanupRefused
+
     error_id = f"err_{uuid.uuid4().hex}"
+    failure_code = (
+        exc.code if isinstance(exc, TerminalCleanupRefused) else _NATIVE_TERMINAL_START_FAILED_CODE
+    )
     lifecycle_code = (
         exc.code
         if isinstance(exc, OmnigentError) and exc.code in _NATIVE_TERMINAL_LIFECYCLE_ERROR_CODES
@@ -7735,7 +7923,7 @@ def _native_terminal_start_error_payload(
         session_id=session_id,
         error_id=error_id,
         runtime=runtime_name,
-        code=lifecycle_code or _NATIVE_TERMINAL_START_FAILED_CODE,
+        code=lifecycle_code or failure_code,
         exception_type=type(exc).__name__,
         exception_cause_type=type(exc.__cause__).__name__ if exc.__cause__ is not None else None,
         cause_code=exc.code if isinstance(exc, OmnigentError) else None,
@@ -7843,7 +8031,7 @@ def _native_terminal_start_error_payload(
             f"see the runner log for details: {log_reference}"
         )
     return {
-        "code": _NATIVE_TERMINAL_START_FAILED_CODE,
+        "code": failure_code,
         "error_id": error_id,
         "message": f"{message} Error ID: {error_id}.",
     }
@@ -9366,6 +9554,7 @@ async def _delete_native_bridge_dirs(
     *,
     server_client: httpx.AsyncClient | None,
     session_id: str,
+    terminal_registry: TerminalRegistry | None = None,
 ) -> None:
     """
     Remove native-harness bridge directories and attachment caches for a session.
@@ -9458,6 +9647,11 @@ async def _delete_native_bridge_dirs(
         pi_bridge_dir(session_id),
         qwen_bridge_dir(session_id),
     }
+    await guard_codex_native_cleanup(
+        session_id,
+        terminal_registry=terminal_registry,
+        bridge_dirs=tuple(targets),
+    )
     # A cache can survive a missing bridge directory, including after a reboot.
     targets.update(attachment_cache_dir(target) for target in tuple(targets))
     for target in targets:

@@ -19,13 +19,14 @@ import re
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+import psutil
 from cachetools import TTLCache
 
 from omnigent.debug_logging import debug_event, runner_primary_session_id
@@ -40,6 +41,7 @@ from omnigent.entities.session_resources import (
     terminal_resource_id,
     terminal_resource_view,
 )
+from omnigent.errors import OmnigentError
 from omnigent.inner.async_utils import run_sync_cleanup
 from omnigent.inner.sandbox import contained_realpath, containment_prefix
 from omnigent.inner.terminal_lifecycle import lifecycle_log_attributes
@@ -197,7 +199,23 @@ class TerminalExitEvent:
     exit_status: int | None = None
     session_was_idle: bool = False
     terminal_instance_id: str | None = None
+    closed_terminal: TerminalInstance | None = field(default=None, repr=False, compare=False)
     lifecycle_context: dict[str, str] = field(default_factory=dict)
+
+
+def _terminal_cleanup_error(exc: Exception) -> OmnigentError:
+    from omnigent.runner.custody import CustodyError
+
+    if isinstance(exc, OmnigentError):
+        return exc
+    category = (
+        str(exc)
+        if isinstance(exc, CustodyError)
+        else "process_pending"
+        if isinstance(exc, TimeoutError)
+        else "unavailable_probe"
+    )
+    return OmnigentError(f"Terminal cleanup refused: {category}", code=category)
 
 
 def _terminal_lifecycle_context(
@@ -466,6 +484,9 @@ class SessionResourceRegistry:
         *,
         per_session_workspace: bool = False,
     ) -> None:
+        self.before_session_disposal: (
+            Callable[[str, list[TerminalInstance]], Awaitable[None]] | None
+        ) = None
         self._terminal_registry = terminal_registry
         if terminal_registry is not None:
             terminal_registry.environment_resolver = self._resolve_terminal_environment
@@ -1282,14 +1303,20 @@ class SessionResourceRegistry:
                 before_observation=True,
             )
             raise
-        return await self._observe_terminal_with_lifecycle(
-            lifecycle,
-            session_id=session_id,
-            terminal_name=terminal_name,
-            session_key=session_key,
-            instance=instance,
-            resource_role=resource_role,
-        )
+        try:
+            return await self._observe_terminal_with_lifecycle(
+                lifecycle,
+                session_id=session_id,
+                terminal_name=terminal_name,
+                session_key=session_key,
+                instance=instance,
+                resource_role=resource_role,
+            )
+        except BaseException:
+            await self._terminal_registry.close(
+                session_id, terminal_name, session_key, expected=instance
+            )
+            raise
 
     async def observe_required_terminal(
         self,
@@ -1742,8 +1769,8 @@ class SessionResourceRegistry:
         """Clean up and publish lifecycle events for an unexpected terminal exit."""
         terminal_id = terminal_resource_id(terminal_name, session_key)
         with self._lock:
-            observed = self._terminal_lifecycles.pop((session_id, terminal_id), None)
-            observed_role = self._terminal_roles.pop((session_id, terminal_id), None)
+            observed = self._terminal_lifecycles.get((session_id, terminal_id))
+            observed_role = self._terminal_roles.get((session_id, terminal_id))
         if observed is None:
             return
         if observed != lifecycle:
@@ -1800,17 +1827,17 @@ class SessionResourceRegistry:
                 await self._terminal_registry.close(
                     session_id, terminal_name, session_key, expected=instance
                 )
-            except Exception:
-                _logger.exception(
-                    "Error evicting exited terminal: session=%s terminal=%s:%s",
-                    session_id,
-                    terminal_name,
-                    session_key,
-                )
-            else:
-                current = self._terminal_registry.get(session_id, terminal_name, session_key)
-                if current is not None and instance is not None and current is not instance:
-                    superseded_by = current
+            except OmnigentError:
+                raise
+            except (RuntimeError, OSError, ValueError, psutil.Error) as exc:
+                raise _terminal_cleanup_error(exc) from exc
+            current = self._terminal_registry.get(session_id, terminal_name, session_key)
+            if current is not None and instance is not None and current is not instance:
+                superseded_by = current
+        if superseded_by is None:
+            with self._lock:
+                self._terminal_lifecycles.pop((session_id, terminal_id), None)
+                self._terminal_roles.pop((session_id, terminal_id), None)
 
         # A replaced launch must not consume its successor's status memo.
         session_status_before_exit = (
@@ -1893,6 +1920,7 @@ class SessionResourceRegistry:
                     session_was_idle=session_was_idle,
                     terminal_instance_id=instance.diagnostic_id if instance is not None else None,
                     lifecycle_context=lifecycle_context,
+                    closed_terminal=instance,
                 )
             )
 
@@ -1910,7 +1938,7 @@ class SessionResourceRegistry:
         if self._terminal_registry is None:
             return False
 
-        for entry in self._terminal_registry.list_for_conversation(
+        for entry in self._terminal_registry.list_for_cleanup(
             session_id,
         ):
             if terminal_resource_id(entry.terminal_name, entry.session_key) == terminal_id:
@@ -1933,11 +1961,15 @@ class SessionResourceRegistry:
                         ),
                     ),
                 )
-                closed = await self._terminal_registry.close(
-                    session_id,
-                    entry.terminal_name,
-                    entry.session_key,
-                )
+                try:
+                    closed = await self._terminal_registry.close(
+                        session_id,
+                        entry.terminal_name,
+                        entry.session_key,
+                        expected=entry.instance,
+                    )
+                except (RuntimeError, OSError, ValueError, psutil.Error) as exc:
+                    raise _terminal_cleanup_error(exc) from exc
                 if closed:
                     with self._lock:
                         self._terminal_roles.pop((session_id, terminal_id), None)
@@ -2043,15 +2075,24 @@ class SessionResourceRegistry:
             )
         return None
 
-    async def cleanup_session(self, session_id: str) -> None:
+    async def cleanup_session(self, session_id: str) -> list[TerminalInstance]:
         """Close all resources owned by a session.
 
-        Closes the primary OSEnv and delegates terminal cleanup
-        to the terminal registry.  Preserves workspace files for
-        post-mortem inspection per the design.
+        Closes terminals before releasing their supporting resources.
+        Preserves workspace files for post-mortem inspection per the design.
 
         :param session_id: Session/conversation identifier.
+        :returns: Terminal instances closed by this cleanup. An empty list
+            does not establish that previously unregistered terminals ended.
         """
+        closed: list[TerminalInstance] = []
+        if self._terminal_registry is not None:
+            try:
+                closed = await self._terminal_registry.cleanup_conversation(session_id)
+            except (RuntimeError, OSError, ValueError, psutil.Error) as exc:
+                raise _terminal_cleanup_error(exc) from exc
+        if self.before_session_disposal is not None:
+            await self.before_session_disposal(session_id, closed)
         self._take_session_status_memo(session_id)
         with self._lock:
             self._session_activity_epoch.pop(session_id, None)
@@ -2066,16 +2107,6 @@ class SessionResourceRegistry:
             ]
             for key in stale_lifecycle_keys:
                 self._terminal_lifecycles.pop(key, None)
-        if self._terminal_registry is not None:
-            try:
-                await self._terminal_registry.cleanup_conversation(
-                    session_id,
-                )
-            except Exception:
-                _logger.exception(
-                    "Error cleaning up terminals for session=%s",
-                    session_id,
-                )
 
         if primary is not None:
             try:
@@ -2097,6 +2128,8 @@ class SessionResourceRegistry:
                     "Error cleaning up Codex skills for session=%s",
                     session_id,
                 )
+
+        return closed
 
     def has_primary_env(self, session_id: str) -> bool:
         """Check if a primary env has been materialized.
