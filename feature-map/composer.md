@@ -49,6 +49,8 @@ and steers messages while the agent is busy.
   a server without agent install.
 - `mobile-labels`: on narrow screens labels collapse to icons without
   overlapping the stop button.
+- `mobile-web-input-font`: mobile web draft inputs use at least 16px text while
+  retaining larger font preferences. Desktop and native app sizing is unchanged.
 
 ## How to get to it (user POV)
 
@@ -111,6 +113,10 @@ verify-env run -- python -m pytest <test> --ui-skip-build --video=on \
 Tests under `tests/browser_ui/` stub every backend call and need no instance:
 `uv run pytest <test> --browser-ui-skip-build --video=on --output="$VERIFY_EVIDENCE/composer"`.
 
+- **`mobile-web-input-font`, session and new-session:**
+  `tests/browser_ui/chat/test_mobile_composer_enter.py::test_mobile_web_composer_font_floor_preserves_desktop_and_zoom`.
+  Checks computed input sizes and focus under a smaller viewport. Playwright
+  does not emulate the real iOS keyboard's focus zoom; confirm on an iPhone.
 - **`pill-tooltip`, `pill-tooltip-suppressed`, in-session:**
   `tests/browser_ui/chat/test_composer_tooltips.py::test_pill_uses_one_tooltip_and_suppresses_it_while_picker_is_open`
   (runs with zero and one turn).
