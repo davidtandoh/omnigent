@@ -172,7 +172,8 @@ def test_native_portaled_field_preserves_typography(
     page.set_viewport_size({"width": 844, "height": 390})
     if shell is not None:
         page.add_init_script(
-            "window.omnigentNative = {kind: " + json.dumps(shell)
+            "window.omnigentNative = {kind: "
+            + json.dumps(shell)
             + ", setBadgeCount() {}, notify: async () => false}"
         )
     page.goto(seeded_session.contract.base_url + "/c/" + seeded_session.session_id)
