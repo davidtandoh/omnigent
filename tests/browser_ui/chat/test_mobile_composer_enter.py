@@ -72,4 +72,4 @@ def test_mobile_web_composer_font_floor_preserves_desktop_and_zoom(
     assert "maximum-scale" not in viewport.lower()
 
     page.set_viewport_size({"width": 1440, "height": 900})
-    expect(composer).to_have_css("font-size", f"{font_size or 13}px")
+    expect(composer).to_have_css("font-size", f"{max(16, font_size or 13)}px")

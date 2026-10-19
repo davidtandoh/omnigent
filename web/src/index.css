@@ -1284,12 +1284,6 @@ html[data-electron-mac] .breadcrumb-folder {
     font-size: var(--mobile-ui-font-size);
   }
 
-  /* Keep mobile web draft inputs and their mirrors above Safari's focus-zoom
-   * threshold, while retaining larger Appearance sizes. */
-  .app-shell:not([data-ios-native]):not([data-android-native]) .composer-input-text {
-    font-size: max(16px, var(--text-ui));
-  }
-
   /* Keep mobile sidebar glyphs uniform. Desktop icon geometry is unchanged. */
   .conversations-sidebar {
     --sidebar-icon-size-mobile: 16px;
@@ -1301,6 +1295,44 @@ html[data-electron-mac] .breadcrumb-folder {
     width: var(--sidebar-icon-size-mobile);
     height: var(--sidebar-icon-size-mobile);
     padding: 0;
+  }
+}
+
+@media (hover: none) and (pointer: coarse) {
+  /* Keep mobile web draft inputs and their mirrors above Safari's focus-zoom
+   * threshold, while retaining larger Appearance sizes. */
+  .app-shell:not([data-ios-native]):not([data-android-native]) .composer-input-text {
+    font-size: max(16px, var(--text-ui));
+  }
+
+  /* Safari focus zoom also affects fields outside AppShell, including dialogs.
+   * Override small utility and inline editor fonts; native shells own theirs. */
+  :is(input, textarea, select, [contenteditable]:not([contenteditable="false"])):not(
+    :where(html[data-ios-native] *, html[data-android-native] *)
+  ) {
+    font-size: max(16px, var(--text-ui)) !important;
+  }
+
+  /* Keep panning and pinch zoom while suppressing double-tap zoom on controls. */
+  :is(
+    button,
+    a[href],
+    input,
+    textarea,
+    select,
+    summary,
+    [contenteditable]:not([contenteditable="false"]),
+    [role="button"],
+    [role="tab"],
+    [role^="menuitem"],
+    [role="option"],
+    [role="combobox"],
+    [role="checkbox"],
+    [role="radio"],
+    [role="switch"],
+    [role="treeitem"]
+  ):not(:where(html[data-ios-native] *, html[data-android-native] *)) {
+    touch-action: manipulation;
   }
 }
 

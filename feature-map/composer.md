@@ -49,8 +49,12 @@ and steers messages while the agent is busy.
   a server without agent install.
 - `mobile-labels`: on narrow screens labels collapse to icons without
   overlapping the stop button.
-- `mobile-web-input-font`: mobile web draft inputs use at least 16px text while
-  retaining larger font preferences. Desktop and native app sizing is unchanged.
+- `mobile-web-input-font`: on touch devices, web form fields and editable text
+  across the app use at least 16px text while retaining larger font preferences.
+  The protection applies in portrait and landscape, independently of layout
+  width. Web controls suppress double-tap zoom while allowing panning and pinch
+  zoom. These shared rules exclude native apps and leave mouse-device sizing
+  unchanged.
 
 ## How to get to it (user POV)
 
@@ -115,8 +119,17 @@ Tests under `tests/browser_ui/` stub every backend call and need no instance:
 
 - **`mobile-web-input-font`, session and new-session:**
   `tests/browser_ui/chat/test_mobile_composer_enter.py::test_mobile_web_composer_font_floor_preserves_desktop_and_zoom`.
-  Checks computed input sizes and focus under a smaller viewport. Playwright
-  does not emulate the real iOS keyboard's focus zoom; confirm on an iPhone.
+  Checks computed input sizes and focus on a touch device at narrow and wide
+  viewport sizes.
+- **`mobile-web-input-font`, shared forms:**
+  `tests/browser_ui/files/test_mobile_form_zoom.py` covers workspace search,
+  conversation rename, file find, and the rich text editor. It checks portrait
+  and landscape forms, separates touch capability from layout width, and checks
+  native portaled fields in landscape. For a manual check on an iPhone, focus
+  the composer, open Files and focus Search all files, then open Rename from the
+  conversation menu. Type in each field in portrait and landscape. Expect no
+  automatic zoom, and confirm pinch zoom still works. Playwright checks computed
+  styles but does not emulate the real iOS keyboard's focus zoom.
 - **`pill-tooltip`, `pill-tooltip-suppressed`, in-session:**
   `tests/browser_ui/chat/test_composer_tooltips.py::test_pill_uses_one_tooltip_and_suppresses_it_while_picker_is_open`
   (runs with zero and one turn).
