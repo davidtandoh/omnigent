@@ -5,6 +5,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -214,6 +215,16 @@ function resolveTerminalViewKey(stored: string | null, agentKey: string): string
 }
 
 export function AppShell() {
+  useLayoutEffect(() => {
+    const root = document.documentElement;
+    if (isIOSShell()) root.dataset.iosNative = "true";
+    if (isAndroidShell()) root.dataset.androidNative = "true";
+    return () => {
+      delete root.dataset.iosNative;
+      delete root.dataset.androidNative;
+    };
+  }, []);
+
   // Cmd/Ctrl+Enter accepts the pending harness approval prompt. Bound once
   // here so it works on every chat route, regardless of where focus sits.
   useApproveHotkey();

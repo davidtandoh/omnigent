@@ -131,15 +131,6 @@ def test_form_font_floor_cascade(
         )
         == "12px"
     )
-    for native in ("data-ios-native", "data-android-native"):
-        page.locator("#form-font-floor").evaluate("(el, attr) => el.setAttribute(attr, '')", native)
-        assert fields.evaluate_all(
-            "els => els.map(el => parseFloat(getComputedStyle(el).fontSize))"
-        ) == [12] * 14
-        assert controls.evaluate_all(
-            "els => els.map(el => getComputedStyle(el).touchAction)"
-        ) == ["auto"] * controls.count()
-        page.locator("#form-font-floor").evaluate("(el, attr) => el.removeAttribute(attr)", native)
     viewport = page.locator('meta[name="viewport"]').get_attribute("content") or ""
     assert "maximum-scale" not in viewport and "user-scalable=no" not in viewport
 
@@ -170,3 +161,30 @@ def test_mobile_file_fields_avoid_focus_zoom(
     expect(field).to_be_focused()
     assert field.evaluate("el => parseFloat(getComputedStyle(el).fontSize)") >= 16
     assert field.evaluate("el => getComputedStyle(el).touchAction") == "manipulation"
+
+
+@pytest.mark.browser_context_args(is_mobile=True, has_touch=True)
+@pytest.mark.parametrize("shell", ["ios", "android", None], ids=["ios", "android", "web"])
+def test_native_portaled_field_preserves_typography(
+    page: Page, seeded_session: BrowserSession, shell: str | None
+) -> None:
+    """Native dialogs keep their typography outside AppShell."""
+    page.set_viewport_size({"width": 844, "height": 390})
+    if shell is not None:
+        page.add_init_script(
+            "window.omnigentNative = {kind: " + json.dumps(shell)
+            + ", setBadgeCount() {}, notify: async () => false}"
+        )
+    page.goto(seeded_session.contract.base_url + "/c/" + seeded_session.session_id)
+    page.get_by_role("button", name="New project", exact=True).click()
+    dialog = page.get_by_role("dialog", name="New project", exact=True)
+    field = dialog.get_by_placeholder("Project name…")
+    expect(field).to_be_visible()
+    assert field.evaluate("el => el.closest('.app-shell') === null")
+    expect(field).to_have_css("font-size", "13px" if shell else "16px")
+    expect(field).to_have_css("touch-action", "auto" if shell else "manipulation")
+    expect(dialog.get_by_role("button", name="Cancel", exact=True)).to_have_css(
+        "touch-action", "auto" if shell else "manipulation"
+    )
+    field.fill("Native project")
+    expect(field).to_have_value("Native project")

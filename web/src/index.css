@@ -1308,7 +1308,7 @@ html[data-electron-mac] .breadcrumb-folder {
   /* Safari focus zoom also affects fields outside AppShell, including dialogs.
    * Override small utility and inline editor fonts; native shells own theirs. */
   :is(input, textarea, select, [contenteditable]:not([contenteditable="false"])):not(
-    :where([data-ios-native] *, [data-android-native] *)
+    :where(html[data-ios-native] *, html[data-android-native] *)
   ) {
     font-size: max(16px, var(--text-ui)) !important;
   }
@@ -1331,7 +1331,7 @@ html[data-electron-mac] .breadcrumb-folder {
     [role="radio"],
     [role="switch"],
     [role="treeitem"]
-  ):not(:where([data-ios-native] *, [data-android-native] *)) {
+  ):not(:where(html[data-ios-native] *, html[data-android-native] *)) {
     touch-action: manipulation;
   }
 }
