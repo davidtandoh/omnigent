@@ -23,11 +23,16 @@ _FIELDS = (
 
 
 @pytest.mark.browser_context_args(is_mobile=True, has_touch=True)
+@pytest.mark.parametrize(
+    "viewport",
+    [{"width": 390, "height": 844}, {"width": 844, "height": 390}],
+    ids=["portrait", "landscape"],
+)
 def test_mobile_forms_avoid_focus_zoom(
-    page: Page, seeded_session: BrowserSession, tmp_path: Path
+    page: Page, seeded_session: BrowserSession, tmp_path: Path, viewport: dict[str, int]
 ) -> None:
     """Every visible form field stays above Safari's focus-zoom threshold."""
-    page.set_viewport_size({"width": 390, "height": 844})
+    page.set_viewport_size(viewport)
     base_url, sid = seeded_session
     seeded_session.contract.json(
         f"/v1/sessions/{sid}/resources/environments/default/search",
@@ -41,10 +46,15 @@ def test_mobile_forms_avoid_focus_zoom(
     ):
         page.goto(base_url + path)
         if surface == "workspace":
-            page.get_by_role("button", name="Conversation actions").click()
-            page.get_by_role("menuitem", name="Files", exact=True).click()
+            if viewport["width"] < 768:
+                page.get_by_test_id("header-conversation-actions").click()
+                page.get_by_role("menuitem", name="Files", exact=True).click()
+            else:
+                page.get_by_role("button", name="Close sidebar", exact=True).click()
+                page.get_by_role("button", name="Expand right panel", exact=True).click()
+                page.get_by_role("tab", name="Files", exact=True).click()
         if surface == "rename":
-            page.get_by_role("button", name="Conversation actions").click()
+            page.get_by_test_id("header-conversation-actions").click()
             page.get_by_role("menuitem", name="Rename", exact=True).click()
         target = page.locator(field).filter(visible=True)
         expect(target).to_be_visible(timeout=30_000)
@@ -70,10 +80,17 @@ def test_mobile_forms_avoid_focus_zoom(
     ), metrics
 
 
-@pytest.mark.parametrize("width", [390, 767, 768])
+@pytest.mark.parametrize(
+    "touch",
+    [
+        pytest.param(True, marks=pytest.mark.browser_context_args(has_touch=True), id="touch"),
+        pytest.param(False, marks=pytest.mark.browser_context_args(has_touch=False), id="mouse"),
+    ],
+)
+@pytest.mark.parametrize("width", [390, 767, 768, 844])
 @pytest.mark.parametrize("font_size", [11, 18])
 def test_form_font_floor_cascade(
-    page: Page, seeded_session: BrowserSession, width: int, font_size: int
+    page: Page, seeded_session: BrowserSession, width: int, font_size: int, touch: bool
 ) -> None:
     """The built CSS covers field kinds, portals and inline editor styles."""
     page.set_viewport_size({"width": width, "height": 844})
@@ -102,17 +119,27 @@ def test_form_font_floor_cascade(
     fields = page.locator(f"#form-font-floor :is({_FIELDS})")
     assert fields.count() == 14
     sizes = fields.evaluate_all("els => els.map(el => parseFloat(getComputedStyle(el).fontSize))")
-    expected_size = max(16, font_size) if width < 768 else 12
+    assert page.evaluate("matchMedia('(hover: none) and (pointer: coarse)').matches") == touch
+    expected_size = max(16, font_size) if touch else 12
     assert sizes == [expected_size] * 14
     controls = page.locator('#form-font-floor > :not([contenteditable="false"])')
     actions = controls.evaluate_all("els => els.map(el => getComputedStyle(el).touchAction)")
-    assert actions == ["manipulation" if width < 768 else "auto"] * controls.count()
+    assert actions == ["manipulation" if touch else "auto"] * controls.count()
     assert (
         page.locator('#form-font-floor [contenteditable="false"]').evaluate(
             "el => getComputedStyle(el).fontSize"
         )
         == "12px"
     )
+    for native in ("data-ios-native", "data-android-native"):
+        page.locator("#form-font-floor").evaluate("(el, attr) => el.setAttribute(attr, '')", native)
+        assert fields.evaluate_all(
+            "els => els.map(el => parseFloat(getComputedStyle(el).fontSize))"
+        ) == [12] * 14
+        assert controls.evaluate_all(
+            "els => els.map(el => getComputedStyle(el).touchAction)"
+        ) == ["auto"] * controls.count()
+        page.locator("#form-font-floor").evaluate("(el, attr) => el.removeAttribute(attr)", native)
     viewport = page.locator('meta[name="viewport"]').get_attribute("content") or ""
     assert "maximum-scale" not in viewport and "user-scalable=no" not in viewport
 

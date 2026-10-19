@@ -1284,6 +1284,21 @@ html[data-electron-mac] .breadcrumb-folder {
     font-size: var(--mobile-ui-font-size);
   }
 
+  /* Keep mobile sidebar glyphs uniform. Desktop icon geometry is unchanged. */
+  .conversations-sidebar {
+    --sidebar-icon-size-mobile: 16px;
+  }
+
+  .conversations-sidebar svg,
+  .conversations-sidebar .ui-icon,
+  .conversations-sidebar .button-standard-icons svg {
+    width: var(--sidebar-icon-size-mobile);
+    height: var(--sidebar-icon-size-mobile);
+    padding: 0;
+  }
+}
+
+@media (hover: none) and (pointer: coarse) {
   /* Keep mobile web draft inputs and their mirrors above Safari's focus-zoom
    * threshold, while retaining larger Appearance sizes. */
   .app-shell:not([data-ios-native]):not([data-android-native]) .composer-input-text {
@@ -1318,19 +1333,6 @@ html[data-electron-mac] .breadcrumb-folder {
     [role="treeitem"]
   ):not(:where([data-ios-native] *, [data-android-native] *)) {
     touch-action: manipulation;
-  }
-
-  /* Keep mobile sidebar glyphs uniform. Desktop icon geometry is unchanged. */
-  .conversations-sidebar {
-    --sidebar-icon-size-mobile: 16px;
-  }
-
-  .conversations-sidebar svg,
-  .conversations-sidebar .ui-icon,
-  .conversations-sidebar .button-standard-icons svg {
-    width: var(--sidebar-icon-size-mobile);
-    height: var(--sidebar-icon-size-mobile);
-    padding: 0;
   }
 }
 
