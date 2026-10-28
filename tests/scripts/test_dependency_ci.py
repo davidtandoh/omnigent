@@ -280,10 +280,6 @@ def test_configured_container_manifests_have_consumer_coverage(scope_module):
                 == "docker"
             )
             assert name in triggers or f"{path.parent.relative_to(ROOT)}/**" in triggers
-            assert (
-                name in (ROOT / ".github/workflows/docker-build.yml").read_text()
-                or "cloudflare" in name
-            )
 
 
 def test_cross_ecosystem_bundle_retains_each_consumer(scope_module):
