@@ -1110,7 +1110,38 @@ def test_pre_selection_heads_cannot_use_old_smoke_ci(tmp_path, expanded_update):
     assert not any(call[:2] == ["pr", "merge"] for call in calls), process.stdout
 
 
-def test_lockfile_guards_are_in_the_required_lint_job():
+def _run_workflow_command(tmp_path, script, command, exit_code):
+    log = tmp_path / "command-args.jsonl"
+    shim = tmp_path / command
+    shim.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "with open(os.environ['WORKFLOW_TEST_LOG'], 'a') as log:\n"
+        "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        "sys.exit(int(os.environ['WORKFLOW_TEST_EXIT']))\n"
+    )
+    shim.chmod(0o755)
+    result = subprocess.run(
+        ["bash", "-eo", "pipefail", "-c", script],
+        cwd=tmp_path,
+        env={
+            "PATH": f"{tmp_path}{os.pathsep}{os.defpath}",
+            "REPO": REPO,
+            "PR": "123",
+            "EXPECTED_HEAD": HEAD,
+            "WORKFLOW_TEST_LOG": str(log),
+            "WORKFLOW_TEST_EXIT": str(exit_code),
+        },
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+    return result, calls
+
+
+@pytest.mark.parametrize("exit_code", [0, 17])
+def test_lockfile_guards_are_in_the_required_lint_job(tmp_path, exit_code):
     workflow = yaml.safe_load((ROOT / ".github/workflows/lint.yml").read_text())
     job = next(job for job in workflow["jobs"].values() if job.get("name") == "Pre-commit checks")
     guard = next(
@@ -1118,9 +1149,22 @@ def test_lockfile_guards_are_in_the_required_lint_job():
         for step in job["steps"]
         if step.get("name") == "Check locked dependency regression guards"
     )
-    assert "tests/e2e/test_lockfile_vulnerable_pins.py" in guard["run"]
-    assert "-p tests._helpers.required_tests" in guard["run"]
     assert "if" not in guard
+    result, calls = _run_workflow_command(tmp_path, guard["run"], "uv", exit_code)
+    assert result.returncode == exit_code, result.stdout + result.stderr
+    assert calls == [
+        [
+            "run",
+            "--no-sync",
+            "pytest",
+            "tests/e2e/test_lockfile_vulnerable_pins.py",
+            "-q",
+            "--reruns",
+            "0",
+            "-p",
+            "tests._helpers.required_tests",
+        ]
+    ]
 
 
 @pytest.fixture
@@ -1817,11 +1861,6 @@ def test_dependency_readiness_workflow_covers_evidence_and_authorization_events(
         (ROOT / ".github/workflows/maintainer-approval.yml").read_text()
     )
     assert approval_workflow["jobs"]["approve"]["permissions"]["statuses"] == "write"
-    approval_step = next(
-        s
-        for s in approval_workflow["jobs"]["approve"]["steps"]
-        if s.get("name") == "Require maintainer approval"
-    )
     for parser_step in (
         next(s for s in steps if s.get("id") == "parser"),
         next(
@@ -1831,12 +1870,39 @@ def test_dependency_readiness_workflow_covers_evidence_and_authorization_events(
         ),
     ):
         assert parser_step["continue-on-error"]
-    evidence_step = next(s for s in steps if s.get("id") == "dependency")
-    for flag in [
-        "--trusted-author 'omni-resolve-agent[bot]'",
-        "--trusted-successor 'omni-resolve-agent[bot]'",
-    ]:
-        assert flag in approval_step["run"] and flag in evidence_step["run"]
+
+
+@pytest.mark.parametrize("entry", ["approval", "readiness"])
+@pytest.mark.parametrize("exit_code", [0, 17])
+def test_workflow_forwards_trusted_authors_and_propagates_failure(tmp_path, entry, exit_code):
+    workflow_name = "maintainer-approval" if entry == "approval" else "merge-ready"
+    workflow = yaml.safe_load((ROOT / f".github/workflows/{workflow_name}.yml").read_text())
+    job = workflow["jobs"]["approve" if entry == "approval" else "evaluate"]
+    step = next(
+        step
+        for step in job["steps"]
+        if (
+            step.get("name") == "Require maintainer approval"
+            if entry == "approval"
+            else step.get("id") == "dependency"
+        )
+    )
+    result, calls = _run_workflow_command(tmp_path, step["run"], "python3", exit_code)
+    assert result.returncode == exit_code, result.stdout + result.stderr
+    expected = [
+        ".github/scripts/maintainer_approval.py",
+        "--repository",
+        REPO,
+        "--pr-number",
+        "123",
+        "--trusted-author",
+        "omni-resolve-agent[bot]",
+        "--trusted-successor",
+        "omni-resolve-agent[bot]",
+    ]
+    if entry == "readiness":
+        expected.append("--check-dependency-reports")
+    assert calls == [expected]
 
 
 @pytest.mark.parametrize("entry", ["approval", "readiness"])
