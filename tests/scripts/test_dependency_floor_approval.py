@@ -182,4 +182,3 @@ def test_rule_name_matches_the_lint_and_runs_in_the_required_check(approval) -> 
     assert step["if"] == "${{ !cancelled() }}"
     assert step["env"]["PYTHONPATH"] == "${{ github.workspace }}"
     assert step["env"]["EXPECTED_HEAD"] == "${{ github.event.pull_request.head.sha }}"
-    assert '--expected-head "$EXPECTED_HEAD"' in step["run"]

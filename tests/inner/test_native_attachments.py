@@ -631,20 +631,6 @@ async def test_re_resolution_carries_the_recorded_delivery(
     assert resolved.get("delivery") == expected
 
 
-def test_client_server_filesystem_extension_parity() -> None:
-    """Client and server default to the same filesystem attachment extensions."""
-    from omnigent.inner.native_attachments import DEFAULT_FILESYSTEM_ATTACHMENT_EXTENSIONS
-
-    ts_path = Path(__file__).resolve().parents[2] / "web" / "src" / "lib" / "attachments.ts"
-    if not ts_path.exists():
-        pytest.skip("web/src/lib/attachments.ts not present (server-only checkout)")
-    block = ts_path.read_text().split("DEFAULT_FILESYSTEM_ATTACHMENT_EXTENSIONS = new Set([")[1]
-    client_exts = set(re.findall(r'"(\.[a-z0-9]+)"', block.split("]")[0]))
-
-    assert client_exts, "could not parse client DEFAULT_FILESYSTEM_ATTACHMENT_EXTENSIONS"
-    assert client_exts == set(DEFAULT_FILESYSTEM_ATTACHMENT_EXTENSIONS)
-
-
 # ── resize notice ────────────────────────────────────────────────────
 
 

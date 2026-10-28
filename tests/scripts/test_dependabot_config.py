@@ -9,6 +9,10 @@ are the pre-merge gate.
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -181,15 +185,54 @@ def test_app_refresh_permissions_cover_optional_and_reusable_workflows(monkeypat
 
 
 @pytest.mark.parametrize("name", ["oss-regen-on-comment.yml", "oss-regenerate-and-smoke.yml"])
-def test_regeneration_preserves_pins_and_skips_install_scripts(name):
+@pytest.mark.parametrize("pnpm_exit", [0, 17])
+def test_regeneration_preserves_pins_and_skips_install_scripts(tmp_path, name, pnpm_exit):
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows" / name).read_text())
     steps = [step for job in workflow["jobs"].values() for step in job["steps"]]
-    regeneration = [
-        step["run"] for step in steps if "pnpm install --lockfile-only" in step.get("run", "")
+    step_name = (
+        "Regenerate lockfiles against public PyPI/npmjs.org"
+        if name == "oss-regen-on-comment.yml"
+        else "Regenerate pnpm-lock.yaml"
+    )
+    regeneration = next(step for step in steps if step.get("name") == step_name)
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    lock = tmp_path / "pnpm-lock.yaml"
+    lock.write_text("existing dependency resolutions\n")
+    log = tmp_path / "calls.jsonl"
+    for command in ("pnpm", "uv", "python3"):
+        shim = commands / command
+        shim.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, pathlib, sys\n"
+            "name = pathlib.Path(sys.argv[0]).name\n"
+            "lock = pathlib.Path('pnpm-lock.yaml').read_text()\n"
+            "with open(os.environ['REGEN_TEST_LOG'], 'a') as log:\n"
+            "    log.write(json.dumps([name, sys.argv[1:], lock]) + '\\n')\n"
+            "sys.exit(int(os.environ['REGEN_TEST_EXIT']) if name == 'pnpm' else 0)\n"
+        )
+        shim.chmod(0o755)
+    result = subprocess.run(
+        ["bash", "-eo", "pipefail", "-c", regeneration["run"]],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PATH": f"{commands}{os.pathsep}{os.defpath}",
+            "REGEN_MODE": "regen",
+            "UPGRADE_PKGS": "",
+            "REGEN_TEST_LOG": str(log),
+            "REGEN_TEST_EXIT": str(pnpm_exit),
+        },
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    assert result.returncode == pnpm_exit, result.stdout + result.stderr
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert [call for call in calls if call[0] == "pnpm"] == [
+        ["pnpm", ["install", "--lockfile-only", "--ignore-scripts"], lock.read_text()]
     ]
-    assert len(regeneration) == 1
-    assert "pnpm install --lockfile-only --ignore-scripts" in regeneration[0]
-    assert not any("rm -f pnpm-lock.yaml" in step.get("run", "") for step in steps)
+    assert lock.read_text() == "existing dependency resolutions\n"
     if name == "oss-regen-on-comment.yml":
         setup = next(step for step in steps if "/setup-uv@" in step.get("uses", ""))
         assert setup["with"]["version"] == "0.13.4"

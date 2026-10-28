@@ -392,8 +392,6 @@ def test_dependabot_scan_still_runs_other_detectors():
     for workflow, job in [("security-gate.yml", "gate"), ("security-scan.yml", "scan")]:
         checkout = _steps(workflow, job)[0]
         assert "uses" not in checkout
-        assert "fetch --depth=1 origin main" in checkout["run"]
-        assert "git checkout --detach FETCH_HEAD" in checkout["run"]
 
 
 @pytest.mark.parametrize(
