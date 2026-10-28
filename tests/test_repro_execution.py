@@ -418,7 +418,10 @@ def test_non_session_urls_do_not_trigger_snapshots(tmp_path):
     assert set(collector.sessions) == {("http://localhost", "s"), ("http://localhost", "other")}
 
 
-@pytest.mark.skipif(not hasattr(os, "WNOWAIT"), reason="requires waitid with WNOWAIT")
+@pytest.mark.skipif(
+    not hasattr(os, "waitid") or not hasattr(os, "WNOWAIT"),
+    reason="requires waitid with WNOWAIT",
+)
 def test_cleanup_signals_only_while_child_identity_is_reserved(tmp_path, monkeypatch):
     from dev.repro_env import execution
 
@@ -439,7 +442,10 @@ def test_cleanup_signals_only_while_child_identity_is_reserved(tmp_path, monkeyp
     assert len(signaled) == 1
 
 
-@pytest.mark.skipif(not hasattr(os, "WNOWAIT"), reason="requires waitid with WNOWAIT")
+@pytest.mark.skipif(
+    not hasattr(os, "waitid") or not hasattr(os, "WNOWAIT"),
+    reason="requires waitid with WNOWAIT",
+)
 def test_repeated_signals_defer_journal_io(tmp_path, monkeypatch):
     import signal
     import time
@@ -795,7 +801,7 @@ def test_group_wait_failure_preserves_command_result(tmp_path, monkeypatch, erro
     def fail(*args):
         raise error("group wait unavailable")
 
-    monkeypatch.setattr(execution.os, "waitid", fail)
+    monkeypatch.setattr(execution.os, "waitid", fail, raising=False)
     monkeypatch.setattr(
         execution.os, "killpg", lambda *args: pytest.fail("unowned group signaled")
     )

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -14,7 +14,7 @@ from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissi
 
 @pytest.fixture
 def clock(monkeypatch):
-    current = [datetime(2026, 10, 13, 12, tzinfo=timezone.utc)]
+    current = [datetime(2026, 10, 13, 12, tzinfo=UTC)]
 
     class Clock(datetime):
         @classmethod
@@ -116,7 +116,7 @@ async def test_approvals_are_independent_across_sessions(conversation_store, db_
         engine = _build(conversation_store, db_uri, policies)
         ask = await engine.evaluate(ctx)
         assert ask.action == PolicyAction.ASK
-        engine.apply_state_updates(ask.state_updates)
+        engine.apply_state_updates(ask.state_updates, approved=True)
         assert (await engine.evaluate(ctx)).action == PolicyAction.ALLOW
         another = _build(conversation_store, db_uri, policies)
         assert (await another.evaluate(ctx)).action == PolicyAction.ALLOW
@@ -136,7 +136,7 @@ async def test_month_approval_does_not_approve_other_periods(
     ctx = EvaluationContext(phase=Phase.REQUEST, content="run")
     monthly = _build(conversation_store, db_uri, [_policy("month", 50.0)])
     ask = await monthly.evaluate(ctx)
-    monthly.apply_state_updates(ask.state_updates)
+    monthly.apply_state_updates(ask.state_updates, approved=True)
     other = _build(conversation_store, db_uri, [_policy(other_period, 5.0)])
     assert (await other.evaluate(ctx)).action == PolicyAction.ASK
 
@@ -151,7 +151,7 @@ async def test_simultaneous_windows_keep_separate_approvals(conversation_store, 
     ask = await engine.evaluate(ctx)
     assert ask.action == PolicyAction.ASK
     assert len(ask.state_updates) == 6
-    engine.apply_state_updates(ask.state_updates)
+    engine.apply_state_updates(ask.state_updates, approved=True)
     assert (await engine.evaluate(ctx)).action == PolicyAction.ALLOW
     rebuilt = _build(conversation_store, db_uri, policies)
     assert (await rebuilt.evaluate(ctx)).action == PolicyAction.ALLOW
@@ -167,8 +167,8 @@ async def test_delayed_approval_stays_in_original_window(conversation_store, db_
     ctx = EvaluationContext(phase=Phase.REQUEST, content="run")
     ask = await engine.evaluate(ctx)
     assert ask.action == PolicyAction.ASK
-    clock[0] = datetime(2026, 11, 1, tzinfo=timezone.utc)
-    engine.apply_state_updates(ask.state_updates)
+    clock[0] = datetime(2026, 11, 1, tzinfo=UTC)
+    engine.apply_state_updates(ask.state_updates, approved=True)
     conversation_store.add_daily_cost("alice", "2026-11-01", 60.0)
     next_month = _build(conversation_store, db_uri, policies)
     assert (await next_month.evaluate(ctx)).action == PolicyAction.ASK
@@ -177,7 +177,7 @@ async def test_delayed_approval_stays_in_original_window(conversation_store, db_
 
 @pytest.mark.asyncio
 async def test_new_month_does_not_truncate_overlapping_week(conversation_store, db_uri, clock):
-    clock[0] = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    clock[0] = datetime(2026, 11, 1, tzinfo=UTC)
     conversation_store.add_daily_cost("alice", "2026-10-26", 60.0)
     conversation_store.add_daily_cost("alice", "2026-11-01", 1.0)
     engine = _build(

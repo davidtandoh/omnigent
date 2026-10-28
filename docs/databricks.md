@@ -34,6 +34,11 @@ section starts with a short context paragraph, then the concrete
 commands. If you already use both, skim the quick start at the top of
 each section.
 
+To connect the local Antigravity CLI (`omni agy`) to Databricks model services,
+see [Native agy credentials and gateways](native-agy-gateways.md#databricks).
+That route requires the workspace's native Gemini API; a model exposed only
+through the OpenAI Responses API is not sufficient.
+
 ## What you get
 
 When omnigent runs on Databricks with the four integration points
@@ -396,10 +401,11 @@ Gateway config included `usage_tracking_config.enabled=true` and a
 
 ```python
 from openai import OpenAI
-client = OpenAI(base_url=f'{DATABRICKS_HOST}/serving-endpoints', api_key=DATABRICKS_TOKEN)
+
+client = OpenAI(base_url=f"{DATABRICKS_HOST}/serving-endpoints", api_key=DATABRICKS_TOKEN)
 resp = client.chat.completions.create(
-    model='omnigent-docs-test-gateway',   # the Gateway endpoint, not the backing model
-    messages=[{'role':'user','content':'Reply with exactly two words: PROXY OK'}],
+    model="omnigent-docs-test-gateway",  # the Gateway endpoint, not the backing model
+    messages=[{"role": "user", "content": "Reply with exactly two words: PROXY OK"}],
     max_tokens=10,
 )
 ```
@@ -649,7 +655,7 @@ The OpenAI SDK needs an explicit `api_key` argument, not just the
 explicitly:
 
 ```python
-client = OpenAI(base_url=os.environ['OPENAI_BASE_URL'], api_key=os.environ['DATABRICKS_TOKEN'])
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["DATABRICKS_TOKEN"])
 ```
 
 ### Traces not appearing in MLflow UI

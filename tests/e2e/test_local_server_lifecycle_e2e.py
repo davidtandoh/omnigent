@@ -39,6 +39,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from tests._helpers.live_server import find_free_port
 from tests.e2e.helpers import HEALTH_TIMEOUT_S, POLL_INTERVAL_S
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -168,18 +169,6 @@ def _health_ok(port: int) -> bool:
     except httpx.HTTPError:
         return False
     return resp.status_code == 200
-
-
-def _find_free_port() -> int:
-    """Find a free loopback TCP port.
-
-    :returns: An available port number on ``127.0.0.1``.
-    """
-    import socket
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
 
 
 def _wait_for_pidfile_server(
@@ -535,10 +524,10 @@ def test_explicit_port_servers_run_side_by_side(
     env = _isolated_env(home)
     # Two distinct free ports: the probe socket closes immediately, so the OS
     # could hand out the same ephemeral port twice — loop until they differ.
-    port_a = _find_free_port()
-    port_b = _find_free_port()
+    port_a = find_free_port()
+    port_b = find_free_port()
     while port_b == port_a:
-        port_b = _find_free_port()
+        port_b = find_free_port()
 
     srv_a = procs.spawn(
         ["server", "--port", str(port_a)], env=env, cwd=home, log=tmp_path / "a.log"
@@ -564,7 +553,7 @@ def test_local_server_uses_fixed_environment_port(procs: _Procs, tmp_path: Path)
     home = tmp_path / "home"
     home.mkdir()
     env = _isolated_env(home)
-    port = _find_free_port()
+    port = find_free_port()
     env["OMNIGENT_LOCAL_SERVER_PORT"] = str(port)
     procs.track_pidfile(_pidfile_path(home))
     procs.track_server_home(home)

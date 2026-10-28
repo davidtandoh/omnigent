@@ -1061,6 +1061,10 @@ async def test_local_import_endpoints_redact_host_error(
     assert sensitive_detail not in response.text
     assert sensitive_detail in caplog.text
     assert error_id in caplog.text
+    error_record = next(record for record in caplog.records if error_id in record.getMessage())
+    assert error_record.exc_info is not None
+    assert isinstance(error_record.exc_info[1], OmnigentError)
+    assert error_record.exc_info[2] is not None
 
 
 def _host_import_client(db_uri: str, host_registry: HostRegistry) -> httpx.AsyncClient:
@@ -1103,8 +1107,8 @@ async def test_import_local_live_host_off_replica_is_wrong_replica(
     signal the client re-addresses on — the import failed permanently.
 
     Only a sharded (multi-replica) deployment has an "other replica" to
-    re-address to, so force the sharded signal on — the test host stack has no
-    lakebox module, which auto-detects as single-replica.
+    re-address to, so force the sharded signal on — the test host stack is
+    single-replica by default.
     """
     from omnigent.server.routes import _host_launch
 

@@ -5,7 +5,7 @@ Covers all period types (day, week, month, quarter, year).
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -18,7 +18,7 @@ def frozen_utc_day(monkeypatch):
     class Clock(datetime):
         @classmethod
         def now(cls, tz=None):
-            return datetime(2026, 8, 25, 12, tzinfo=timezone.utc).astimezone(tz)
+            return datetime(2026, 8, 25, 12, tzinfo=UTC).astimezone(tz)
 
     monkeypatch.setattr("omnigent.policies.cost_windows.datetime", Clock)
 

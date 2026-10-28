@@ -179,8 +179,8 @@ def configured_local_server_port() -> int | None:
     raw_port = os.environ.get("OMNIGENT_LOCAL_SERVER_PORT")
     if raw_port is not None:
         try:
-            return click.IntRange(1, 65535).convert(raw_port, None, None)
-        except click.BadParameter as exc:
+            return click.IntRange(1, 65535).convert(int(raw_port), None, None)
+        except (click.BadParameter, ValueError) as exc:
             raise click.ClickException(f"Invalid OMNIGENT_LOCAL_SERVER_PORT: {exc}") from exc
     return None
 

@@ -1435,6 +1435,9 @@ def _build_claude_sdk_spawn_env(
     permission_mode = spec.executor.config.get("permission_mode")
     if permission_mode is not None:
         env["HARNESS_CLAUDE_SDK_PERMISSION_MODE"] = str(permission_mode)
+    # Explicitly clear inherited presets for agents that have not opted in.
+    preset = spec.executor.config.get("system_prompt_preset")
+    env["HARNESS_CLAUDE_SDK_SYSTEM_PROMPT_PRESET"] = str(preset) if preset is not None else ""
     return env
 
 
@@ -1570,7 +1573,9 @@ def _build_pi_spawn_env(
     :param workdir: The bundle's on-disk path (extracted by the
         agent cache). Threaded through as ``HARNESS_PI_BUNDLE_DIR``
         so the harness wrap's executor can source bundled skills
-        from ``<bundle>/skills/<dir>/``.
+        from ``<bundle>/skills/<dir>/`` and ``<bundle>/.pi/skills/<dir>/``,
+        extensions from ``<bundle>/.pi/extensions``, and a bundle-root
+        context file (``AGENTS.md`` et al.).
     :returns: A dict of env-var overrides for
         :meth:`HarnessProcessManager.get_client(env=...)`.
     """
@@ -2573,27 +2578,13 @@ def _build_copilot_spawn_env(
 
 
 def _serialize_os_env(value: OSEnvSpec | None) -> str | None:
-    """
-    Encode an :class:`OSEnvSpec` for the wrap's env-var input.
-
-    JSON-encodes :func:`dataclasses.asdict` of the OSEnvSpec so
-    the wrap can :func:`json.loads` it back on the harness side
-    (per the per-spawn env-var pattern from §Step 5a). When
-    *value* is ``None`` (no os_env declared on the spec), this
-    returns ``None`` and ``_build_claude_sdk_spawn_env`` omits
-    the env var entirely — the wrap then falls back to its
-    enable-natives-by-default rule.
-
-    :param value: ``spec.os_env`` — an :class:`OSEnvSpec`
-        instance or ``None``.
-    :returns: JSON string encoding the OSEnvSpec, or ``None``
-        when *value* is ``None``.
-    """
-    import dataclasses
+    """Encode an OS environment for harness subprocesses."""
 
     if value is None:
         return None
-    return json.dumps(dataclasses.asdict(value))
+    from omnigent.inner.os_env_serialization import encode_os_env_spec
+
+    return json.dumps(encode_os_env_spec(value))
 
 
 def _serialize_retry_policy(value: RetryPolicy | None) -> str | None:
