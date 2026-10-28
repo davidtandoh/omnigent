@@ -444,16 +444,13 @@ class _HelperProcessClient:
         # exits, and each request runs on its own short-lived thread.
         self._spawner = ThreadPoolExecutor(max_workers=1, thread_name_prefix="os-env-helper")
         self._closed = False
-        # Bubblewrap's parent-death signal follows the spawning thread. Keep
-        # that thread alive across requests and helper restarts until close().
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="os-env-helper")
         atexit.register(self.close)
 
     def request(self, payload: OpRequest) -> OpResult:
         with self._lock:
             if self._closed:
                 return {"error": "OS environment helper is closed"}
-            return self._executor.submit(self._request_locked, payload, allow_retry=True).result()
+            return self._spawner.submit(self._request_locked, payload, allow_retry=True).result()
 
     def close(self) -> None:
         with self._lock:
@@ -684,19 +681,17 @@ class _HelperProcessClient:
         if r_fd is not None:
             popen_kwargs["pass_fds"] = (r_fd,)
         try:
-            self._proc = self._spawner.submit(
-                lambda: subprocess.Popen(
-                    spawn_argv,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    bufsize=1,
-                    cwd="/" if sandbox.copy_on_write_namespace else str(self.cwd),
-                    env=env,
-                    **popen_kwargs,
-                )
-            ).result()
+            self._proc = subprocess.Popen(
+                spawn_argv,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                cwd="/" if sandbox.copy_on_write_namespace else str(self.cwd),
+                env=env,
+                **popen_kwargs,
+            )
         except Exception:
             self._stop_locked()
             raise

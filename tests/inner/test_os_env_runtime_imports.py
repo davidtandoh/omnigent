@@ -131,6 +131,9 @@ def test_tools_repair_broken_checkout_with_normal_shell_imports(
         asyncio.run(exercise())
     finally:
         env.close()
+    for thread in spawn_threads:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
 
 
 @requires_bwrap

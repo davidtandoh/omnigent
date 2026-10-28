@@ -14,6 +14,7 @@ recording mock, and reads back what reached it.
 from __future__ import annotations
 
 import importlib
+import runpy
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -140,3 +141,40 @@ def test_databricks_account_connection_needs_a_cipher(
 
     assert exit_codes == []
     assert create_app.call_args.kwargs["databricks_store"] is None
+
+
+def test_databricks_launcher_applies_tunnel_budget_and_graceful_shutdown(
+    boot_exit_codes: list[int], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import uvicorn.server
+
+    from omnigent.server.graceful_shutdown import (
+        SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_S,
+        ShutdownSignalingServer,
+    )
+    from omnigent.util.tunnel_limits import uvicorn_tunnel_kwargs
+
+    _patch_migrations(monkeypatch, lambda _attempt: None)
+    _stub_downstream_boot(monkeypatch)
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.delenv("OMNIGENT_CONFIG", raising=False)
+    captured = []
+
+    def capture_run(server: uvicorn.server.Server) -> None:
+        captured.append(server)
+        server.started = True
+
+    monkeypatch.setattr(uvicorn.server.Server, "run", capture_run)
+    runpy.run_path(
+        str(Path(__file__).resolve().parents[2] / "deploy/databricks/src/app.py"),
+        run_name="__main__",
+    )
+    assert boot_exit_codes == []
+    assert len(captured) == 1
+    server = captured[0]
+    assert isinstance(server, ShutdownSignalingServer)
+    assert server.config.host == "0.0.0.0"
+    assert server.config.port == 8000
+    assert server.config.timeout_graceful_shutdown == SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_S
+    for key, value in uvicorn_tunnel_kwargs().items():
+        assert getattr(server.config, key) == value

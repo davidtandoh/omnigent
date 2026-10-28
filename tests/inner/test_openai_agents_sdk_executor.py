@@ -109,6 +109,7 @@ class _FakeRunItemEvent:
 class _FakeModelSettings:
     parallel_tool_calls: bool | None = None
     max_tokens: int | None = None
+    reasoning: object = None
 
 
 @dataclass
@@ -625,6 +626,35 @@ def test_create_param_types_have_no_transform_annotations() -> None:
 
 
 class TestOpenAIAgentsSDKExecutor(unittest.TestCase):
+    def test_reasoning_effort_reaches_sdk_agent(self):
+        async def exercise():
+            _FakeRunner.last_calls = []
+            _FakeRunner.next_result = _FakeResult(events=[], final_output="done")
+            executor = OpenAIAgentsSDKExecutor(client=object(), model="gpt-test")
+            with patch(
+                "omnigent.inner.openai_agents_sdk_executor._ensure_agents_sdk",
+                return_value=_fake_agents_sdk(),
+            ):
+                for effort in ("high", None):
+                    events = [
+                        event
+                        async for event in executor.run_turn(
+                            [{"role": "user", "content": "hi"}],
+                            [],
+                            "",
+                            ExecutorConfig(extra={"reasoning_effort": effort}),
+                        )
+                    ]
+                    self.assertIsInstance(events[-1], TurnComplete)
+                    settings = _FakeRunner.last_calls[-1]["agent"].model_settings
+                    if effort is None:
+                        self.assertIsNone(settings.reasoning)
+                    else:
+                        self.assertEqual(settings.reasoning.effort, effort)
+            await executor.close()
+
+        _run(exercise())
+
     def test_close_closes_owned_client_but_not_injected_client(self):
         class _ClosableClient:
             def __init__(self):

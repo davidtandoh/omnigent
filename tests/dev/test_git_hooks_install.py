@@ -6,9 +6,14 @@ red on push instead of on commit. These pin the two places that wire it up.
 
 from __future__ import annotations
 
-import re
+import json
+import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -35,11 +40,34 @@ def test_hooks_run_at_both_stages() -> None:
     assert narrowed == [], f"hooks that skip the push stage: {narrowed}"
 
 
-def test_just_ensure_installs_the_hooks() -> None:
-    """``just ensure`` is the documented setup path, so it has to install them."""
-    justfile = (_REPO_ROOT / "justfile").read_text()
-
-    ensure_line = re.search(r"^ensure:(.*)$", justfile, re.M)
-    assert ensure_line is not None
-    assert "_ensure-hooks" in ensure_line.group(1).split()
-    assert re.search(r"^_ensure-hooks:.*\n\s+uv run --no-sync pre-commit install$", justfile, re.M)
+def test_just_ensure_installs_the_hooks(tmp_path: Path) -> None:
+    just = shutil.which("just")
+    if just is None:
+        pytest.skip("requires just")
+    commands = tmp_path / "commands"
+    commands.mkdir()
+    log = tmp_path / "calls.jsonl"
+    for name in ("uv", "bundle", "omnidev", "cargo"):
+        shim = commands / name
+        shim.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, sys\n"
+            "with open(os.environ['HOOK_TEST_LOG'], 'a') as log:\n"
+            "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        )
+        shim.chmod(0o755)
+    subprocess.run(
+        [just, "--justfile", str(_REPO_ROOT / "justfile"), "ensure"],
+        cwd=_REPO_ROOT,
+        env={
+            **os.environ,
+            "PATH": f"{commands}{os.pathsep}{os.defpath}",
+            "HOOK_TEST_LOG": str(log),
+        },
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert calls.count(["run", "--no-sync", "pre-commit", "install"]) == 1
