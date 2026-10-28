@@ -144,8 +144,9 @@ def test_databricks_account_connection_needs_a_cipher(
 
 
 def test_databricks_launcher_applies_tunnel_budget_and_graceful_shutdown(
-    boot_exit_codes: list[int], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    exit_codes = request.getfixturevalue("boot_exit_codes")
     import uvicorn.server
 
     from omnigent.server.graceful_shutdown import (
@@ -169,7 +170,7 @@ def test_databricks_launcher_applies_tunnel_budget_and_graceful_shutdown(
         str(Path(__file__).resolve().parents[2] / "deploy/databricks/src/app.py"),
         run_name="__main__",
     )
-    assert boot_exit_codes == []
+    assert exit_codes == []
     assert len(captured) == 1
     server = captured[0]
     assert isinstance(server, ShutdownSignalingServer)

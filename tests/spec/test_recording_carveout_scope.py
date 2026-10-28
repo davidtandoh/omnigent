@@ -14,7 +14,8 @@ _REPRO_AGENT = Path(__file__).resolve().parents[2] / "dev" / "repro-agent"
     "guidance",
     [
         "record the real command and its output, even if only an error message changes",
-        "For internal/API-only results with no visible user interaction, written evidence is enough",
+        "For internal/API-only results with no visible user interaction, "
+        "written evidence is enough",
         "Text-only CLI output is not a reason to skip recording",
         "name the specific blocker in `recording_unavailable_reason`",
         "Do not block the verdict because footage is missing or rejected",
