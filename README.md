@@ -741,15 +741,16 @@ tools:
 Run it with:
 
 ```bash
-omnigent run path/to/my_agent.yaml
+omnigent run path/to/my_agent.yaml --no-session
 ```
 
-On a shared server, follow the
-[uploaded-agent tool restrictions](docs/AGENT_YAML_SPEC.md#uploaded-agent-compatibility-in-0180)
-before uploading the bundle.
+This example uses trusted startup registration for its Python callable tool.
+Before uploading a bundle to any server, including a local single-user server,
+follow the
+[uploaded-agent tool restrictions](docs/AGENT_YAML_SPEC.md#uploaded-agent-compatibility).
 
-To keep an agent in the new-session picker without starting a session, install
-it on your configured server:
+To keep an upload-compatible agent in the new-session picker without starting
+a session, install it on your configured server:
 
 ```bash
 omnigent agent add path/to/my_agent.yaml
