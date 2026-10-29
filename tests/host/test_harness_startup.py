@@ -211,13 +211,15 @@ def test_env_split_string_keeps_a_word_only_for_set_variables():
         ["-S", "-C sub /bin/pwd"],
         # env applies only the last -C, relative to the starting directory.
         ["-C", "link", "-C", "sub", "/bin/pwd"],
+        ["-C", "sub", "/usr/bin/env", "-C", "nested", "/bin/pwd"],
+        ["-C", "sub", "/usr/bin/env", "-C", "link", "-C", "nested", "/bin/pwd"],
     ],
 )
 def test_env_wrapper_chdir_matches_real_env(tmp_path, args):
     """The modeled ``--chdir`` directory is where the real ``env`` runs the command."""
     if not _real_env_supports_chdir():
         pytest.skip("/usr/bin/env lacks -C/--chdir")
-    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "nested").mkdir(parents=True)
     (tmp_path / "link").symlink_to(tmp_path / "sub")
     chdir = startup.env_wrapper_chdir("/usr/bin/env", args)
     assert chdir is not None

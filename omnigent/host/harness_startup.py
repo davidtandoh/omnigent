@@ -179,8 +179,8 @@ def _parse_env_wrapper(
             for key in layer.unset:
                 environ.pop(key, None)
             environ.update(layer.variables)
-        for directory in chdirs:
-            chdir = os.path.join(chdir or "", directory)
+        if chdirs:
+            chdir = os.path.join(chdir or "", chdirs[-1])
     else:
         if parsed_any:
             return environment, chdir, command
