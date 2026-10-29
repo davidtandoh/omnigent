@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 
 def cost_window(period: str, today: str | None = None) -> tuple[str, str]:
     """Return the inclusive start and current day as ISO dates."""
-    day = date.fromisoformat(today) if today is not None else datetime.now(timezone.utc).date()
+    day = date.fromisoformat(today) if today is not None else datetime.now(UTC).date()
     if period == "day":
         start = day
     elif period == "week":

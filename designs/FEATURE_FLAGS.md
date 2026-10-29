@@ -12,10 +12,10 @@ redeploy the server:
 OMNIGENT_FEATURES=usage_page,harness_install
 ```
 
-Unset or empty uses the built-in defaults. The configured names add to those
-defaults; omitting a default-enabled feature does not disable it. Unknown names
-fail startup. Harnesses settings is always available in current clients; the
-server enables `harness_settings_ui` by default for older clients.
+Unset or empty uses the defaults below. A name enables a feature; `-name`
+disables it. Explicit disables win regardless of order, so appending
+`-claude_osc_status` is a kill switch even if `claude_osc_status` is also present.
+Unknown names, including unknown negative overrides, fail startup.
 The former `OMNIGENT_HARNESS_INSTALL_ENABLED` switch is rejected with a
 migration hint; use `OMNIGENT_FEATURES=harness_install` instead. The server resolves the set once at startup and publishes frontend-visible
 values in `GET /v1/info` under `features`. Users must reload the web app after a
@@ -33,12 +33,37 @@ At the review release, each flag must be removed by making the feature
 unconditional, removing the feature, or moving a genuinely permanent operator
 policy into normal server configuration.
 
+Runner features use the same defaults and overrides, resolved once at resource-registry
+startup. The host forwards `OMNIGENT_FEATURES` to its runners, including through
+the CLI's background daemon. Changing a remote server's environment alone does
+not change a separate host's runners. Restart the host and affected runners
+after changing their feature set; existing terminals keep their launch
+configuration. See the [native-harness feature map](../feature-map/native-harnesses.md#driving-it-with-the-repro-environment)
+for Claude working-status acceptance and kill-switch verification.
+
 ## Rollout and rollback
 
-These steps apply to optional features that are off by default.
-
-1. Deploy an immutable image with the feature absent from `OMNIGENT_FEATURES`.
-2. Enable it on one deployment, consistently across all replicas.
+1. Deploy an immutable image with `-feature_name` in `OMNIGENT_FEATURES` to
+   explicitly disable the feature, including one that defaults on.
+2. Remove that disable and add `feature_name` on one deployment, consistently
+   across all replicas.
 3. Verify `GET /v1/info`, then reload and exercise the gated UI.
 4. Expand by deployment cohort.
-5. Roll back by removing the key and redeploying the same image.
+5. Roll back with `-feature_name` and redeploy the same image. For runner
+   features, apply the override to the host/runner environment, restart those
+   processes, and launch fresh terminals.
+
+The built-in server entrypoints do not yet supply the required execution/recovery
+hooks. Enabling `automations_v2` there fails startup, even if only UI changes are
+needed. A deployment wrapper must provide the hooks through `create_app()`.
+
+Before enabling `automations_v2`, deploy the schema and updated code to every server replica. Older servers cannot read `starting` runs or preserve their cleanup records when deleting tasks.
+
+Even with the flag off, an interrupted deletion can leave a hidden task row for
+cleanup. During a mixed-version deployment, older replicas can still show and
+edit that row until all replicas are upgraded.
+
+Before disabling `automations_v2`, stop new dispatch and let existing startups
+finish or complete recovery, including any required resource cleanup. Disabling
+the flag stops startup recovery and deleted-task sweeps; clearing scheduling
+cursors does not resolve unfinished runs or remove their retained task rows.

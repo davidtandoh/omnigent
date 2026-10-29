@@ -24,16 +24,16 @@ from omnigent.runner.custody import (
     session_contract,
 )
 from omnigent.runner.identity import OMNIGENT_INTERNAL_WS_ORIGIN
+from tests._helpers.live_server import find_free_port
+from tests._helpers.session import send_user_text
 from tests.e2e.conftest import configure_mock_llm, release_mock_gate, set_fallback_mock_llm
 from tests.e2e.test_codex_native_terminal_recovery_e2e import _wait_for
 from tests.e2e.test_host_codex_native_e2e import (
     _online_host_id,
     _poll_for_assistant_marker,
     _poll_for_terminal_resource,
-    _send_user_text,
 )
 from tests.e2e.test_local_server_lifecycle_e2e import (
-    _find_free_port,
     _isolated_env,
     _Procs,
     _wait_for_pidfile_server,
@@ -83,7 +83,7 @@ def custody_environment(
     for name in list(env):
         if name.startswith(("OTEL_", "MLFLOW_", "DATABRICKS_")):
             env.pop(name)
-    port = _find_free_port()
+    port = find_free_port()
     env.update(
         {
             "OMNIGENT_CONFIG_HOME": str(config_home),
@@ -222,7 +222,7 @@ def test_codex_inflight_turn_survives_host_death_and_single_adoption(
         )
         set_fallback_mock_llm(isolated_mock_llm_server_url, "default", marker)
         set_fallback_mock_llm(isolated_mock_llm_server_url, prompt, marker)
-        _send_user_text(client, session_id=session_id, text=prompt)
+        send_user_text(client, session_id=session_id, text=prompt)
         _wait_for(
             lambda: httpx.get(
                 isolated_mock_llm_server_url + "/gate/pending", trust_env=False
@@ -469,7 +469,7 @@ def test_codex_inflight_turn_survives_host_death_and_single_adoption(
             match=denied_prompt,
         )
         set_fallback_mock_llm(isolated_mock_llm_server_url, denied_prompt, denied_marker)
-        _send_user_text(client, session_id=session_id, text=denied_prompt)
+        send_user_text(client, session_id=session_id, text=denied_prompt)
         _poll_for_assistant_marker(client, session_id=session_id, marker=denied_marker, timeout=60)
         assert client.get(f"/v1/sessions/{session_id}").json()["title"] == "CUSTODY_NATIVE_MCP_OK"
         deny_requests = httpx.get(

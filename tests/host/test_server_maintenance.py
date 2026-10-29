@@ -568,7 +568,11 @@ def test_managed_child_does_not_publish_competing_server_for_discovery(
 
     observed = []
 
-    def lose_bind_race(server: uvicorn.server.Server) -> None:
+    def lose_bind_race(
+        server: uvicorn.server.Server, sockets: list[socket.socket] | None = None
+    ) -> None:
+        assert sockets is not None and len(sockets) == 1
+        sockets[0].close()
         with ThreadingHTTPServer(("127.0.0.1", port), CompetingServer) as competitor:
             thread = threading.Thread(target=competitor.serve_forever)
             thread.start()

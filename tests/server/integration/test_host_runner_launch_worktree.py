@@ -50,6 +50,7 @@ from omnigent.stores.conversation_store.sqlalchemy_store import (
 )
 from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
 from omnigent.stores.host_store import HostStore
+from tests.budgets import budget
 from tests.server.helpers import create_test_agent
 
 pytestmark = pytest.mark.asyncio
@@ -195,7 +196,7 @@ async def register_host(
                 frame_text = await conn.outbound_queue.get()
                 if frame_text is None:
                     return
-                frame = decode_host_frame(frame_text)
+                frame = decode_host_frame(frame_text.data)
                 if isinstance(frame, HostStatFrame):
                     fut = conn.pending_stats.pop(frame.request_id, None)
                     if fut is not None and not fut.done():
@@ -244,7 +245,7 @@ async def register_host(
         conn.outbound_queue.put_nowait(None)
         task = conn._drain_task_for_test  # type: ignore[attr-defined]
         with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError, Exception):
-            await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
+            await asyncio.wait_for(asyncio.shield(task), timeout=budget(1.0))
         if not task.done():
             task.cancel()
     for task in resolver_tasks:
@@ -379,10 +380,10 @@ async def test_concurrent_source_launch_cannot_overtake_worktree_launch(
     worktree_launch = asyncio.create_task(
         _launch(client, session_id, git={"branch_name": "feature/b"})
     )
-    await asyncio.wait_for(cap.create_started.wait(), timeout=1.0)
+    await asyncio.wait_for(cap.create_started.wait(), timeout=budget(1.0))
 
     source_launch = asyncio.create_task(_launch(client, session_id, git=None))
-    await asyncio.wait_for(source_harness_resolved.wait(), timeout=1.0)
+    await asyncio.wait_for(source_harness_resolved.wait(), timeout=budget(1.0))
     create_gate.set()
 
     worktree_response, source_response = await asyncio.gather(worktree_launch, source_launch)

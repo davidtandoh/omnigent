@@ -117,8 +117,8 @@ def env_wrapper_environment(
         ``${NAME}`` in ``-S`` strings; ``None`` treats such strings as unparsed.
     :returns: The wrapper's ``-i``/``-``/``-u``/``-S``/assignment changes, or
         ``None`` when *command* is not a parseable ``env`` wrapper (e.g. it
-        uses ``-v``) or runs another ``env``. A ``-C``/``--chdir`` directory
-        is reported by :func:`env_wrapper_chdir`.
+        uses ``-v``). Nested wrappers preserve known outer changes. The
+        ``-C``/``--chdir`` result is reported by :func:`env_wrapper_chdir`.
     """
     parsed = _parse_env_wrapper(command, args, environ)
     return parsed[0] if parsed is not None else None
@@ -135,36 +135,58 @@ def env_wrapper_chdir(
         ``["--chdir=/srv/repo", "claude"]``.
     :param environ: Environment the wrapper starts from; see
         :func:`env_wrapper_environment`.
-    :returns: The last ``-C``/``--chdir`` value, e.g. ``"/srv/repo"``, or
-        ``None`` when there is none or the wrapper is not parseable.
+    :returns: The directory composed from the final ``-C``/``--chdir`` in
+        each parsed layer, e.g. ``"/srv/repo"``. An absolute inner value
+        replaces the outer directory. Known outer changes survive an opaque
+        inner layer. Returns ``None`` when no parsed layer changes directory.
     """
     parsed = _parse_env_wrapper(command, args, environ)
     return parsed[1] if parsed is not None else None
 
 
+def env_wrapper_command(
+    command: str, args: list[str], environ: Mapping[str, str] | None = None
+) -> str | None:
+    """Return the executable inside a modeled ``env`` wrapper, or ``None``."""
+    parsed = _parse_env_wrapper(command, args, environ)
+    return parsed[2] if parsed is not None else None
+
+
 def _parse_env_wrapper(
     command: str, args: list[str], environ: Mapping[str, str] | None
-) -> tuple[HarnessEnvironment, str | None] | None:
-    """
-    Parse one ``env`` wrapper layer.
-
-    :param command: Configured harness command, e.g. ``"env"``.
-    :param args: Arguments passed to *command*.
-    :param environ: Environment the wrapper starts from, or ``None``.
-    :returns: The wrapper's environment changes and its last ``-C``
-        directory (or ``None``), or ``None`` when *command* is not a
-        parseable ``env`` wrapper or its command is another ``env``, whose
-        changes are not modeled.
-    """
-    chdirs: list[str] = []
-    try:
-        normalized = _normalize_env_wrapper_args(args, chdirs, environ)
-    except ValueError:
-        return None
-    unwrapped = _unwrap_env(command, normalized, os.defpath)
-    if unwrapped is None or Path(unwrapped[0]).name == "env":
-        return None
-    return unwrapped[3], (chdirs[-1] if chdirs else None)
+) -> tuple[HarnessEnvironment, str | None, str | None] | None:
+    """Parse nested wrappers, preserving known changes if an inner layer is opaque."""
+    environment = HarnessEnvironment(inherit=True, variables={}, unset=[])
+    chdir: str | None = None
+    parsed_any = False
+    while Path(command).name == "env":
+        chdirs: list[str] = []
+        try:
+            normalized = _normalize_env_wrapper_args(args, chdirs, environ)
+        except ValueError:
+            break
+        unwrapped = _unwrap_env(command, normalized, os.defpath)
+        if unwrapped is None:
+            break
+        command, args, _, layer = unwrapped
+        parsed_any = True
+        if not layer.inherit:
+            environment = HarnessEnvironment(inherit=False, variables={}, unset=[])
+        for key in layer.unset:
+            environment.variables.pop(key, None)
+        environment.unset.extend(layer.unset)
+        environment.variables.update(layer.variables)
+        if environ is not None:
+            environ = dict(environ) if layer.inherit else {}
+            for key in layer.unset:
+                environ.pop(key, None)
+            environ.update(layer.variables)
+        if chdirs:
+            chdir = os.path.join(chdir or "", chdirs[-1])
+    else:
+        if parsed_any:
+            return environment, chdir, command
+    return (environment, chdir, None) if parsed_any else None
 
 
 def _normalize_env_wrapper_args(

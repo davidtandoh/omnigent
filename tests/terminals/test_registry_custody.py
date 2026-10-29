@@ -335,7 +335,7 @@ async def test_ordinary_cleanup_refuses_without_claiming_live_terminal(
             returncode=1, communicate=AsyncMock(return_value=(b"", b"permission denied"))
         )
     else:
-        t.spawn.side_effect = asyncio.TimeoutError()
+        t.spawn.side_effect = TimeoutError()
     with pytest.raises(OmnigentError):
         if operation == "close":
             await t.registry.close(*t.args[:3])

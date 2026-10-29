@@ -1,8 +1,8 @@
 """E2E: an early codex-native TUI startup failure must report its real cause.
 
 The native Codex TUI is a separate ``--remote`` process from the app-server.
-If it dies before creating a thread, the first chat turn must report the TUI's
-exit status and, when opted in, parser error instead of a discovery timeout.
+If it dies before creating a thread, the first chat turn must report the
+startup cause instead of a discovery timeout.
 
 The rig forces the failure deterministically by injecting an unsupported
 launch arg via ``harness.codex-native.args`` — the real ``codex`` binary then
@@ -10,8 +10,8 @@ prints ``error: unexpected argument '--omni-telemetry-invalid-flag' found``
 and exits 2 before any thread exists. A mock provider routes the codex harness
 so login is not required (the launch is otherwise healthy).
 
-The test requires a visible error and a canonical transcript error containing
-exit status 2, with parser output included only when diagnostics are enabled.
+The test requires a visible error and a canonical transcript error naming the
+argument failure or exit status 2. Raw parser output requires diagnostic opt-in.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ import os
 import secrets
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import time
@@ -32,6 +31,7 @@ import httpx
 import pytest
 from playwright.sync_api import Page, expect
 
+from tests._helpers.live_server import find_free_port
 from tests.e2e_ui.conftest import _create_native_codex_session
 from tests.e2e_ui.messages.test_message_render_parity import _ensure_chat_view, _send
 
@@ -52,12 +52,6 @@ _NO_THREAD_MARKER = "never started a thread"
 _client = httpx.Client(trust_env=False)
 for _var in ("NO_PROXY", "no_proxy"):
     os.environ[_var] = ",".join(filter(None, [os.environ.get(_var, ""), "127.0.0.1,localhost"]))
-
-
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 def _no_proxy_env() -> dict[str, str]:
@@ -114,7 +108,7 @@ def bad_flag_codex_session(
         f'      - "{_BAD_FLAG}"\n'
     )
 
-    port = _free_port()
+    port = find_free_port()
     base_url = f"http://127.0.0.1:{port}"
     binding_token = secrets.token_urlsafe(32)
 
@@ -223,7 +217,7 @@ def test_codex_early_tui_startup_failure_reports_cause_not_timeout(
     page: Page,
     bad_flag_codex_session: tuple[str, str, bool],
 ) -> None:
-    """The first turn must expose exit 2 and gate the TUI's parser text.
+    """The first turn must identify the launch failure and gate raw parser text.
 
     Journey: open a codex-native session whose TUI exits 2 at startup, send
     the first chat message, and require an error with the actual startup
@@ -259,12 +253,27 @@ def test_codex_early_tui_startup_failure_reports_cause_not_timeout(
             for stage in ("before starting a thread", "before becoming available")
         )
     ]
-    assert startup_errors, f"Expected the TUI exit status in the error: {error_messages!r}"
     if capture_enabled:
-        assert any(
-            "unexpected argument" in message and _BAD_FLAG in message for message in startup_errors
-        ), f"Expected the TUI exit status and parser cause in one error: {error_messages!r}"
+        # Exit-at-launch renders the shared diagnosis instead of raw terminal text.
+        diagnosed_errors = [
+            message
+            for message in error_messages
+            if "Agent CLI rejected its launch arguments:" in message
+        ]
+        assert startup_errors or diagnosed_errors, (
+            f"Expected the argument failure or TUI exit status: {error_messages!r}"
+        )
+        if startup_errors:
+            assert any(
+                "unexpected argument" in message and _BAD_FLAG in message
+                for message in startup_errors
+            ), f"Expected the TUI exit status and parser cause in one error: {error_messages!r}"
+        for message in diagnosed_errors:
+            assert "Check the agent's launcher" in message
+            assert _BAD_FLAG not in message
+            assert "startup terminal output:" not in message
     else:
+        assert startup_errors, f"Expected the TUI exit status in the error: {error_messages!r}"
         assert all(
             "Codex startup terminal output:" not in message
             and "unexpected argument" not in message

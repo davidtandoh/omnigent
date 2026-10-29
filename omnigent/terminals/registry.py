@@ -40,11 +40,13 @@ import logging
 import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from urllib.parse import quote
 
 import psutil
 
+from omnigent.debug_logging import debug_event
 from omnigent.errors import OmnigentError
 from omnigent.inner.datamodel import OSEnvSpec, TerminalEnvSpec
 from omnigent.inner.os_env import OSEnvironment
@@ -122,6 +124,78 @@ class TerminalExitedDuringLaunch(RuntimeError):
         )
 
 
+@dataclass(frozen=True)
+class _UnregisteredCleanup:
+    """How closing a never-registered instance ended."""
+
+    outcome: str
+    error_type: str | None
+    caller_cancelled: bool
+
+
+async def _close_unregistered_instance(instance: TerminalInstance) -> _UnregisteredCleanup:
+    """Close an instance that never reached the registry, within two ``_CLOSE_TIMEOUT_S`` windows.
+
+    Keeps closing while the caller is being cancelled, so the tmux server and
+    private directory are not orphaned; ``caller_cancelled`` reports that cancellation.
+    The first window covers the close itself, the second the grace after cancelling it.
+    """
+    close_task = asyncio.ensure_future(instance.close())
+    current = asyncio.current_task()
+    cancel_requests = current.cancelling() if current is not None else 0
+    caller_cancelled = False
+    timed_out = False
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _CLOSE_TIMEOUT_S
+    while not close_task.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(close_task), timeout=deadline - loop.time())
+        except TimeoutError:
+            if close_task.done() or timed_out:
+                break
+            # Cancel the close as ``asyncio.wait_for`` would, but wait only one more window for it.
+            timed_out = True
+            close_task.cancel()
+            deadline = loop.time() + _CLOSE_TIMEOUT_S
+        except asyncio.CancelledError:
+            if current is not None and current.cancelling() > cancel_requests:
+                cancel_requests = current.cancelling()
+                caller_cancelled = True
+            # Otherwise ``close()`` itself ended cancelled and the loop exits.
+        except Exception:  # noqa: BLE001 — the failure is read back from the task below
+            break
+    if not close_task.done():
+        # A loop that closed with a pending close never runs its done callbacks.
+        _ABANDONED_CLOSES.difference_update(
+            {task for task in _ABANDONED_CLOSES if task.get_loop().is_closed()}
+        )
+        _ABANDONED_CLOSES.add(close_task)
+        close_task.add_done_callback(_ABANDONED_CLOSES.discard)
+        close_task.add_done_callback(partial(_log_abandoned_close, instance.diagnostic_id))
+        return _UnregisteredCleanup("timed_out", "TimeoutError", caller_cancelled)
+    if close_task.cancelled():
+        if timed_out:
+            return _UnregisteredCleanup("timed_out", "TimeoutError", caller_cancelled)
+        return _UnregisteredCleanup("cancelled", "CancelledError", caller_cancelled)
+    cleanup_exc = close_task.exception()
+    if cleanup_exc is not None:
+        return _UnregisteredCleanup("error", type(cleanup_exc).__name__, caller_cancelled)
+    return _UnregisteredCleanup("closed", None, caller_cancelled)
+
+
+# Closes that outlived their grace window; the event loop only holds tasks weakly.
+_ABANDONED_CLOSES: set[asyncio.Future[None]] = set()
+
+
+def _log_abandoned_close(instance_id: str, task: asyncio.Future[None]) -> None:
+    if not task.cancelled() and task.exception() is not None:
+        _logger.warning(
+            "Abandoned terminal close for instance %s finished with %s",
+            instance_id,
+            type(task.exception()).__name__,
+        )
+
+
 class TerminalRegistry:
     """The single registry of per-conversation tmux terminal instances.
 
@@ -192,6 +266,7 @@ class TerminalRegistry:
         parent_os_env: OSEnvSpec | None = None,
         cwd_override: str | None = None,
         sandbox_override: str | None = None,
+        program_status_app: str | None = None,
     ) -> TerminalInstance:
         """Launch a terminal session, or return the existing one.
 
@@ -203,6 +278,7 @@ class TerminalRegistry:
         with the correct status by inspecting whether a new instance
         was created.
 
+        :param program_status_app: Opt-in runtime PTY relay application identity.
         :param conversation_id: The owning conversation id, e.g.
             ``"conv_abc123"``.
         :param terminal_name: The terminal's spec name from
@@ -295,6 +371,7 @@ class TerminalRegistry:
                 conversation_link=self.conversation_link_for_id(conversation_id),
             )
             instance = created.instance
+            instance.program_status_app = program_status_app
             instance.operation_lock = instance_lock
             pending = None
             if custody is not None:
@@ -305,9 +382,11 @@ class TerminalRegistry:
                 except (CustodyError, OSError) as exc:
                     category = str(exc) if isinstance(exc, CustodyError) else "unavailable_probe"
                     raise RuntimeError(f"Session custody refused: {category}") from exc
+            stage = "terminal_spawn"
             try:
                 instance.lifecycle_trace.transfer_session(conversation_id)
                 await instance.launch(cwd=created.cwd)
+                stage = "terminal_liveness"
                 if not await instance.is_alive():
                     instance.lifecycle_trace.note_exit()
                     raise TerminalExitedDuringLaunch(instance)
@@ -331,14 +410,52 @@ class TerminalRegistry:
                         )
 
                     await asyncio.to_thread(_publish_custody)
-            except (
-                RuntimeError,
-                OSError,
-                ValueError,
-                psutil.Error,
-                asyncio.CancelledError,
-            ) as exc:
-                await self._close_instance(instance, conversation_id)
+            except (Exception, asyncio.CancelledError) as exc:
+                if custody is not None:
+                    try:
+                        await self._close_instance(instance, conversation_id)
+                    except TerminalCleanupRefused as refusal:
+                        raise refusal from exc
+                    cleanup = _UnregisteredCleanup("closed", None, False)
+                else:
+                    cleanup = await _close_unregistered_instance(instance)
+                _logger.log(
+                    logging.INFO
+                    if isinstance(exc, asyncio.CancelledError) and cleanup.outcome == "closed"
+                    else logging.WARNING,
+                    "Terminal launch failed during %s; cleanup=%s",
+                    stage,
+                    cleanup.outcome,
+                    extra=debug_event(
+                        "terminal_launch_failed",
+                        session_id=conversation_id,
+                        terminal_name=terminal_name,
+                        terminal_key=session_key,
+                        terminal_instance_id=instance.diagnostic_id,
+                        terminal_launch_id=instance.lifecycle_trace.launch_id,
+                        launch_stage=stage,
+                        launch_outcome="cancelled"
+                        if isinstance(exc, asyncio.CancelledError)
+                        else "error",
+                        exception_type=type(exc).__name__,
+                        native_launch_os_errno=exc.errno if isinstance(exc, OSError) else None,
+                        launch_cleanup_outcome=cleanup.outcome,
+                        cleanup_error_type=cleanup.error_type,
+                        cancelled_during_cleanup=cleanup.caller_cancelled,
+                    ),
+                )
+                if cleanup.outcome != "closed":
+                    refusal = TerminalCleanupRefused(
+                        "process_pending"
+                        if cleanup.outcome in {"timed_out", "cancelled"}
+                        else "unavailable_probe",
+                        session_id=conversation_id,
+                    )
+                    if self.on_cleanup_refused is not None:
+                        self.on_cleanup_refused(instance, refusal)
+                    raise refusal from exc
+                if cleanup.caller_cancelled and not isinstance(exc, asyncio.CancelledError):
+                    raise asyncio.CancelledError() from exc
                 if custody is None or isinstance(exc, asyncio.CancelledError):
                     raise
                 category = str(exc) if isinstance(exc, CustodyError) else "unavailable_probe"
@@ -736,7 +853,7 @@ class TerminalRegistry:
                 await self.cleanup_conversation(conversation_id)
                 if on_conversation_closed is not None:
                     await on_conversation_closed(conversation_id)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — finish independent cleanup before refusing
                 if failure is None:
                     failure = exc
                 if on_conversation_refused is not None:

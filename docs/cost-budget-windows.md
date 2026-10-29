@@ -29,6 +29,11 @@ Alembic revision `mm2a3b4c5d6e` adds the non-day approval table. Existing daily
 approvals remain unchanged and are never interpreted as non-day approvals.
 Account generation checks guard writes. Account deletion removes approvals.
 
+Revision `e020a3b4c5d6` joins this migration with upstream v0.20.0 revision
+`b2e4f6a8c013`. Upgrade to `head` from either history applies the missing branch
+and retains existing daily and period approvals. The merge revision changes
+only Alembic version markers.
+
 The builder seeds costs and approvals at engine construction. An approval
 refreshes the approving engine's snapshot; other sessions see it when rebuilt.
 

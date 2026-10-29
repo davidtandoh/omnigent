@@ -70,19 +70,25 @@ One command installs Omnigent and everything it needs:
 curl -fsSL https://raw.githubusercontent.com/omnigent-ai/omnigent/main/scripts/install_oss.sh | sh
 ```
 
+The installer includes Databricks support and installs the Databricks CLI
+alongside Omnigent, or reuses an existing CLI that supports workspace login.
+Pass `--no-databricks` to omit them.
+
 <details>
 <summary>Optional integrations and extras</summary>
 
 Need an optional integration? Pass one or more extras to the installer:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/omnigent-ai/omnigent/main/scripts/install_oss.sh | sh -s -- --extra databricks
 curl -fsSL https://raw.githubusercontent.com/omnigent-ai/omnigent/main/scripts/install_oss.sh | sh -s -- --extra modal,e2b
 ```
 
+The Antigravity SDK extra conflicts with Databricks dependencies. Install it
+with `--no-databricks --extra antigravity`.
+
 Available user-facing extras include:
 
-- **Model providers:** `databricks`, `bedrock`, `vertex`
+- **Model providers:** `databricks` (included by default), `bedrock`, `vertex`
 - **Sandbox providers:** `modal`, `daytona`, `blaxel`, `boxlite`, `microsandbox`,
   `cwsandbox`, `e2b`, `openshell`, `kubernetes`
 - **SDK harnesses:** `antigravity`, `copilot`, `cursor`, `agents-sdk`
@@ -163,11 +169,12 @@ uv tool install -q --python 3.12 git+https://github.com/omnigent-ai/omnigent.git
   missing `bwrap` binary makes those terminals fail to start
   (`apt install bubblewrap`; the installer offers to install it for you). macOS
   uses the built-in `seatbelt` sandbox and needs nothing extra.
-- **Databricks** (optional). To use a Databricks workspace as your model
-  provider, install Omnigent with the `databricks` extra:
-  `uv tool install "omnigent[databricks]"` — or pass it to the bootstrap
-  installer with `... | sh -s -- --extra databricks`. Signing in to the
-  workspace also uses the [Databricks CLI](https://docs.databricks.com/aws/en/dev-tools/cli/install).
+- **Databricks.** The bootstrap installer includes the `databricks` extra
+  and the Databricks CLI. If installing with uv directly, use
+  `uv tool install "omnigent[databricks]"` and install the
+  [Databricks CLI](https://docs.databricks.com/aws/en/dev-tools/cli/install)
+  separately. Sign in to a workspace-hosted server with
+  `omnigent login <workspace-url>/omnigent`.
 
 </details>
 
@@ -308,6 +315,18 @@ Duplicate or invalid names fail before launch. The option applies only to a
 new runner. Stop an existing session runner before you change its launch
 environment.
 
+For Claude, pass the account's absolute `CLAUDE_CONFIG_DIR` exactly as used
+when signing in. Omnigent preserves the value without expanding `~`, resolving
+symlinks, or removing a trailing slash. The native child inherits `USER` and
+`LOGNAME` from the host. Before creating the terminal, Omnigent runs
+`claude auth status` in the child's launch environment. A signed-out account
+or a launch command that changes the requested directory fails before launch.
+Omnigent checks known assignments in nested `env` wrappers before probing.
+If a wrapper cannot be fully parsed, or the status check is inconclusive,
+Omnigent warns with the account directory and continues without exposing
+status output. The status check waits up to 30 seconds. Launches without an
+explicit `CLAUDE_CONFIG_DIR` keep their existing behavior.
+
 For Codex, Omnigent applies these variables to both the app-server that runs
 tools and the attached terminal UI. The agent's tool shell therefore receives
 the explicit launch environment.
@@ -320,6 +339,28 @@ shell history and process inspection can expose command-line values.
 
 `omnigent agy` requires agy 1.1.13 or newer. When `GEMINI_API_KEY` is set,
 direct Gemini API authentication takes precedence over agy's saved OAuth login.
+
+To configure native agy credentials, run `omni setup` →
+**Antigravity** → **Configure native agy API key / gateway** → **Add a credential**
+and choose the option matching your connection:
+
+- **Gemini — API key** for a Google AI Studio key.
+- **Gemini API gateway — URL + key** for an external gateway implementing native
+  Gemini requests and `x-goog-api-key` authentication. Supply its API root, such
+  as `https://gateway.example/gemini`, without `/v1beta` or a model operation.
+- **Databricks — profile** for a Databricks workspace with native Gemini API
+  access. Omnigent manages profile authentication and model-name mapping; no
+  workspace URL or token needs to be pasted into the gateway form.
+
+OpenAI Responses and Chat Completions endpoints are **not supported by native
+agy**, even when they serve Gemini models. A separate protocol adapter would be
+required. The first Gemini credential becomes the default; select **Make default
+for Gemini** when switching, then start a fresh `omni agy` session.
+
+See the [native agy gateway guide](docs/native-agy-gateways.md) for compatibility
+requirements, model and authentication behavior, troubleshooting, and smoke
+steps. These settings configure native agy; the Antigravity Python SDK retains
+its separate key/Vertex setup.
 
 Using OpenClaw? See the [OpenClaw integration guide](docs/openclaw.md) to import
 its coding agents or drive a live OpenClaw Gateway session over ACP.
@@ -436,6 +477,15 @@ that start the daemon-owned local server;
 `omnigent server --port` remains the explicit foreground-server setting.
 For a managed service, persist the variable in its service environment and
 restart the service so the daemon receives it after every login or restart.
+Integrations can open the new-chat composer with text already filled in using
+`/?prompt=Explain%20this%20code`. Build links with
+`URLSearchParams` to preserve newlines, Unicode, and characters such as `&` and
+`+`. For a deployment under `/tools/omnigent`, use
+`/tools/omnigent/?prompt=Explain%20this%20code`.
+
+The text is an editable draft: the user chooses a host and agent and presses
+Send to start the session. The prompt parameter is removed from the current URL
+after loading, while other query parameters and the fragment are retained.
 
 To suppress the automatic browser tab, use `omni host --no-open` or set
 `OMNIGENT_HOST_NO_OPEN=1` in your shell. Both also apply to `omni host
@@ -480,6 +530,12 @@ session_title_instructions: |
 
 Server operators can set the same key in the YAML passed to
 `omnigent server --config`.
+
+Claude Code sessions generate titles with the `haiku` model alias. If that
+model answers the message instead of returning a title, set
+`OMNIGENT_BACKGROUND_TITLE_CLAUDE_MODEL` to another Claude model alias, such as
+`sonnet`, in the environment of the `omnigent` or `omnigent host` process that
+runs the session.
 
 </details>
 
@@ -653,6 +709,14 @@ See the [policy guide](https://github.com/omnigent-ai/omnigent/blob/main/docs/PO
 
 ## Write your own agent
 
+For centrally managed remote tools, reusable account connections, and a gateway
+with session policies around built-in or external backends, see the
+[MCP registry and gateway prototype](examples/mcp-registry/README.md).
+Direct MCP requests use the caller's connected account. A shared session's runner
+uses its authenticated account (normally the owner), while policies evaluate the
+turn's initiating user. Databricks connections ask for a workspace URL before
+OAuth. KMS limits serialized grants to 4096 bytes; use Vault for larger grants.
+
 An agent is a short YAML file: your prompt, your tools — local Python
 functions, MCP servers, and sub-agents a supervisor can delegate to. You don't
 have to write it by hand: agents can build agents, so describe the agent you
@@ -689,15 +753,16 @@ tools:
 Run it with:
 
 ```bash
-omnigent run path/to/my_agent.yaml
+omnigent run path/to/my_agent.yaml --no-session
 ```
 
-On a shared server, follow the
-[uploaded-agent tool restrictions](docs/AGENT_YAML_SPEC.md#uploaded-agent-compatibility-in-0180)
-before uploading the bundle.
+This example uses trusted startup registration for its Python callable tool.
+Before uploading a bundle to any server, including a local single-user server,
+follow the
+[uploaded-agent tool restrictions](docs/AGENT_YAML_SPEC.md#uploaded-agent-compatibility).
 
-To keep an agent in the new-session picker without starting a session, install
-it on your configured server:
+To keep an upload-compatible agent in the new-session picker without starting
+a session, install it on your configured server:
 
 ```bash
 omnigent agent add path/to/my_agent.yaml

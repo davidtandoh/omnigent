@@ -8,6 +8,9 @@ use anyhow::{Context, Result};
 use crate::ports::Ports;
 use crate::profile::Profile;
 
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub struct Pod {
     pub repo_root: PathBuf,
     pub dir: PathBuf,
@@ -256,23 +259,20 @@ fn seed_config_file(src: &Path, dest: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // `real_config_path` reads process-global env; serialize the tests that
-    // set it so parallel runs don't observe each other's overrides.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn tempdir() -> PathBuf {
+        static NEXT_DIR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let unique = format!(
-            "omnidev-pod-test-{}-{}",
+            "omnidev-pod-test-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
         let dir = std::env::temp_dir().join(unique);
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir(&dir).unwrap();
         dir
     }
 

@@ -14,6 +14,7 @@ recording mock, and reads back what reached it.
 from __future__ import annotations
 
 import importlib
+import runpy
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -21,6 +22,8 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 
+import omnigent.connections.databricks as connections
+import omnigent.stores.credential_store as credential_store
 from omnigent.server.managed_hosts import ManagedSandboxDeployment
 from tests.deploy.test_databricks_app_lakebase_cold_start import (  # noqa: F401 — registers the fixture
     _APP_MODULE,
@@ -102,3 +105,77 @@ def test_invalid_sandbox_section_fails_startup(
 
     assert exit_codes == [1]
     sys.modules.pop(_APP_MODULE, None)
+
+
+def test_databricks_account_connection_reaches_create_app(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With OAuth client env and a cipher, owner-identity sandboxes get a token store."""
+    exit_codes = request.getfixturevalue("boot_exit_codes")
+    monkeypatch.setenv("OMNIGENT_DATABRICKS_CLIENT_ID", "client-id")
+    monkeypatch.setenv("OMNIGENT_DATABRICKS_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("OMNIGENT_DATABRICKS_REDIRECT_URI", "https://app.example.com/cb")
+
+    store = MagicMock()
+    monkeypatch.setattr(credential_store, "build_secret_cipher", lambda: MagicMock())
+    monkeypatch.setattr(connections, "DatabricksConnectionStore", lambda *_: store)
+    create_app = _boot_with_config(monkeypatch, tmp_path, None)
+
+    assert exit_codes == []
+    kwargs = create_app.call_args.kwargs
+    assert kwargs["databricks_config"].client_id == "client-id"
+    assert kwargs["databricks_store"] is store
+
+
+def test_databricks_account_connection_needs_a_cipher(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Without a credential cipher the store stays off rather than holding plaintext."""
+    exit_codes = request.getfixturevalue("boot_exit_codes")
+    monkeypatch.setenv("OMNIGENT_DATABRICKS_CLIENT_ID", "client-id")
+    monkeypatch.setenv("OMNIGENT_DATABRICKS_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("OMNIGENT_DATABRICKS_REDIRECT_URI", "https://app.example.com/cb")
+
+    monkeypatch.setattr(credential_store, "build_secret_cipher", lambda: None)
+    create_app = _boot_with_config(monkeypatch, tmp_path, None)
+
+    assert exit_codes == []
+    assert create_app.call_args.kwargs["databricks_store"] is None
+
+
+def test_databricks_launcher_applies_tunnel_budget_and_graceful_shutdown(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    exit_codes = request.getfixturevalue("boot_exit_codes")
+    import uvicorn.server
+
+    from omnigent.server.graceful_shutdown import (
+        SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_S,
+        ShutdownSignalingServer,
+    )
+    from omnigent.util.tunnel_limits import uvicorn_tunnel_kwargs
+
+    _patch_migrations(monkeypatch, lambda _attempt: None)
+    _stub_downstream_boot(monkeypatch)
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.delenv("OMNIGENT_CONFIG", raising=False)
+    captured = []
+
+    def capture_run(server: uvicorn.server.Server) -> None:
+        captured.append(server)
+        server.started = True
+
+    monkeypatch.setattr(uvicorn.server.Server, "run", capture_run)
+    runpy.run_path(
+        str(Path(__file__).resolve().parents[2] / "deploy/databricks/src/app.py"),
+        run_name="__main__",
+    )
+    assert exit_codes == []
+    assert len(captured) == 1
+    server = captured[0]
+    assert isinstance(server, ShutdownSignalingServer)
+    assert server.config.host == "0.0.0.0"
+    assert server.config.port == 8000
+    assert server.config.timeout_graceful_shutdown == SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_S
+    for key, value in uvicorn_tunnel_kwargs().items():
+        assert getattr(server.config, key) == value

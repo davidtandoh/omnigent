@@ -21,6 +21,11 @@ its attached terminal UI. This explicit map has precedence over an inherited
 value. For terminal processes, existing `env_unset` rules still remove
 protected variables after the merge.
 
+The Claude account check uses the terminal environment builder and shared
+`env` wrapper parser before trust seeding or terminal creation. It does not use
+the ambient readiness cache. See the [native launch usage](../../../README.md#2-start-your-first-agent)
+for the account selection contract and probe failure policy.
+
 The map is not stored in session metadata or the database. A request with
 `--env` fails if the session already has a live runner because changing a
 running process's environment is not possible. A cold resume that launches a

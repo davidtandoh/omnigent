@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import UTC
 from typing import Any
 
 import cachetools
@@ -29,6 +30,7 @@ from omnigent.entities import Policy as StoredPolicy
 from omnigent.errors import ErrorCode, OmnigentError, restart_on_stale_cursor
 from omnigent.llms.context_window import fetch_model_pricing_with_provider
 from omnigent.policies.base import Policy
+from omnigent.policies.builtins.safety import SCHEDULED_TASK_APPROVAL_TOOLS
 from omnigent.policies.function import resolve_function_policy
 from omnigent.policies.schema import (
     SESSION_COST_ASK_APPROVED_STATE_KEY,
@@ -80,6 +82,24 @@ _ASK_ON_ADD_POLICY_SPEC = FunctionPolicySpec(
         path="omnigent.policies.builtins.safety.ask_on_add_policy",
         arguments=None,
     ),
+)
+
+# Same posture for the scheduled-task tools in SCHEDULED_TASK_APPROVAL_TOOLS:
+# an agent cannot create or update unattended work without user approval.
+# Listing and deleting tasks stay ungated.
+_ASK_ON_SCHEDULED_TASK_CHANGE_SPEC = FunctionPolicySpec(
+    name="__ask_on_scheduled_task_change",
+    on=None,
+    function=FunctionRef(
+        path="omnigent.policies.builtins.safety.ask_on_scheduled_task_change",
+        arguments=None,
+    ),
+)
+
+# Appended to every engine after the session, agent, and admin policies.
+_REQUIRED_APPROVAL_SPECS: tuple[FunctionPolicySpec, ...] = (
+    _ASK_ON_ADD_POLICY_SPEC,
+    _ASK_ON_SCHEDULED_TASK_CHANGE_SPEC,
 )
 
 # Bounded cache of ``conversation_id -> session owner``. The owner
@@ -246,9 +266,9 @@ def _utc_day(epoch: int) -> str:
     :param epoch: Unix epoch seconds.
     :returns: UTC day string, e.g. ``"2026-08-21"``.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%d")
+    return datetime.fromtimestamp(epoch, tz=UTC).strftime("%Y-%m-%d")
 
 
 def _utc_week(epoch: int) -> str:
@@ -257,9 +277,9 @@ def _utc_week(epoch: int) -> str:
     :param epoch: Unix epoch seconds.
     :returns: UTC ISO week string, e.g. ``"2026-W34"``.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+    dt = datetime.fromtimestamp(epoch, tz=UTC)
     year, week, _ = dt.isocalendar()
     return f"{year}-W{week:02d}"
 
@@ -270,9 +290,9 @@ def _utc_month(epoch: int) -> str:
     :param epoch: Unix epoch seconds.
     :returns: UTC month string, e.g. ``"2026-08"``.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m")
+    return datetime.fromtimestamp(epoch, tz=UTC).strftime("%Y-%m")
 
 
 def _utc_quarter(epoch: int) -> str:
@@ -281,9 +301,9 @@ def _utc_quarter(epoch: int) -> str:
     :param epoch: Unix epoch seconds.
     :returns: UTC quarter string, e.g. ``"2026-Q3"``.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+    dt = datetime.fromtimestamp(epoch, tz=UTC)
     quarter = (dt.month - 1) // 3 + 1
     return f"{dt.year}-Q{quarter}"
 
@@ -294,9 +314,9 @@ def _utc_year(epoch: int) -> str:
     :param epoch: Unix epoch seconds.
     :returns: UTC year string, e.g. ``"2026"``.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y")
+    return datetime.fromtimestamp(epoch, tz=UTC).strftime("%Y")
 
 
 def _load_user_period_cost(
@@ -369,10 +389,12 @@ def any_policies_apply(
     :returns: ``False`` when the engine would have an empty policy list and
         ``evaluate()`` would unconditionally return ALLOW/UNSPECIFIED.
     """
-    # The engine unconditionally injects _ASK_ON_ADD_POLICY_SPEC so agents
-    # cannot silently install session policies. Never fast-path sys_add_policy
-    # TOOL_CALL events — they must always reach the engine for that gate.
-    if phase == Phase.TOOL_CALL and tool_name == "sys_add_policy":
+    # The engine unconditionally injects _REQUIRED_APPROVAL_SPECS, so their
+    # TOOL_CALL events must always reach it: never fast-path sys_add_policy
+    # or the scheduled-task mutation tools.
+    if phase == Phase.TOOL_CALL and (
+        tool_name == "sys_add_policy" or tool_name in SCHEDULED_TASK_APPROVAL_TOOLS
+    ):
         return True
     if spec.guardrails and spec.guardrails.policies:
         return True
@@ -567,11 +589,10 @@ def build_policy_engine(
     admin_policy_specs: list[PolicySpec] = db_default_policy_specs + list(default_policies or [])
     all_policy_specs = session_policy_specs + agent_policy_specs + admin_policy_specs
 
-    # Always require user approval before sys_add_policy executes.
-    # Appended unconditionally so the guard is present even when
-    # no other guardrails are declared (the noop-engine path below
-    # is no longer reachable since all_policy_specs is never empty).
-    all_policy_specs.append(_ASK_ON_ADD_POLICY_SPEC)
+    # Mandatory approval guards: appended unconditionally so sys_add_policy
+    # and scheduled-task create/update always ask the user, even when no
+    # other guardrails are declared.
+    all_policy_specs.extend(_REQUIRED_APPROVAL_SPECS)
 
     label_defs = dict((guardrails.labels or {}) if guardrails else {})
     # One conversation read (``conv``, resolved above for policy
@@ -666,7 +687,7 @@ def build_policy_engine(
             session_policy_specs
             + agent_policy_specs
             + admin_policy_specs
-            + [_ASK_ON_ADD_POLICY_SPEC]
+            + list(_REQUIRED_APPROVAL_SPECS)
         )
         if child_guardrails.labels:
             # Child label schemas ADD keys; the parent's schema wins on a
@@ -688,7 +709,7 @@ def build_policy_engine(
             session_policy_specs
             + agent_policy_specs
             + admin_policy_specs
-            + [_ASK_ON_ADD_POLICY_SPEC]
+            + list(_REQUIRED_APPROVAL_SPECS)
         )
     root_conv = (
         conv
@@ -833,6 +854,7 @@ def build_policy_engine(
             else (guardrails.ask_timeout if guardrails else DEFAULT_ASK_TIMEOUT)
         ),
         conversation_id=conversation_id,
+        conversation_title=conv.title if conv is not None else None,
         initial_labels=initial_labels,
         initial_session_state=initial_session_state,
         initial_usage=initial_usage,
