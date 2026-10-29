@@ -32,11 +32,7 @@ To provision a fresh sandbox per firing, set `execution_target: "managed_sandbox
 
 **Agent tools.** An agent can manage automations itself with `sys_scheduled_task_create`, `sys_scheduled_task_list`, `sys_scheduled_task_update`, and `sys_scheduled_task_delete` -- so an agent can schedule its own follow-up work. The create and update tools expose the same `permission_mode`, `max_cost_usd`, and `execution_target` controls. Because they persist or change unattended work, every agent call to `sys_scheduled_task_create` or `sys_scheduled_task_update` parks on an approval prompt in the session, even when no other guardrails apply. The prompt lists the requested settings (agent, schedule, timezone, host, execution target, permission mode, cost cap) and the prompt's length, and the card's argument preview shows the request itself, truncated after 1,024 characters; review them before approving. This also holds inside an automation's own run: if its agent creates or updates another automation, that call waits for approval too and is denied when nobody answers before the approval timeout. `sys_scheduled_task_list` and `sys_scheduled_task_delete` are not gated this way, and changes you make directly in the UI or REST API keep their existing authorization rules.
 
-Agent calls to `sys_scheduled_task_create` and `sys_scheduled_task_update`
-require interactive approval before persisting future work. Review the agent,
-prompt, host and permission settings in that request. This also applies when
-the call inherits defaults. Direct changes you make in the UI or REST API keep
-their existing authorization rules.
+Create and update calls also require approval when they inherit defaults.
 
 ## Schedules are RRULEs, not cron
 
