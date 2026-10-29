@@ -5384,6 +5384,7 @@ async def test_auto_create_codex_terminal_accepts_gateway_spelled_override(
     [
         (False, "none", "ended"),
         (True, "none", "ended"),
+        (False, "none", "exited"),
         (False, "published", "refused"),
         (False, "lost_response", "refused"),
         (False, "published", "live"),
@@ -5482,6 +5483,13 @@ async def test_codex_tui_recovery_preserves_live_control_plane(
 
     client = httpx.AsyncClient(base_url="http://server", transport=httpx.MockTransport(response))
     refusal = None
+    close_terminal = AsyncMock()
+    if terminal_state == "exited":
+        terminal = make_test_terminal_instance("codex", "main", tmp_path)
+        terminal.args = ["--remote", server_url]
+        monkeypatch.setattr(terminal, "is_alive", AsyncMock(return_value=False))
+        monkeypatch.setattr(terminal, "close", close_terminal)
+        registry._by_conversation[session_id] = {("codex", "main"): terminal}
     if rotation != "none":
         terminal = make_test_terminal_instance("codex", "main", tmp_path)
         terminal.args = ["--remote", server_url]
@@ -5534,7 +5542,7 @@ async def test_codex_tui_recovery_preserves_live_control_plane(
     )
     monkeypatch.setattr(native, "_launch_codex_native_tui", launch)
     try:
-        if terminal_state != "ended":
+        if terminal_state not in {"ended", "exited"}:
             with pytest.raises(OmnigentError) as refused:
                 await native._auto_create_codex_terminal(
                     session_id,
@@ -5576,7 +5584,10 @@ async def test_codex_tui_recovery_preserves_live_control_plane(
         ensure_relay.assert_not_awaited()
         relay.close.assert_not_called()
         assert relay_file.read_bytes() == advertisement
-        if terminal_state == "ended":
+        if terminal_state == "exited":
+            close_terminal.assert_awaited_once()
+            assert registry.get(session_id, "codex", "main") is None
+        if terminal_state in {"ended", "exited"}:
             assert launch.await_count == 1
             assert launch.await_args is not None
             assert launch.await_args.kwargs["app_server"] is fake_server

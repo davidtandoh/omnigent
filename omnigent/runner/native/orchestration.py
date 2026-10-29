@@ -5246,6 +5246,12 @@ async def _auto_create_codex_terminal(
     from omnigent.inner.codex_executor import codex_extended_catalog_env
 
     if _AUTO_CODEX_APP_SERVERS:
+        terminal_registry = resource_registry.terminal_registry
+        if terminal_registry is not None:
+            existing = terminal_registry.get(session_id, "codex", "main")
+            if existing is not None and not await existing.is_alive():
+                # Retire an exited TUI before checking whether its backend can be reused.
+                await terminal_registry.close(session_id, "codex", "main", expected=existing)
         await guard_codex_native_cleanup(
             session_id,
             terminal_registry=resource_registry.terminal_registry,

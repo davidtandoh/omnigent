@@ -1578,22 +1578,34 @@ describe("Databricks auth mode wiring", () => {
     assert.equal(params.get("url"), workspace);
   });
 
-  it("offers Server → Sign Out of Server whatever web app the server runs", async (t) => {
-    const h = loadNavigationHarness({ serverUrl: workspace, databricksMode: "browser" });
-    t.after(h.cleanup);
-    h.electron.BrowserWindow.getFocusedWindow = () => h.win;
-    h.api.buildMenu();
-    const item = h.calls.appMenu.getMenuItemById("sign_out_server");
-    assert.equal(item.label, "Sign Out of Server");
-    await h.api.loadServerUrl(h.win, workspace, undefined, { interactive: true });
-    assert.equal(item.enabled, true);
-    item.click();
-    await tick();
-    assert.deepEqual(h.calls.forgottenTokens, [new URL(workspace).origin]);
-    assert.equal(new URLSearchParams(h.calls.loadFile.at(-1)[1].search).get("error"), null);
-    // Back on the setup page, there's nothing to sign out of.
-    assert.equal(item.enabled, false);
-  });
+  it(
+    "offers Server → Sign Out of Server whatever web app the server runs",
+    { timeout: 5000 },
+    async (t) => {
+      const h = loadNavigationHarness({ serverUrl: workspace, databricksMode: "browser" });
+      t.after(h.cleanup);
+      h.electron.BrowserWindow.getFocusedWindow = () => h.win;
+      h.api.buildMenu();
+      const item = h.calls.appMenu.getMenuItemById("sign_out_server");
+      assert.equal(item.label, "Sign Out of Server");
+      await h.api.loadServerUrl(h.win, workspace, undefined, { interactive: true });
+      assert.equal(item.enabled, true);
+      const setupLoaded = new Promise((resolve) => {
+        const loadFile = h.win.loadFile;
+        t.mock.method(h.win, "loadFile", (...args) => {
+          const result = loadFile(...args);
+          resolve();
+          return result;
+        });
+      });
+      item.click();
+      await setupLoaded;
+      assert.deepEqual(h.calls.forgottenTokens, [new URL(workspace).origin]);
+      assert.equal(new URLSearchParams(h.calls.loadFile.at(-1)[1].search).get("error"), null);
+      // Back on the setup page, there's nothing to sign out of.
+      assert.equal(item.enabled, false);
+    },
+  );
 
   it("keeps the menu item disabled for a server whose sign-in isn't the shell's", async (t) => {
     const h = loadNavigationHarness({ serverUrl: "https://plain.example" });
