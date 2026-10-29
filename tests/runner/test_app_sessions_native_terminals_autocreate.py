@@ -1894,10 +1894,22 @@ async def test_native_launch_arms_resolve_agent_spec_for_terminal(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "account", [None, "signed-in", "signed-out", "mismatch", "wrapped-signed-in"]
+    "account",
+    [
+        None,
+        "signed-in",
+        "signed-out",
+        "mismatch",
+        "wrapped-signed-in",
+        "inconclusive",
+        "unknown-wrapper",
+    ],
 )
 async def test_auto_create_claude_terminal_enforces_requested_account(
-    account: str | None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    account: str | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Probe the selected account before creating a terminal or seeding its config."""
     import sys
@@ -1919,6 +1931,7 @@ async def test_auto_create_claude_terminal_enforces_requested_account(
     )
     observation = tmp_path / "probe.json"
     command = tmp_path / "claude"
+    logged_in = None if account == "inconclusive" else account != "signed-out"
     command.write_text(
         f"#!{sys.executable}\n"
         "import json, os, sys\n"
@@ -1926,7 +1939,7 @@ async def test_auto_create_claude_terminal_enforces_requested_account(
         f"Path({str(observation)!r}).write_text(json.dumps({{"
         "'argv': sys.argv[1:], "
         "'env': {k: os.environ.get(k) for k in ('CLAUDE_CONFIG_DIR', 'USER', 'LOGNAME')}}))\n"
-        f"print(json.dumps({{'loggedIn': {account != 'signed-out'!r}}}))\n"
+        f"print(json.dumps({{'loggedIn': {logged_in!r}}}))\n"
         f"sys.exit({1 if account == 'signed-out' else 0})\n"
     )
     command.chmod(0o755)
@@ -1938,6 +1951,8 @@ async def test_auto_create_claude_terminal_enforces_requested_account(
             f"    command: /usr/bin/env\n"
             f"    args: ['CLAUDE_CONFIG_DIR={wrapper_account}', '{command}']\n"
         )
+    elif account == "unknown-wrapper":
+        launch_config = f"    command: /usr/bin/env\n    args: ['-v', '{command}']\n"
     else:
         launch_config = f"    command: '{command}'\n"
     (config_home / "config.yaml").write_text("harness:\n  claude-native:\n" + launch_config)
@@ -1964,13 +1979,17 @@ async def test_auto_create_claude_terminal_enforces_requested_account(
             expected_account = selected if account else str(tmp_path / "daemon-account")
             assert env["CLAUDE_CONFIG_DIR"] == expected_account
             assert env["USER"] == env["LOGNAME"] == "alice"
-    if account in {"signed-in", "signed-out", "wrapped-signed-in"}:
+    if account in {"signed-in", "signed-out", "wrapped-signed-in", "inconclusive"}:
         assert json.loads(observation.read_text()) == {
             "argv": ["auth", "status"],
             "env": {"CLAUDE_CONFIG_DIR": selected, "USER": "alice", "LOGNAME": "alice"},
         }
     else:
         assert not observation.exists()
+    if account in {"inconclusive", "unknown-wrapper"}:
+        assert "could not verify" in caplog.text
+        assert selected in caplog.text
+        assert "continuing" in caplog.text
 
 
 @pytest.mark.asyncio

@@ -27,7 +27,7 @@ def test_selected_account_probe_preserves_child_environment(
     assert probe.call_args.kwargs["cwd"] == tmp_path
     assert probe.call_args.kwargs["stdin"] == subprocess.DEVNULL
     assert probe.call_args.kwargs["capture_output"] is True
-    assert probe.call_args.kwargs["timeout"] > 0
+    assert probe.call_args.kwargs["timeout"] == 30
 
 
 @pytest.mark.parametrize("actual", ["/accounts/personal", None])
@@ -43,28 +43,46 @@ def test_account_mismatch_refused_before_probe(
 
 
 @pytest.mark.parametrize(
-    ("status", "returncode", "error"),
+    ("status", "returncode", "signed_out"),
     [
-        ({"loggedIn": False}, 1, "not signed in"),
-        ({"loggedIn": False}, 0, "not signed in"),
-        ({}, 0, "could not verify"),
-        ({"loggedIn": "false"}, 0, "could not verify"),
-        ([], 0, "could not verify"),
-        ({"loggedIn": True}, 2, "could not verify"),
+        ({"loggedIn": False}, 1, True),
+        ({"loggedIn": False}, 0, True),
+        ({}, 0, False),
+        ({"loggedIn": "false"}, 0, False),
+        ([], 0, False),
+        ({"loggedIn": True}, 2, False),
+        ({}, 2, False),
     ],
 )
 def test_status_verdict_is_structural_and_output_is_private(
-    status: object, returncode: int, error: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    status: object,
+    returncode: int,
+    signed_out: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     probe = Mock(
         return_value=subprocess.CompletedProcess([], returncode, json.dumps(status), "private")
     )
     monkeypatch.setattr("omnigent.harnesses.claude_native.account.subprocess.run", probe)
-    with pytest.raises(RuntimeError, match=error) as caught:
+    if signed_out:
+        with pytest.raises(RuntimeError, match="not signed in") as caught:
+            ensure_claude_account_signed_in(
+                "claude",
+                "/accounts/work",
+                env={"CLAUDE_CONFIG_DIR": "/accounts/work"},
+                cwd=tmp_path,
+            )
+        assert "private" not in str(caught.value)
+    else:
         ensure_claude_account_signed_in(
             "claude", "/accounts/work", env={"CLAUDE_CONFIG_DIR": "/accounts/work"}, cwd=tmp_path
         )
-    assert "private" not in str(caught.value)
+        assert "could not verify" in caplog.text
+        assert "/accounts/work" in caplog.text
+        assert "continuing" in caplog.text
+    assert "private" not in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -77,14 +95,19 @@ def test_status_verdict_is_structural_and_output_is_private(
     ],
 )
 def test_failed_probe_does_not_claim_signed_out_or_expose_output(
-    result: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    result: object,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     probe = (
         Mock(side_effect=result) if isinstance(result, Exception) else Mock(return_value=result)
     )
     monkeypatch.setattr("omnigent.harnesses.claude_native.account.subprocess.run", probe)
-    with pytest.raises(RuntimeError, match="could not verify") as caught:
-        ensure_claude_account_signed_in(
-            "claude", "/accounts/work", env={"CLAUDE_CONFIG_DIR": "/accounts/work"}, cwd=tmp_path
-        )
-    assert "private" not in str(caught.value)
+    ensure_claude_account_signed_in(
+        "claude", "/accounts/work", env={"CLAUDE_CONFIG_DIR": "/accounts/work"}, cwd=tmp_path
+    )
+    assert "could not verify" in caplog.text
+    assert "/accounts/work" in caplog.text
+    assert "continuing" in caplog.text
+    assert "private" not in caplog.text

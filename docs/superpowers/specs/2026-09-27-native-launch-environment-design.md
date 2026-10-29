@@ -28,8 +28,9 @@ creation. The account check runs the configured Claude executable's
 uses the existing terminal environment builder and `env` wrapper parser, so
 the account selector and host `USER`/`LOGNAME` reach both processes unchanged.
 It does not use the ambient readiness cache. A changed account selector or
-`loggedIn: false` refuses the launch. A failed or malformed probe reports a
-verification error without exposing its output. No explicit account means
+`loggedIn: false` refuses the launch. An inconclusive probe warns with the
+account directory and continues without exposing its output. The probe uses
+the existing launch-check bound of 30 seconds. No explicit account means
 no additional probe.
 
 The map is not stored in session metadata or the database. A request with
