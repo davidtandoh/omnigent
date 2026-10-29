@@ -77,9 +77,16 @@ overrides:
   katex: "catalog:"
   mermaid: 11.16.1
   tar: 7.5.21
-  'undici@>=6.0.0 <7.0.0': 6.29.1
-  'undici@>=7.0.0 <8.0.0': 7.30.1
-  'undici@>=8.0.0 <9.0.0': 8.12.2
+  '@ai-sdk/provider-utils>undici': 6.29.1
+  'node-gyp>undici': 6.29.1
+  '@dotenvx/dotenvx>undici': 7.30.1
+  '@electron/get>undici': 7.30.1
+  '@shadcn/registry>undici': 7.30.1
+  'cheerio>undici': 7.30.1
+  'jsdom>undici': 7.30.1
+  'miniflare>undici': 7.30.1
+  'shadcn>undici': 7.30.1
+  '@earendil-works/pi-coding-agent>undici': 8.12.2
   body-parser: 2.4.0
   systeminformation: 5.33.16
   'postcss-selector-parser@>=6.0.0 <7.0.0': 6.1.5
