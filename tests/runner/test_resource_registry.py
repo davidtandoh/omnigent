@@ -200,8 +200,8 @@ async def test_claude_program_status_real_launch_and_fallback(
         reader.path.rmdir()
         await instance.send(keys="q")
         async with asyncio.timeout(5):
-            while await instance.is_alive():
-                await asyncio.sleep(0.05)
+            await registry.wait_for_terminal_exit_cleanup()
+        assert terminals.get("osc-test", "claude", "main") is None
     finally:
         await terminals.shutdown()
     assert reader.status is None
