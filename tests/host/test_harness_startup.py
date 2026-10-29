@@ -155,6 +155,7 @@ def test_env_wrapper_environment_matches_real_env(args):
     base = {"PATH": "/usr/bin:/bin", "KEEP": "kept", "A": "old"}
     wrapper = startup.env_wrapper_environment("/usr/bin/env", args, base)
     assert wrapper is not None
+    assert startup.env_wrapper_command("/usr/bin/env", args, base) == "/usr/bin/printenv"
     expected = dict(base) if wrapper.inherit else {}
     for name in wrapper.unset:
         expected.pop(name, None)
@@ -185,6 +186,7 @@ def test_nested_env_wrapper_is_not_modeled():
     args = ["-C", "/", "A=1", "env", "CLAUDE_CONFIG_DIR=/srv/claude", "claude"]
     assert startup.env_wrapper_environment("/usr/bin/env", args) is None
     assert startup.env_wrapper_chdir("/usr/bin/env", args) is None
+    assert startup.env_wrapper_command("/usr/bin/env", args) is None
 
 
 def test_env_split_string_keeps_a_word_only_for_set_variables():

@@ -9749,9 +9749,33 @@ async def _auto_create_claude_terminal(
     )
     # Seed trust and onboarding in the config selected by the terminal's launch environment.
     try:
+        requested_account = native_launch_environment().get("CLAUDE_CONFIG_DIR")
+        launch_env = _claude_terminal_launch_env(env_spec)
+        launch_cwd = _claude_terminal_launch_cwd(env_spec, agent_os_env)
+        if requested_account is not None:
+            from omnigent.harnesses.claude_native.account import ensure_claude_account_signed_in
+            from omnigent.host.harness_startup import env_wrapper_command
+
+            probe_command = launch_command
+            if Path(launch_command).name == "env":
+                probe_command = env_wrapper_command(
+                    launch_command, list(launch_args), _claude_terminal_pre_wrapper_env(env_spec)
+                )
+                if probe_command is None:
+                    raise RuntimeError(
+                        "native-claude: could not verify the selected account because "
+                        "the harness env wrapper could not be resolved."
+                    )
+            await asyncio.to_thread(
+                ensure_claude_account_signed_in,
+                probe_command,
+                requested_account,
+                env=launch_env,
+                cwd=launch_cwd,
+            )
         ensure_claude_workspace_trusted(
-            _claude_terminal_launch_cwd(env_spec, agent_os_env),
-            env=_claude_terminal_launch_env(env_spec),
+            launch_cwd,
+            env=launch_env,
         )
     except BaseException as seed_error:
         # No forwarder owns the routers yet, so release the ones this launch started.

@@ -21,6 +21,17 @@ its attached terminal UI. This explicit map has precedence over an inherited
 value. For terminal processes, existing `env_unset` rules still remove
 protected variables after the merge.
 
+For Claude launches that explicitly request `CLAUDE_CONFIG_DIR`, the runner
+checks the effective child environment before trust seeding or terminal
+creation. The account check runs the configured Claude executable's
+`auth status` command with that environment and working directory. The check
+uses the existing terminal environment builder and `env` wrapper parser, so
+the account selector and host `USER`/`LOGNAME` reach both processes unchanged.
+It does not use the ambient readiness cache. A changed account selector or
+`loggedIn: false` refuses the launch. A failed or malformed probe reports a
+verification error without exposing its output. No explicit account means
+no additional probe.
+
 The map is not stored in session metadata or the database. A request with
 `--env` fails if the session already has a live runner because changing a
 running process's environment is not possible. A cold resume that launches a

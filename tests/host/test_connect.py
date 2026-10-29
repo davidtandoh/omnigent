@@ -4059,19 +4059,32 @@ def test_build_runner_env_encodes_only_explicit_native_environment(
         dict,
     )
     env = _build_runner_env(
-        {"PATH": "/usr/bin", "UNAPPROVED_SECRET": "must-not-cross-boundary"},
+        {
+            "PATH": "/usr/bin",
+            "UNAPPROVED_SECRET": "must-not-cross-boundary",
+            "CLAUDE_CONFIG_DIR": "/accounts/daemon",
+            "USER": "alice",
+            "LOGNAME": "alice",
+        },
         server_url="http://server",
         runner_id="runner_abc",
         binding_token="tok",
         workspace="/ws",
         parent_pid=42,
-        native_env={"FM_TASK_ID": "task-123", "CLEAR_OVERRIDE": ""},
+        native_env={
+            "FM_TASK_ID": "task-123",
+            "CLEAR_OVERRIDE": "",
+            "CLAUDE_CONFIG_DIR": "/accounts/selected",
+        },
     )
 
     assert json.loads(env[NATIVE_LAUNCH_ENV_VAR]) == {
         "FM_TASK_ID": "task-123",
         "CLEAR_OVERRIDE": "",
+        "CLAUDE_CONFIG_DIR": "/accounts/selected",
     }
+    assert env["USER"] == env["LOGNAME"] == "alice"
+    assert env["CLAUDE_CONFIG_DIR"] == "/accounts/daemon"
     assert "UNAPPROVED_SECRET" not in env
 
 

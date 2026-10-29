@@ -142,17 +142,25 @@ def env_wrapper_chdir(
     return parsed[1] if parsed is not None else None
 
 
+def env_wrapper_command(
+    command: str, args: list[str], environ: Mapping[str, str] | None = None
+) -> str | None:
+    """Return the executable inside a modeled ``env`` wrapper, or ``None``."""
+    parsed = _parse_env_wrapper(command, args, environ)
+    return parsed[2] if parsed is not None else None
+
+
 def _parse_env_wrapper(
     command: str, args: list[str], environ: Mapping[str, str] | None
-) -> tuple[HarnessEnvironment, str | None] | None:
+) -> tuple[HarnessEnvironment, str | None, str] | None:
     """
     Parse one ``env`` wrapper layer.
 
     :param command: Configured harness command, e.g. ``"env"``.
     :param args: Arguments passed to *command*.
     :param environ: Environment the wrapper starts from, or ``None``.
-    :returns: The wrapper's environment changes and its last ``-C``
-        directory (or ``None``), or ``None`` when *command* is not a
+    :returns: The wrapper's environment changes, its last ``-C`` directory
+        (or ``None``), and its executable, or ``None`` when *command* is not a
         parseable ``env`` wrapper or its command is another ``env``, whose
         changes are not modeled.
     """
@@ -164,7 +172,7 @@ def _parse_env_wrapper(
     unwrapped = _unwrap_env(command, normalized, os.defpath)
     if unwrapped is None or Path(unwrapped[0]).name == "env":
         return None
-    return unwrapped[3], (chdirs[-1] if chdirs else None)
+    return unwrapped[3], (chdirs[-1] if chdirs else None), unwrapped[0]
 
 
 def _normalize_env_wrapper_args(
