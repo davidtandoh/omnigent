@@ -202,6 +202,30 @@ def test_env_split_string_keeps_a_word_only_for_set_variables():
 
 
 @pytest.mark.parametrize(
+    "args,expected",
+    [
+        pytest.param(
+            ["-C", "link", "-C", "sub", "claude"],
+            "sub",
+            id="final-chdir-in-one-layer",
+        ),
+        pytest.param(
+            ["-C", "sub", "/usr/bin/env", "-C", "nested", "claude"],
+            "sub/nested",
+            id="compose-nested-layers",
+        ),
+        pytest.param(
+            ["-C", "sub", "/usr/bin/env", "-C", "link", "-C", "nested", "claude"],
+            "sub/nested",
+            id="final-inner-chdir-composes-with-outer",
+        ),
+    ],
+)
+def test_env_wrapper_chdir_composes_layers(args, expected):
+    assert startup.env_wrapper_chdir("/usr/bin/env", args) == expected
+
+
+@pytest.mark.parametrize(
     "args",
     [
         ["-C", "sub", "/bin/pwd"],
