@@ -1893,6 +1893,133 @@ async def test_native_launch_arms_resolve_agent_spec_for_terminal(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "account",
+    [
+        None,
+        "signed-in",
+        "signed-out",
+        "mismatch",
+        "wrapped-signed-in",
+        "inconclusive",
+        "unknown-wrapper",
+        "nested-matching",
+        "nested-conflicting",
+        "nested-inner-conflicting",
+        "nested-unknown-conflicting",
+        "nested-unknown-matching",
+    ],
+)
+async def test_auto_create_claude_terminal_enforces_requested_account(
+    account: str | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Probe the selected account before creating a terminal or seeding its config."""
+    import sys
+
+    monkeypatch.setattr(claude_native_bridge, "_TRUSTED_PARENT", tmp_path)
+    monkeypatch.setattr(claude_native_bridge, "_BRIDGE_ROOT", tmp_path / "root")
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.forwarder.supervise_forwarder", _no_op_forwarder
+    )
+    monkeypatch.setenv("RUNNER_SERVER_URL", "http://ap.example")
+    monkeypatch.setenv("OMNIGENT_RUNNER_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "daemon-account"))
+    monkeypatch.setenv("USER", "alice")
+    monkeypatch.setenv("LOGNAME", "alice")
+    selected = str(tmp_path / "selected-account")
+    monkeypatch.setattr(
+        "omnigent.runner.native.orchestration.native_launch_environment",
+        lambda: {"CLAUDE_CONFIG_DIR": selected} if account else {},
+    )
+    observation = tmp_path / "probe.json"
+    command = tmp_path / "claude"
+    logged_in = None if account == "inconclusive" else account != "signed-out"
+    command.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        f"Path({str(observation)!r}).write_text(json.dumps({{"
+        "'argv': sys.argv[1:], "
+        "'env': {k: os.environ.get(k) for k in ('CLAUDE_CONFIG_DIR', 'USER', 'LOGNAME')}}))\n"
+        f"print(json.dumps({{'loggedIn': {logged_in!r}}}))\n"
+        f"sys.exit({1 if account == 'signed-out' else 0})\n"
+    )
+    command.chmod(0o755)
+    config_home = tmp_path / "config"
+    config_home.mkdir()
+    if account in {"mismatch", "wrapped-signed-in"}:
+        wrapper_account = str(tmp_path / "different") if account == "mismatch" else selected
+        launch_config = (
+            f"    command: /usr/bin/env\n"
+            f"    args: ['CLAUDE_CONFIG_DIR={wrapper_account}', '{command}']\n"
+        )
+    elif account and account.startswith("nested-"):
+        conflicting = "conflicting" in account
+        wrapper_account = str(tmp_path / "different") if conflicting else selected
+        if account == "nested-inner-conflicting":
+            args = [
+                f"CLAUDE_CONFIG_DIR={selected}",
+                "/usr/bin/env",
+                f"CLAUDE_CONFIG_DIR={wrapper_account}",
+                str(command),
+            ]
+        else:
+            args = [f"CLAUDE_CONFIG_DIR={wrapper_account}", "/usr/bin/env"]
+            if "unknown" in account:
+                args.append("-v")
+            args.append(str(command))
+        launch_config = f"    command: /usr/bin/env\n    args: {json.dumps(args)}\n"
+    elif account == "unknown-wrapper":
+        launch_config = f"    command: /usr/bin/env\n    args: ['-v', '{command}']\n"
+    else:
+        launch_config = f"    command: '{command}'\n"
+    (config_home / "config.yaml").write_text("harness:\n  claude-native:\n" + launch_config)
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(config_home))
+    monkeypatch.delenv("OMNIGENT_CLAUDE_PATH", raising=False)
+    captured: dict[str, Any] = {}
+    async with httpx.AsyncClient(
+        base_url="http://test-server",
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, json={"labels": {}})),
+    ) as client:
+        launch = _auto_create_claude_terminal(
+            "a" * 32, _RecordingClaudeRegistry(captured), lambda *_: None, server_client=client
+        )
+        if account in {"signed-out", "mismatch"} or (account and "conflicting" in account):
+            with pytest.raises(RuntimeError, match=r"not signed in|different CLAUDE_CONFIG_DIR"):
+                await launch
+            assert captured == {}
+            assert not (tmp_path / "selected-account").exists()
+        else:
+            await launch
+            from omnigent.runner.native.orchestration import _claude_terminal_launch_env
+
+            env = _claude_terminal_launch_env(captured["spec"])
+            expected_account = selected if account else str(tmp_path / "daemon-account")
+            assert env["CLAUDE_CONFIG_DIR"] == expected_account
+            assert env["USER"] == env["LOGNAME"] == "alice"
+    if account in {
+        "signed-in",
+        "signed-out",
+        "wrapped-signed-in",
+        "inconclusive",
+        "nested-matching",
+    }:
+        assert json.loads(observation.read_text()) == {
+            "argv": ["auth", "status"],
+            "env": {"CLAUDE_CONFIG_DIR": selected, "USER": "alice", "LOGNAME": "alice"},
+        }
+    else:
+        assert not observation.exists()
+    if account in {"inconclusive", "unknown-wrapper", "nested-unknown-matching"}:
+        assert "could not verify" in caplog.text
+        assert selected in caplog.text
+        assert "continuing" in caplog.text
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("use_envelope", [False, True], ids=["legacy", "envelope"])
 async def test_auto_create_claude_terminal_passes_session_effort(
     use_envelope: bool,
