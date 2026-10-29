@@ -12,7 +12,7 @@ _logger = logging.getLogger(__name__)
 
 
 def ensure_claude_account_signed_in(
-    command: str,
+    command: str | None,
     requested_config_dir: str,
     *,
     env: Mapping[str, str],
@@ -28,6 +28,13 @@ def ensure_claude_account_signed_in(
             "native-claude: the child would receive a different CLAUDE_CONFIG_DIR "
             "than the requested account. Check the harness launch command."
         )
+    if command is None:
+        _logger.warning(
+            "native-claude: could not verify account %r because the harness "
+            "env wrapper could not be resolved; continuing launch.",
+            requested_config_dir,
+        )
+        return
     logged_in: bool | None = None
     try:
         result = subprocess.run(

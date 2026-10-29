@@ -9761,20 +9761,13 @@ async def _auto_create_claude_terminal(
                 probe_command = env_wrapper_command(
                     launch_command, list(launch_args), _claude_terminal_pre_wrapper_env(env_spec)
                 )
-                if probe_command is None:
-                    _logger.warning(
-                        "native-claude: could not verify account %r because the harness "
-                        "env wrapper could not be resolved; continuing launch.",
-                        requested_account,
-                    )
-            if probe_command is not None:
-                await asyncio.to_thread(
-                    ensure_claude_account_signed_in,
-                    probe_command,
-                    requested_account,
-                    env=launch_env,
-                    cwd=launch_cwd,
-                )
+            await asyncio.to_thread(
+                ensure_claude_account_signed_in,
+                probe_command,
+                requested_account,
+                env=launch_env,
+                cwd=launch_cwd,
+            )
         ensure_claude_workspace_trusted(
             launch_cwd,
             env=launch_env,

@@ -1903,6 +1903,11 @@ async def test_native_launch_arms_resolve_agent_spec_for_terminal(
         "wrapped-signed-in",
         "inconclusive",
         "unknown-wrapper",
+        "nested-matching",
+        "nested-conflicting",
+        "nested-inner-conflicting",
+        "nested-unknown-conflicting",
+        "nested-unknown-matching",
     ],
 )
 async def test_auto_create_claude_terminal_enforces_requested_account(
@@ -1951,6 +1956,22 @@ async def test_auto_create_claude_terminal_enforces_requested_account(
             f"    command: /usr/bin/env\n"
             f"    args: ['CLAUDE_CONFIG_DIR={wrapper_account}', '{command}']\n"
         )
+    elif account and account.startswith("nested-"):
+        conflicting = "conflicting" in account
+        wrapper_account = str(tmp_path / "different") if conflicting else selected
+        if account == "nested-inner-conflicting":
+            args = [
+                f"CLAUDE_CONFIG_DIR={selected}",
+                "/usr/bin/env",
+                f"CLAUDE_CONFIG_DIR={wrapper_account}",
+                str(command),
+            ]
+        else:
+            args = [f"CLAUDE_CONFIG_DIR={wrapper_account}", "/usr/bin/env"]
+            if "unknown" in account:
+                args.append("-v")
+            args.append(str(command))
+        launch_config = f"    command: /usr/bin/env\n    args: {json.dumps(args)}\n"
     elif account == "unknown-wrapper":
         launch_config = f"    command: /usr/bin/env\n    args: ['-v', '{command}']\n"
     else:
@@ -1966,7 +1987,7 @@ async def test_auto_create_claude_terminal_enforces_requested_account(
         launch = _auto_create_claude_terminal(
             "a" * 32, _RecordingClaudeRegistry(captured), lambda *_: None, server_client=client
         )
-        if account in {"signed-out", "mismatch"}:
+        if account in {"signed-out", "mismatch"} or (account and "conflicting" in account):
             with pytest.raises(RuntimeError, match=r"not signed in|different CLAUDE_CONFIG_DIR"):
                 await launch
             assert captured == {}
@@ -1979,14 +2000,20 @@ async def test_auto_create_claude_terminal_enforces_requested_account(
             expected_account = selected if account else str(tmp_path / "daemon-account")
             assert env["CLAUDE_CONFIG_DIR"] == expected_account
             assert env["USER"] == env["LOGNAME"] == "alice"
-    if account in {"signed-in", "signed-out", "wrapped-signed-in", "inconclusive"}:
+    if account in {
+        "signed-in",
+        "signed-out",
+        "wrapped-signed-in",
+        "inconclusive",
+        "nested-matching",
+    }:
         assert json.loads(observation.read_text()) == {
             "argv": ["auth", "status"],
             "env": {"CLAUDE_CONFIG_DIR": selected, "USER": "alice", "LOGNAME": "alice"},
         }
     else:
         assert not observation.exists()
-    if account in {"inconclusive", "unknown-wrapper"}:
+    if account in {"inconclusive", "unknown-wrapper", "nested-unknown-matching"}:
         assert "could not verify" in caplog.text
         assert selected in caplog.text
         assert "continuing" in caplog.text

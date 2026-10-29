@@ -1143,7 +1143,6 @@ def test_claude_terminal_launch_cwd_rejects_an_unsearchable_env_chdir_target(
         ["-S", "CLAUDE_CONFIG_DIR=wrap\\_claude claude"],
         ["-S", "CLAUDE_CONFIG_DIR=wrap/claude claude #comment"],
         ["-S", "CLAUDE_CONFIG_DIR=wrap/claude\vclaude"],
-        ["A=1", "env", "CLAUDE_CONFIG_DIR=wrap/claude", "claude"],
     ],
     ids=[
         "unmodeled-option",
@@ -1152,7 +1151,6 @@ def test_claude_terminal_launch_cwd_rejects_an_unsearchable_env_chdir_target(
         "escape",
         "comment",
         "version-dependent-separator",
-        "nested-env",
     ],
 )
 def test_claude_terminal_launch_env_keeps_pre_wrapper_env_for_unparsed_env_forms(

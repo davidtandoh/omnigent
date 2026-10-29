@@ -128,6 +128,10 @@ def _real_env_supports_long_split_string() -> bool:
         ["-u", "KEEP", "-", "A=1", "/usr/bin/printenv"],
         ["-iuKEEP", "A=1", "/usr/bin/printenv"],
         ["-S", "A=1 /usr/bin/printenv"],
+        ["A=outer", "/usr/bin/env", "B=inner", "/usr/bin/printenv"],
+        ["A=outer", "/usr/bin/env", "-u", "A", "B=inner", "/usr/bin/printenv"],
+        ["A=outer", "/usr/bin/env", "-i", "B=inner", "/usr/bin/printenv"],
+        ["A=outer", "/usr/bin/env", "-S", "B=${A} /usr/bin/printenv"],
         ["-S", "- A='x y' /usr/bin/printenv"],
         ["-S", "-u KEEP A=1 /usr/bin/printenv"],
         ["-iS", "A=1 /usr/bin/printenv"],
@@ -179,14 +183,6 @@ def test_standalone_dash_ends_env_option_parsing():
     assert environment is not None
     assert (environment.inherit, environment.unset, environment.variables) == (False, [], {})
     assert startup.env_wrapper_chdir("/usr/bin/env", ["-", "-C", "/", "claude"]) is None
-
-
-def test_nested_env_wrapper_is_not_modeled():
-    """A wrapper that runs another ``env`` reports no changes, so callers fall back."""
-    args = ["-C", "/", "A=1", "env", "CLAUDE_CONFIG_DIR=/srv/claude", "claude"]
-    assert startup.env_wrapper_environment("/usr/bin/env", args) is None
-    assert startup.env_wrapper_chdir("/usr/bin/env", args) is None
-    assert startup.env_wrapper_command("/usr/bin/env", args) is None
 
 
 def test_env_split_string_keeps_a_word_only_for_set_variables():
