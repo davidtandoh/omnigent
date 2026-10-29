@@ -117,8 +117,8 @@ def env_wrapper_environment(
         ``${NAME}`` in ``-S`` strings; ``None`` treats such strings as unparsed.
     :returns: The wrapper's ``-i``/``-``/``-u``/``-S``/assignment changes, or
         ``None`` when *command* is not a parseable ``env`` wrapper (e.g. it
-        uses ``-v``). Nested wrappers preserve known outer changes. A ``-C``/``--chdir`` directory
-        is reported by :func:`env_wrapper_chdir`.
+        uses ``-v``). Nested wrappers preserve known outer changes. The
+        ``-C``/``--chdir`` result is reported by :func:`env_wrapper_chdir`.
     """
     parsed = _parse_env_wrapper(command, args, environ)
     return parsed[0] if parsed is not None else None
@@ -135,8 +135,10 @@ def env_wrapper_chdir(
         ``["--chdir=/srv/repo", "claude"]``.
     :param environ: Environment the wrapper starts from; see
         :func:`env_wrapper_environment`.
-    :returns: The last ``-C``/``--chdir`` value, e.g. ``"/srv/repo"``, or
-        ``None`` when there is none or the wrapper is not parseable.
+    :returns: The directory composed from the final ``-C``/``--chdir`` in
+        each parsed layer, e.g. ``"/srv/repo"``. An absolute inner value
+        replaces the outer directory. Known outer changes survive an opaque
+        inner layer. Returns ``None`` when no parsed layer changes directory.
     """
     parsed = _parse_env_wrapper(command, args, environ)
     return parsed[1] if parsed is not None else None

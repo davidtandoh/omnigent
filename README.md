@@ -321,10 +321,11 @@ symlinks, or removing a trailing slash. The native child inherits `USER` and
 `LOGNAME` from the host. Before creating the terminal, Omnigent runs
 `claude auth status` in the child's launch environment. A signed-out account
 or a launch command that changes the requested directory fails before launch.
-An inconclusive status check warns with the account directory and continues
-without exposing status output. The check waits up to 30 seconds. Launches
-without an explicit `CLAUDE_CONFIG_DIR` keep
-their existing behavior.
+Omnigent checks known assignments in nested `env` wrappers before probing.
+If a wrapper cannot be fully parsed, or the status check is inconclusive,
+Omnigent warns with the account directory and continues without exposing
+status output. The status check waits up to 30 seconds. Launches without an
+explicit `CLAUDE_CONFIG_DIR` keep their existing behavior.
 
 For Codex, Omnigent applies these variables to both the app-server that runs
 tools and the attached terminal UI. The agent's tool shell therefore receives
