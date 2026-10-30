@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import os
 import tomllib
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -4091,8 +4092,8 @@ def test_remove_claude_account_signs_out_only_that_account(
         raise AssertionError("removing an extra account signed out the default login")
 
     monkeypatch.setattr("omnigent.onboarding.harness_install.harness_logout", _default_logout)
-    # L1 1=Claude → L2 2=claude-work → L3 1=Remove (no Make default) → 1=Yes → q → q.
-    stdin = "\n".join(["1", "2", "1", "1", "q", "q"]) + "\n"
+    # L1 1=Claude → L2 2=claude-work → L3 2=Remove (no Make default) → 1=Yes → q → q.
+    stdin = "\n".join(["1", "2", "2", "1", "q", "q"]) + "\n"
     result = CliRunner().invoke(cli, ["setup", "--no-internal-beta"], input=stdin)
     assert result.exit_code == 0, result.output
 
@@ -4120,3 +4121,102 @@ def test_replacing_the_default_subscription_keeps_extra_accounts(isolated_config
     providers = _config_yaml(isolated_config)["providers"]
     assert set(providers) == {"claude-subscription", "claude-work"}
     assert providers["claude-work"] == extra
+
+
+def _seed_default_and_work_accounts(isolated_config) -> Path:
+    config_dir = isolated_config / "claude-accounts" / "work"
+    config_dir.mkdir(parents=True)
+    (config_dir / "signed-in").touch()
+    _seed_config(
+        isolated_config,
+        {
+            "claude-subscription": {"kind": "subscription", "cli": "claude", "default": True},
+            "claude-work": {
+                "kind": "subscription",
+                "cli": "claude",
+                "config_dir": str(config_dir),
+            },
+        },
+    )
+    return config_dir
+
+
+# L1 1=Claude → L2 2=claude-work → L3 1=Sign in again → q → q.
+_SIGN_IN_AGAIN_KEYS = ["1", "2", "1", "q", "q"]
+
+
+def test_sign_in_again_logs_in_only_that_account(
+    isolated_config, fake_claude, monkeypatch
+) -> None:
+    """An expired sign-in can still report signed in, so the login always runs."""
+    config_dir = _seed_default_and_work_accounts(isolated_config)
+    before = _config_yaml(isolated_config)
+
+    def _default_login(*args: object, **kwargs: object) -> bool:
+        raise AssertionError("signing in again touched the default login")
+
+    monkeypatch.setattr("omnigent.onboarding.harness_install.harness_login", _default_login)
+    stdin = "\n".join(_SIGN_IN_AGAIN_KEYS) + "\n"
+    result = CliRunner().invoke(cli, ["setup", "--no-internal-beta"], input=stdin)
+    assert result.exit_code == 0, result.output
+
+    assert fake_claude.read_text().splitlines() == [
+        f"auth login --claudeai|{config_dir}",
+        f"auth status|{config_dir}",
+    ]
+    assert _config_yaml(isolated_config) == before
+    assert sorted(path.name for path in config_dir.iterdir()) == ["signed-in"]
+
+
+def test_sign_in_again_reports_whether_the_login_was_confirmed(
+    isolated_config, fake_claude, monkeypatch
+) -> None:
+    from omnigent.cli_config import _sign_in_claude_account_again
+
+    config_dir = _seed_default_and_work_accounts(isolated_config)
+    (config_dir / "signed-in").unlink()
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_FAILS", "1")
+    assert _sign_in_claude_account_again("claude-work", str(config_dir)) == (
+        "✗ Claude login for claude-work not confirmed"
+    )
+    monkeypatch.delenv("FAKE_CLAUDE_LOGIN_FAILS")
+    assert _sign_in_claude_account_again("claude-work", str(config_dir)) == (
+        "✓ Signed in to claude-work again"
+    )
+    missing = str(isolated_config / "claude-accounts" / "gone")
+    assert "is missing" in _sign_in_claude_account_again("claude-gone", missing)
+    assert not os.path.exists(missing)
+
+
+def test_sign_in_again_over_ssh_on_macos_fails_without_running_claude(
+    isolated_config, fake_claude, monkeypatch
+) -> None:
+    import functools
+
+    from omnigent.onboarding import claude_accounts
+
+    _seed_default_and_work_accounts(isolated_config)
+    before = _config_yaml(isolated_config)
+    monkeypatch.setattr(
+        claude_accounts,
+        "ssh_login_refusal",
+        functools.partial(claude_accounts.ssh_login_refusal, platform="darwin"),
+    )
+    monkeypatch.setenv("SSH_TTY", "/dev/ttys001")
+    stdin = "\n".join(_SIGN_IN_AGAIN_KEYS) + "\n"
+    result = CliRunner().invoke(cli, ["setup", "--no-internal-beta"], input=stdin)
+
+    assert result.exit_code != 0
+    assert "Screen Sharing" in result.output
+    assert fake_claude.read_text() == ""
+    assert _config_yaml(isolated_config) == before
+
+
+def test_sign_in_again_is_not_offered_for_the_default_login(isolated_config, fake_claude) -> None:
+    _seed_default_and_work_accounts(isolated_config)
+    # L1 1=Claude → L2 1=claude-subscription → q → q → q.
+    stdin = "\n".join(["1", "1", "q", "q", "q"]) + "\n"
+    result = CliRunner().invoke(cli, ["setup", "--no-internal-beta"], input=stdin)
+    assert result.exit_code == 0, result.output
+    assert "Remove" in result.output
+    assert "Sign in again" not in result.output

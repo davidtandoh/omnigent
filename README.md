@@ -352,9 +352,10 @@ passes the account's `CLAUDE_CONFIG_DIR` to the launch check above. Pass
 `--account` again when you resume the session, because Omnigent does not store
 the account with the session. The web UI and agent specs still use the default
 login. An extra account cannot be a default. Setup lists each account as
-**Subscription (claude-work)**. Removing an account signs out only that
-account and keeps its folder, so adding the same name again restores its
-sessions.
+**Subscription (claude-work)**. When an account's sign-in expires, select it
+and choose **Sign in again**, which runs `claude auth login` for that account
+only. Removing an account signs out only that account and keeps its folder,
+so adding the same name again restores its sessions.
 
 On macOS, Claude stores each sign-in in the login keychain, which an SSH
 session cannot open. Over SSH, setup refuses the login step and exits with an

@@ -105,10 +105,19 @@ def sign_in_account(command: str, config_dir: str) -> bool:
 
     :returns: Whether ``claude auth status`` confirms the account afterward.
     """
+    return account_signed_in(command, config_dir) or log_in_account(command, config_dir)
+
+
+def log_in_account(command: str, config_dir: str) -> bool:
+    """Run ``claude auth login`` for *config_dir*, even when it reports signed in.
+
+    A stored but expired sign-in can still report signed in, so a requested
+    re-login always runs the login.
+
+    :returns: Whether ``claude auth status`` confirms the account afterward.
+    """
     from omnigent.onboarding.harness_install import run_interactive_login
 
-    if account_signed_in(command, config_dir):
-        return True
     if not run_interactive_login([command, *_LOGIN_ARGS], env=_account_env(config_dir)):
         return False
     return account_signed_in(command, config_dir)

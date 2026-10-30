@@ -3207,6 +3207,8 @@ def _manage_credential(provider: str, family: str) -> str | None:
                 f"Make default for {family_label(family)}", action="set_default", provider=provider
             )
         )
+    if entry.config_dir is not None:
+        rows.append(_HarnessMenuRow("Sign in again", action="sign_in_again", provider=provider))
     rows.append(_HarnessMenuRow("Remove", action="remove", provider=provider))
     rows.append(_HarnessMenuRow("← Back", action="back"))
 
@@ -3218,6 +3220,8 @@ def _manage_credential(provider: str, family: str) -> str | None:
         return None
     if row.action == "set_default":
         return _set_harness_default(provider, family)
+    if row.action == "sign_in_again" and entry.config_dir is not None:
+        return _sign_in_claude_account_again(provider, entry.config_dir)
     # A subscription's credential lives in the harness CLI's own auth file, not
     # our config — so removing it means signing out of that CLI (otherwise the
     # login persists and ambient detection re-adopts it on the next open).
@@ -3342,6 +3346,37 @@ def _configure_claude_account_add() -> str | None:
         deep_merge_keys=("providers",),
     )
     return f"✓ Added {name} — start it with `{cli_invocation()} claude --account {account_name}`"
+
+
+def _sign_in_claude_account_again(provider: str, config_dir: str) -> str:
+    """Run ``claude auth login`` again for one extra Claude account.
+
+    Uses that account's ``CLAUDE_CONFIG_DIR`` only. The provider entry, the
+    account folder and the default login are left unchanged.
+
+    :returns: A status line for the credential menu.
+    :raises click.ClickException: On macOS over SSH, where the keychain-backed
+        login cannot be stored.
+    """
+    from omnigent.onboarding.claude_accounts import (
+        claude_command,
+        log_in_account,
+        ssh_login_refusal,
+    )
+    from omnigent.onboarding.interactive import console
+
+    refusal = ssh_login_refusal()
+    if refusal is not None:
+        raise click.ClickException(f"{refusal} {provider} was not signed in again.")
+    command = claude_command()
+    if command is None:
+        return f"✗ Claude CLI not found on PATH — {provider} not signed in again"
+    if not os.path.isdir(config_dir):
+        return f"✗ Folder {config_dir} is missing — remove {provider} and add it again"
+    console.print(f"  [dim]Signing in to Claude for {provider} (its login will open)…[/dim]")
+    if not log_in_account(command, config_dir):
+        return f"✗ Claude login for {provider} not confirmed"
+    return f"✓ Signed in to {provider} again"
 
 
 def _remove_claude_account(provider: str, config_dir: str) -> str | None:
