@@ -849,8 +849,11 @@ def _cleanup_host(host: HostProcess) -> None:
         task.cancel()
 
 
+@pytest.mark.parametrize("with_claude_account", [False, True])
 async def test_handle_launch_spawns_subprocess(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    with_claude_account: bool,
 ) -> None:
     """
     Verify that _handle_launch spawns a subprocess with the correct
@@ -859,6 +862,8 @@ async def test_handle_launch_spawns_subprocess(
     If the result status is not 'launched', the subprocess spawn
     failed or the result frame construction is wrong.
     """
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setattr("omnigent.host.connect.harness_is_configured", lambda harness: True)
     host = _make_host_process()
     host._auth_token_factory = lambda: "host-bootstrap-bearer"
     host._auth_token_factory_resolved = True
@@ -869,6 +874,8 @@ async def test_handle_launch_spawns_subprocess(
         request_id="req_001",
         binding_token="test_token_abc",
         workspace=str(workspace),
+        harness="codex-native" if with_claude_account else None,
+        account="unconfigured-work" if with_claude_account else None,
     )
 
     spawned_env: dict[str, str] = {}
@@ -913,6 +920,11 @@ async def test_handle_launch_spawns_subprocess(
     assert spawned_env.get("OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN") == "test_token_abc"
     assert spawned_env.get(RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR) == "host-bootstrap-bearer"
     assert spawned_env.get("OMNIGENT_RUNNER_WORKSPACE") == str(workspace)
+
+    assert "CLAUDE_CONFIG_DIR" not in spawned_env
+    assert "CLAUDE_CONFIG_DIR" not in json.loads(
+        spawned_env.get("OMNIGENT_NATIVE_LAUNCH_ENV", "{}")
+    )
 
     # Runners must get a clean /dev/null stdin, not the daemon's inherited fd:
     # a long-lived (e.g. nohup'd) daemon can end up with a closed/recycled
@@ -10541,3 +10553,33 @@ async def test_host_publishes_stored_workspace_at_startup(
 
     assert host._origin_workspace_id == "1965859176160743"
     assert os.environ[debug_logging.ORIGIN_WORKSPACE_ID_ENV_VAR] == "1965859176160743"
+
+
+async def test_sdk_account_launch_is_refused_before_account_resolution(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def unexpected_resolution(*args, **kwargs):
+        pytest.fail("Claude SDK launch must refuse before resolving a sign-in folder")
+
+    monkeypatch.setattr(
+        "omnigent.onboarding.claude_accounts.account_launch_environment", unexpected_resolution
+    )
+    host = _make_host_process()
+    try:
+        result = await host._handle_launch(
+            HostLaunchRunnerFrame(
+                request_id="sdk-account",
+                binding_token="sdk-binding",
+                workspace=str(tmp_path),
+                harness="claude-sdk",
+                account="private-work",
+            )
+        )
+        assert result.status == "failed"
+        assert result.error_code == "harness_not_configured"
+        assert "claude-sdk" in (result.error or "")
+        assert "Use a claude-native session" in (result.error or "")
+        assert str(tmp_path) not in (result.error or "")
+        assert not host._runners
+    finally:
+        _cleanup_host(host)

@@ -1964,17 +1964,26 @@ class HostProcess:
             # Resolve before the reuse and custody checks, so both compare the
             # account's folder: a live runner on another account is refused.
             try:
-                account_env = await asyncio.to_thread(
-                    account_launch_environment,
-                    frame.account,
-                    frame.native_env,
-                    host_name=self._identity.name,
-                )
+                harness = canonicalize_harness(frame.harness) or frame.harness
+                if is_claude_sdk_harness_name(harness):
+                    raise AccountUnavailableError(
+                        f"Claude account {frame.account!r} cannot be used by claude-sdk "
+                        f"on host {self._identity.name!r}. Use a claude-native session instead."
+                    )
+                if harness not in {"claude-native", None}:
+                    frame = dataclasses.replace(frame, account=None)
+                else:
+                    account_env = await asyncio.to_thread(
+                        account_launch_environment,
+                        frame.account,
+                        frame.native_env,
+                        host_name=self._identity.name,
+                    )
+                    frame = dataclasses.replace(frame, native_env=account_env)
             except AccountUnavailableError as exc:
                 return self._launch_failed(
                     frame, str(exc), error_code=HARNESS_NOT_CONFIGURED_ERROR_CODE
                 )
-            frame = dataclasses.replace(frame, native_env=account_env)
         durable = IS_POSIX and frame.harness in SUPPORTED_HARNESSES and bool(frame.session_id)
         if IS_POSIX and frame.session_id:
             try:

@@ -2581,11 +2581,13 @@ async def _post_hi(client: httpx.AsyncClient, session_id: str) -> httpx.Response
     )
 
 
+@pytest.mark.parametrize("replace_with_sdk", [False, True])
 async def test_session_account_is_sent_on_create_and_every_relaunch(
     client: httpx.AsyncClient,
     app: FastAPI,
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
+    replace_with_sdk: bool,
 ) -> None:
     """The server stores only the account name and re-sends it on each launch."""
     from omnigent.runtime import set_runner_client
@@ -2615,10 +2617,36 @@ async def test_session_account_is_sent_on_create_and_every_relaunch(
     conv = SqlAlchemyConversationStore(db_uri).get_conversation(session_id)
     assert conv is not None and conv.account == "work"
 
+    if replace_with_sdk:
+        from tests.server.helpers import build_agent_bundle
+
+        replacement = build_agent_bundle(
+            name="test-agent", executor={"type": "omnigent", "config": {"harness": "claude-sdk"}}
+        )
+        updated = await client.put(
+            f"/v1/sessions/{session_id}/agent",
+            files={"bundle": ("agent.tar.gz", replacement, "application/gzip")},
+        )
+        assert updated.status_code == 200, updated.text
+
     set_runner_client(None)
     post_task = asyncio.create_task(_post_hi(client, session_id))
     try:
         relaunch_frame = await _wait_for_launch(comm, budget_s=budget(5.0))
+        if replace_with_sdk:
+            assert relaunch_frame is not None and relaunch_frame.harness == "claude-sdk"
+            host = HostProcess(
+                identity=HostIdentity(host_id=_HOST_ID, name="test"),
+                server_url="http://testserver",
+            )
+            refusal = await host._handle_launch(relaunch_frame)
+            assert refusal.status == "failed"
+            assert refusal.error_code == HARNESS_NOT_CONFIGURED_ERROR_CODE
+            await comm.send_input(
+                {"type": "websocket.receive", "text": encode_host_frame(refusal)}
+            )
+            sent = await asyncio.wait_for(post_task, timeout=budget(5.0))
+            assert sent.status_code == 202, sent.text
     finally:
         post_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
