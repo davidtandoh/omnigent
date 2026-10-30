@@ -1244,6 +1244,7 @@ async def _auto_create_claude_terminal_for_test(
     registry: object,
     account: str | None = None,
     external_session_id: str | None = None,
+    launch_config: ClaudeNativeUcodeConfig | None = None,
 ) -> None:
     """
     Run ``_auto_create_claude_terminal`` with host config and diagnostics stubbed.
@@ -1275,7 +1276,7 @@ async def _auto_create_claude_terminal_for_test(
         server_client=AsyncMock(spec=httpx.AsyncClient),
         session_init=session_init,
         auth_token_factory=lambda: None,
-        resolve_launch_config=AsyncMock(return_value=None),
+        resolve_launch_config=AsyncMock(return_value=launch_config),
     )
 
 
@@ -1694,3 +1695,88 @@ async def test_successful_legacy_lookup_without_account_means_default() -> None:
     ) as client:
         metadata = await _load_legacy_claude_launch_metadata(client, "default-account")
     assert metadata.account_known and metadata.account is None
+
+
+@pytest.mark.parametrize("credential", ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"])
+async def test_recorded_account_probe_ignores_ambient_credentials(
+    bridge_dir: Path, monkeypatch: pytest.MonkeyPatch, credential: str
+) -> None:
+    from unittest.mock import Mock
+
+    from omnigent.onboarding.claude_accounts import AccountUnavailableError
+    from omnigent.runner.resource_registry import SessionResourceRegistry
+
+    monkeypatch.setenv(credential, "ambient-credential")
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setattr(
+        "omnigent.native.launch_environment._installed_native_launch_environment",
+        {"CLAUDE_CONFIG_DIR": "/accounts/work"},
+    )
+    monkeypatch.setattr(
+        "omnigent.config.load_global_config",
+        lambda: {
+            "providers": {
+                "claude-work": {
+                    "kind": "subscription",
+                    "cli": "claude",
+                    "config_dir": "/accounts/work",
+                }
+            },
+        },
+    )
+    probes = []
+
+    def auth_status(command, *, env, cwd):
+        probes.append(env)
+        return credential in env
+
+    monkeypatch.setattr("omnigent.harnesses.claude_native.account.claude_auth_status", auth_status)
+    registry = Mock(spec=SessionResourceRegistry)
+    with pytest.raises(AccountUnavailableError, match="signed out"):
+        await _auto_create_claude_terminal_for_test(
+            monkeypatch,
+            session_id="signed-out-work",
+            workspace=bridge_dir,
+            registry=registry,
+            account="work",
+        )
+    assert len(probes) == 1
+    assert probes[0]["CLAUDE_CONFIG_DIR"] == "/accounts/work"
+    assert credential not in probes[0]
+    registry.launch_required_terminal.assert_not_called()
+
+
+async def test_ambient_config_folder_does_not_bypass_default_gateway(
+    bridge_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import Mock
+
+    from omnigent.runner.resource_registry import SessionResourceRegistry
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/unregistered/claude")
+    monkeypatch.setattr(
+        "omnigent.native.launch_environment._installed_native_launch_environment",
+        {},
+    )
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge.ensure_claude_workspace_trusted",
+        lambda *a, **k: None,
+    )
+    gateway = ClaudeNativeUcodeConfig(
+        env={"ANTHROPIC_BASE_URL": "https://gateway.example/anthropic"},
+        api_key_helper="printf gateway-token",
+        model="claude-sonnet-4-6",
+    )
+    registry = Mock(spec=SessionResourceRegistry)
+    registry.launch_required_terminal.side_effect = RuntimeError("terminal reached")
+    with pytest.raises(RuntimeError, match="terminal reached"):
+        await _auto_create_claude_terminal_for_test(
+            monkeypatch,
+            session_id="default-gateway",
+            workspace=bridge_dir,
+            registry=registry,
+            launch_config=gateway,
+        )
+    registry.launch_required_terminal.assert_awaited_once()
+    spec = registry.launch_required_terminal.call_args.kwargs["spec"]
+    assert spec.env["ANTHROPIC_BASE_URL"] == "https://gateway.example/anthropic"

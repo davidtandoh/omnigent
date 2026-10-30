@@ -9191,11 +9191,6 @@ async def _auto_create_claude_terminal(
 
         raise AccountUnavailableError("Could not confirm this session's Claude account; retry.")
     resolved_launch_env = native_launch_environment()
-    verify_sign_in = (
-        "CLAUDE_CONFIG_DIR" in resolved_launch_env or launch_metadata.account is not None
-    )
-    if "CLAUDE_CONFIG_DIR" not in resolved_launch_env and "CLAUDE_CONFIG_DIR" in os.environ:
-        resolved_launch_env["CLAUDE_CONFIG_DIR"] = os.environ["CLAUDE_CONFIG_DIR"]
     requested_account = resolved_launch_env.get("CLAUDE_CONFIG_DIR")
     await asyncio.to_thread(
         _ensure_spec_account_selected, agent_spec, requested_account, launch_metadata.account
@@ -9208,7 +9203,7 @@ async def _auto_create_claude_terminal(
 
     _harness_cfg = load_effective_config(workspace=workspace)
     launch_command = resolve_harness_command("claude-native", default="claude", cfg=_harness_cfg)
-    if requested_account is not None and verify_sign_in:
+    if requested_account is not None:
         from omnigent.harnesses.claude_native.account import ensure_claude_account_signed_in
         from omnigent.host.harness_startup import env_wrapper_command
 
@@ -9217,6 +9212,7 @@ async def _auto_create_claude_terminal(
             command=launch_command,
             args=resolve_harness_args("claude-native", (), cfg=_harness_cfg),
             env=resolved_launch_env,
+            env_unset=_claude_terminal_env_unset(None),
         )
         probe_env = _claude_terminal_launch_env(probe_spec)
         probe_command = launch_command
@@ -9846,8 +9842,7 @@ async def _auto_create_claude_terminal(
         launch_env = _claude_terminal_launch_env(env_spec)
         launch_cwd = _claude_terminal_launch_cwd(env_spec, agent_os_env)
         if (
-            verify_sign_in
-            and requested_account is not None
+            requested_account is not None
             and launch_env.get("CLAUDE_CONFIG_DIR") != requested_account
         ):
             from omnigent.harnesses.claude_native.account import _account_label
