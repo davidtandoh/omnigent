@@ -82,6 +82,7 @@ from omnigent.native.native_coding_agents import (
 from omnigent.native.native_dispatch import resolve_hook
 from omnigent.pi_prompt import pi_prompt_args
 from omnigent.process_logging import process_log_reference
+from omnigent.runner.identity import runner_helper_environment
 from omnigent.runner.resource_registry import (
     ANTIGRAVITY_NATIVE_TERMINAL_ROLE,
     CLAUDE_NATIVE_TERMINAL_ROLE,
@@ -10017,6 +10018,8 @@ async def _auto_create_repl_terminal(
         # being on the tmux pane's PATH.
         command=sys.executable,
         args=["-m", "omnigent", "attach", session_id, "--server", server_url],
+        # The pane drops the runner's config and data; the REPL needs the same auth store.
+        env=runner_helper_environment(),
         scrollback=50000,
         # Defer the REPL process until the first web client attaches (see
         # docstring): no cost for never-opened terminals, and the REPL

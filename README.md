@@ -327,6 +327,10 @@ Omnigent warns with the account directory and continues without exposing
 status output. The status check waits up to 30 seconds. Launches without an
 explicit `CLAUDE_CONFIG_DIR` keep their existing behavior.
 
+`omnigent claude --help` lists `claude-account-enforcement` under
+**Capabilities** when the installed build enforces the selected account. A
+launcher can check for that line instead of pinning an Omnigent version.
+
 For Codex, Omnigent applies these variables to both the app-server that runs
 tools and the attached terminal UI. The agent's tool shell therefore receives
 the explicit launch environment.
@@ -336,6 +340,17 @@ environment, and it does not store these values in session metadata. The
 values cross the configured Omnigent server and host-daemon control channel.
 Use a trusted server and host. Do not put secrets on a command line because
 shell history and process inspection can expose command-line values.
+
+A native terminal does not inherit the Omnigent service's own
+`OMNIGENT_CONFIG_HOME`, `OMNIGENT_DATA_DIR`, `OMNIGENT_PROCESS_LOG_FILE`, or
+`OMNIGENT_RUNNER_*` variables. Omnigent also removes these variables from
+agent shell commands launched through its tools, including the Claude MCP
+bridge. This prevents accidental use of service paths through inherited
+variables; it does not restrict filesystem access. Omnigent passes the required
+service environment explicitly to the Claude MCP bridge, the Claude, Kimi,
+Devin, Hermes, and Cursor policy hooks, and the session's `omnigent attach`
+terminal. To give a native terminal one of these variables, pass it with
+`--env`; Omnigent's tool shell commands still remove it.
 
 `omnigent agy` requires agy 1.1.13 or newer. When `GEMINI_API_KEY` is set,
 direct Gemini API authentication takes precedence over agy's saved OAuth login.

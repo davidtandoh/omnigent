@@ -88,6 +88,7 @@ from omnigent.harnesses.kiro_native import bridge as kiro_bridge
 from omnigent.models.claude_model_vocabulary import MODEL_VOCABULARY_ENV_VARS
 from omnigent.models.model_metadata import concrete_reported_model
 from omnigent.native.failure_telemetry import FailureContext
+from omnigent.runner.identity import runner_helper_environment
 from omnigent.util.json_types import JsonObject as _JsonObject
 
 if TYPE_CHECKING:
@@ -2323,20 +2324,24 @@ def build_mcp_config(bridge_dir: Path, *, python_executable: str | None = None) 
                     # Keep it aligned with the runner when Claude inherits a
                     # different TMPDIR from the user's shell.
                     "TMPDIR": str(_TRUSTED_PARENT),
+                    # Claude no longer inherits the runner's config and data.
+                    **runner_helper_environment(),
                 },
             }
         }
     }
 
 
-def _pin_runner_tmpdir(command: str) -> str:
-    """Run a generated command with the runner's temp root."""
-    return f"env TMPDIR={shlex.quote(str(_TRUSTED_PARENT))} {command}"
+def _pin_runner_helper_env(command: str) -> str:
+    """Run a generated command with the runner's temp root, config, and data."""
+    assignments = {"TMPDIR": str(_TRUSTED_PARENT), **runner_helper_environment()}
+    prefix = shlex.join(["env", *(f"{name}={value}" for name, value in assignments.items())])
+    return f"{prefix} {command}"
 
 
 def _python_hook_command(parts: list[str]) -> str:
-    """Build a Python hook command pinned to the runner's temp root."""
-    return _pin_runner_tmpdir(shlex.join(parts))
+    """Build a Python hook command pinned to the runner's helper environment."""
+    return _pin_runner_helper_env(shlex.join(parts))
 
 
 def build_hook_settings(
@@ -2513,7 +2518,7 @@ def build_hook_settings(
     from omnigent.native.tool_observer_hook import hook_settings
 
     observer_hook = hook_settings(bridge_dir, python, "omnigent.harnesses.claude_native.hook")
-    observer_hook["command"] = _pin_runner_tmpdir(cast(str, observer_hook["command"]))
+    observer_hook["command"] = _pin_runner_helper_env(cast(str, observer_hook["command"]))
     hooks["PostToolUse"].append({"hooks": [observer_hook]})
     if turn_routing:
         hooks["UserPromptSubmit"].append({"hooks": [_claude_route_turn_hook(bridge_dir, python)]})

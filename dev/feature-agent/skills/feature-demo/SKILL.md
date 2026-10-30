@@ -25,9 +25,8 @@ the per-surface mechanics, and captioning. Use the CUJ ID as the facet and
 - For API or configuration CUJs, record a VHS terminal session that runs the
   real CLI or API call and shows its output. Written evidence alone is not a
   demo.
-- Build the SPA before starting the recorder. Inside a server-spawned runner
-  (`OMNIGENT_RUNNER_ID` is set), strip the inherited runner variables as the
-  guide describes, and retry before reporting a blocker.
+- Build the SPA before starting the recorder. Follow `dev/recording-lanes.md`
+  for environment cleanup and runner startup diagnosis before reporting a blocker.
 
 Never commit recordings; upload them to the PR as described in
 `feature-publish`.

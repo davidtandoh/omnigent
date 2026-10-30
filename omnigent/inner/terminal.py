@@ -35,7 +35,7 @@ from omnigent.debug_logging import debug_event
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.native import owner_claim
 from omnigent.process_logging import redact_log_text
-from omnigent.runner.identity import strip_runner_auth_secrets
+from omnigent.runner.identity import strip_runner_auth_secrets, strip_runner_service_env
 from omnigent.util.tmux_compat import MIN_TMUX_VERSION, MIN_TMUX_VERSION_HINT, tmux_version
 
 if TYPE_CHECKING:
@@ -746,7 +746,8 @@ def terminal_pane_environment(
     Clipboard and sandbox adjustments made later by :meth:`TerminalInstance.launch`
     are not included.
 
-    :param inherit_env: Whether the pane inherits the current process environment.
+    :param inherit_env: Whether to inherit the current process environment,
+        filtered by :func:`omnigent.runner.identity.strip_runner_service_env`.
     :param env: Per-terminal overrides, e.g. ``{"CLAUDE_CONFIG_DIR": "/srv/claude"}``.
     :param env_unset: Names removed after the overrides, e.g. ``["ANTHROPIC_API_KEY"]``.
     :param launch_environment: This launch's lifecycle identity variables, or
@@ -759,7 +760,9 @@ def terminal_pane_environment(
     # commands outside the sandbox. The host-side control plane
     # addresses the socket via the instance's ``socket_path`` and never
     # needs the env var; any inherited value is stripped below too.
-    result: dict[str, str] = os.environ.copy() if inherit_env else {}
+    # The pane runs agent shells and their tests: keep the service's own config,
+    # data, and runner internals out of it. Helpers get them explicitly.
+    result: dict[str, str] = strip_runner_service_env(os.environ) if inherit_env else {}
     result.pop("OMNIGENT_TMUX_SOCK", None)
     # Apply per-terminal env overrides (takes precedence over inherited env).
     result.update(env)
@@ -1073,8 +1076,8 @@ class TerminalInstance:
         if the same key also appears in ``env``, the strip wins.
         Intentional: ``env_unset`` is a leak-prevention boundary,
         not a soft default.
-    :param inherit_env: Whether to start from ``os.environ`` before applying
-        ``env`` / ``env_unset``.
+    :param inherit_env: Whether to start from the filtered environment from
+        :func:`terminal_pane_environment` before applying ``env`` / ``env_unset``.
     :param sandbox_policy: Optional sandbox wrapper policy.
     :param conversation_link: Optional web UI link for the owning
         conversation, e.g. ``"/c/conv_abc123"``.

@@ -13,7 +13,9 @@ from omnigent.runner.identity import (
     RUNNER_CONNECT_MARKER_ENV_VAR,
     RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR,
     RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR,
+    runner_helper_environment,
     strip_runner_auth_secrets,
+    strip_runner_service_env,
     token_bound_runner_id,
     touch_connect_marker,
 )
@@ -104,6 +106,46 @@ def test_strip_runner_auth_secrets_does_not_mutate_input() -> None:
     assert source == {RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR: "tok", "HOME": "/home/x"}
     assert result == {"HOME": "/home/x"}
     assert result is not source
+
+
+def test_strip_runner_service_env_drops_service_state_and_runner_internals() -> None:
+    """A harness pane keeps ordinary and lookalike names but no service state."""
+    source = {
+        "OMNIGENT_CONFIG_HOME": "/srv/omnigent/config",
+        "OMNIGENT_DATA_DIR": "/srv/omnigent/data",
+        "OMNIGENT_PROCESS_LOG_FILE": "/srv/omnigent/data/logs/runner.log",
+        "OMNIGENT_RUNNER_WORKSPACE": "/work",
+        "OMNIGENT_RUNNER_SLICE_KEY": "host-1",
+        "OMNIGENT_TERMINAL_LAUNCH_SESSION_ID": "session-1",
+        "OMNIGENT": "1",
+        "PATH": "/usr/bin",
+    }
+
+    result = strip_runner_service_env(source)
+
+    assert result == {
+        "OMNIGENT_TERMINAL_LAUNCH_SESSION_ID": "session-1",
+        "OMNIGENT": "1",
+        "PATH": "/usr/bin",
+    }
+    assert source["OMNIGENT_DATA_DIR"] == "/srv/omnigent/data"
+
+
+def test_runner_helper_environment_returns_only_set_helper_values() -> None:
+    """Helpers get config, data, and slice key; empty values are not forwarded."""
+    source = {
+        "OMNIGENT_CONFIG_HOME": "/srv/omnigent/config",
+        "OMNIGENT_DATA_DIR": "",
+        "OMNIGENT_RUNNER_SLICE_KEY": "host-1",
+        "OMNIGENT_PROCESS_LOG_FILE": "/srv/omnigent/data/logs/runner.log",
+        "OMNIGENT_RUNNER_WORKSPACE": "/work",
+    }
+
+    assert runner_helper_environment(source) == {
+        "OMNIGENT_CONFIG_HOME": "/srv/omnigent/config",
+        "OMNIGENT_RUNNER_SLICE_KEY": "host-1",
+    }
+    assert runner_helper_environment({}) == {}
 
 
 def test_importing_identity_does_not_pull_in_fastapi() -> None:

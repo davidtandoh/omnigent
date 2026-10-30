@@ -28,6 +28,7 @@ from omnigent._platform import IS_WINDOWS, WINDOWS_ENV_PASSTHROUGH
 from omnigent.runner.identity import (
     OMNIGENT_SESSION_ENV_VAR,
     strip_runner_auth_secrets,
+    strip_runner_service_env,
 )
 from omnigent.sandbox.copy_on_write import SHARED_ENVIRONMENT_VAR, CopyOnWriteEnvironment
 from omnigent.util.json_types import JsonValue
@@ -1903,7 +1904,10 @@ def _same_path(entry: str, root: Path) -> bool:
 
 def _child_shell_env() -> dict[str, str]:
     """
-    Environment for agent shell commands, minus omnigent's own package root.
+    Environment for agent shell commands, without service state or package root.
+
+    Service variables stay in the helper for authentication and configuration,
+    but must not reach commands that can run project tests.
 
     The helper prepends its project root to ``PYTHONPATH`` at spawn (see
     ``_HelperProcessClient._start_locked``) purely so ``python -m
@@ -1914,7 +1918,7 @@ def _child_shell_env() -> dict[str, str]:
     project). Strip only omnigent's entry — any other ``PYTHONPATH`` the caller
     set is preserved, in order.
     """
-    env = os.environ.copy()
+    env = strip_runner_service_env(os.environ)
     raw = env.get("PYTHONPATH")
     if not raw:
         return env

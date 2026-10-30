@@ -547,6 +547,14 @@ def test_native_wrapper_env_option_is_explicit_and_preserves_empty_values(
     }
 
 
+def test_claude_help_advertises_account_enforcement_capability() -> None:
+    """Launchers can probe account enforcement without pinning an Omnigent commit."""
+    result = CliRunner().invoke(cli, ["claude", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "claude-account-enforcement" in result.output
+
+
 @pytest.mark.parametrize("command", ["claude", "codex", "kiro", "agy"])
 def test_native_wrapper_env_rejects_duplicates_before_backend_start(
     command: str,

@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -495,6 +497,52 @@ def test_child_shell_env_noop_without_pythonpath(
 # sys_os_shell command's PYTHONPATH. Guards the wiring in _shell_impl, not
 # just _child_shell_env in isolation.
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("pythonpath", ["", str(_project_root())])
+def test_shell_command_strips_runner_service_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    pythonpath: str,
+) -> None:
+    service_env = {
+        "OMNIGENT_CONFIG_HOME": str(tmp_path / "service-config"),
+        "OMNIGENT_DATA_DIR": str(tmp_path / "service-data"),
+        "OMNIGENT_PROCESS_LOG_FILE": str(tmp_path / "service.log"),
+        "OMNIGENT_RUNNER_ID": "service-runner",
+        "OMNIGENT_RUNNER_FUTURE_SETTING": "service-only",
+    }
+    for name, value in service_env.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("PYTHONPATH", pythonpath)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-account"))
+    helper_env = build_helper_env(os.environ, _inactive_policy())
+    assert all(helper_env[name] == value for name, value in service_env.items())
+
+    names = [*service_env, "CLAUDE_CONFIG_DIR"]
+    script = (
+        f"import json, os; print(json.dumps({{name: os.environ.get(name) for name in {names!r}}}))"
+    )
+    os_env = create_os_environment(
+        OSEnvSpec(
+            type="caller_process",
+            cwd=str(tmp_path),
+            sandbox=OSEnvSandboxSpec(type="none"),
+        )
+    )
+    assert os_env is not None
+    try:
+        result = asyncio.run(os_env.shell(shlex.join([sys.executable, "-c", script])))
+    finally:
+        os_env.close()
+
+    assert result["exit_code"] == 0, result
+    child_env = json.loads(result["stdout"])
+    assert child_env == {
+        **dict.fromkeys(service_env),
+        "CLAUDE_CONFIG_DIR": str(tmp_path / "claude-account"),
+    }
+    assert all(os.environ[name] == value for name, value in service_env.items())
 
 
 def test_shell_command_does_not_see_omnigent_project_root(
