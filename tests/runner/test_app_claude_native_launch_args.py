@@ -1679,7 +1679,7 @@ async def test_claude_terminal_refuses_unknown_account_metadata(
         client.get.side_effect = httpx.ReadTimeout("timeout")
     else:
         client.get.return_value = httpx.Response(503)
-    with pytest.raises(RuntimeError, match="Could not confirm.*Claude account; retry"):
+    with pytest.raises(RuntimeError, match=r"Could not confirm.*Claude account; retry"):
         await orchestration._auto_create_claude_terminal(
             "unknown-account",
             registry,
@@ -1756,11 +1756,9 @@ async def test_ambient_config_folder_does_not_bypass_default_gateway(
     import json
     from unittest.mock import Mock
 
-    from tests._helpers.providers import isolate_provider_resolution
-
-    from omnigent.spec.types import AgentSpec, ExecutorSpec, ProviderAuth
-
     from omnigent.runner.resource_registry import SessionResourceRegistry
+    from omnigent.spec.types import AgentSpec, ExecutorSpec, ProviderAuth
+    from tests._helpers.providers import isolate_provider_resolution
 
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/unregistered/claude")
     monkeypatch.setattr(
@@ -1880,7 +1878,7 @@ async def test_resolved_provider_account_requires_runner_selection(
     async def transcript(*args, **kwargs):
         assert main._claude_project_dir_for_cwd(bridge_dir).is_relative_to(Path(selected))
         stages.append("transcript")
-        return None
+        return
 
     async def catalog(config):
         _, _, env = main._claude_model_probe_invocation(config, ())

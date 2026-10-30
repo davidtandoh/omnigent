@@ -95,7 +95,9 @@ def test_agent_replacement_checks_all_account_sessions(db_uri: str) -> None:
     from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 
     store = SqlAlchemyConversationStore(db_uri)
-    protected = store.create_conversation(agent_id="087b7cb7ac30abf4debfaa578d052ec6", account="private-work")
+    protected = store.create_conversation(
+        agent_id="087b7cb7ac30abf4debfaa578d052ec6", account="private-work"
+    )
     for _ in range(100):
         store.create_conversation(agent_id="087b7cb7ac30abf4debfaa578d052ec6")
     replacement = AgentSpec(

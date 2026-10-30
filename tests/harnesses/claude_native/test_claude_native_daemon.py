@@ -379,7 +379,7 @@ def test_unreadable_session_refuses_resume(
     monkeypatch: pytest.MonkeyPatch, requested: str | None
 ) -> None:
     _session_lookup(monkeypatch, httpx.Response(500, json={"detail": "boom"}))
-    with pytest.raises(click.ClickException, match="Cannot confirm.*Claude account; retry"):
+    with pytest.raises(click.ClickException, match=r"Cannot confirm.*Claude account; retry"):
         claude_native._resumed_session_account(
             base_url="https://e.com", headers={}, session_id="conv_a", requested=requested
         )
