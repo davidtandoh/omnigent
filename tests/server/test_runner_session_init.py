@@ -66,6 +66,7 @@ def _conversation() -> Conversation:
         agent_id="agent_init",
         runner_id="runner_init",
         workspace="/tmp/workspace",
+        account="work",
         labels={"example": "value"},
     )
 
@@ -103,6 +104,7 @@ async def test_initializer_shares_result_for_one_tunnel_generation(
     assert initializer.is_initialized(conversation, client)  # type: ignore[arg-type]
     assert len(client.calls) == 1
     assert client.calls[0]["session_init"]["snapshot"]["workspace"] == "/tmp/workspace"
+    assert client.calls[0]["session_init"]["snapshot"]["account"] == "work"
 
     cached = await initializer.initialize(conversation, client, timeout=10)  # type: ignore[arg-type]
     assert cached is first_response

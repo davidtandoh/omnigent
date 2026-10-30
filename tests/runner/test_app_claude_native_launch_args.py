@@ -1242,6 +1242,7 @@ async def _auto_create_claude_terminal_for_test(
     session_id: str,
     workspace: Path,
     registry: object,
+    account: str | None = None,
 ) -> None:
     """
     Run ``_auto_create_claude_terminal`` with host config and diagnostics stubbed.
@@ -1263,12 +1264,14 @@ async def _auto_create_claude_terminal_for_test(
     monkeypatch.setattr("omnigent.config.load_effective_config", dict)
     monkeypatch.setattr(orchestration, "resolve_cli_binary", lambda _: None)
     monkeypatch.setattr(diagnostics, "ClaudeDebugLogFollower", lambda _: Mock())
+    session_init = _claude_auto_create_session_init(session_id, workspace)
+    session_init.snapshot.account = account
     await orchestration._auto_create_claude_terminal(
         session_id,
         registry,
         Mock(),
         server_client=AsyncMock(spec=httpx.AsyncClient),
-        session_init=_claude_auto_create_session_init(session_id, workspace),
+        session_init=session_init,
         auth_token_factory=lambda: None,
         resolve_launch_config=AsyncMock(return_value=None),
     )
@@ -1577,3 +1580,64 @@ async def test_auto_create_claude_terminal_rejects_missing_env_chdir_target(
     assert sorted(path.name for path in workspace.iterdir()) == []
     assert not (Path.cwd() / config_dir).exists()
     registry.launch_required_terminal.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("account", "runner_dir", "matches"),
+    [
+        ("work", "/accounts/work", True),
+        ("work", None, False),
+        ("work", "/accounts/other", False),
+        (None, "/accounts/work", False),
+    ],
+)
+async def test_reused_runner_must_match_recorded_claude_account(
+    bridge_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    account: str | None,
+    runner_dir: str | None,
+    matches: bool,
+) -> None:
+    from unittest.mock import Mock
+
+    from omnigent.runner.resource_registry import SessionResourceRegistry
+
+    monkeypatch.setattr(
+        "omnigent.config.load_global_config",
+        lambda: {
+            "providers": {
+                "claude-work": {
+                    "kind": "subscription",
+                    "cli": "claude",
+                    "config_dir": "/accounts/work",
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "omnigent.native.launch_environment._installed_native_launch_environment",
+        {"CLAUDE_CONFIG_DIR": runner_dir} if runner_dir else {},
+    )
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.account.ensure_claude_account_signed_in",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge.ensure_claude_workspace_trusted",
+        lambda *args, **kwargs: None,
+    )
+    registry = Mock(spec=SessionResourceRegistry)
+    registry.launch_required_terminal.side_effect = RuntimeError("terminal reached")
+    with pytest.raises(RuntimeError, match="terminal reached" if matches else "config_mismatch"):
+        await _auto_create_claude_terminal_for_test(
+            monkeypatch,
+            session_id="conv_account",
+            workspace=bridge_dir,
+            registry=registry,
+            account=account,
+        )
+    if matches:
+        registry.launch_required_terminal.assert_awaited_once()
+    else:
+        registry.launch_required_terminal.assert_not_called()

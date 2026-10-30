@@ -6240,12 +6240,17 @@ async def _launch_runner_on_host_locked(
     from omnigent.runner.identity import token_bound_runner_id
     from omnigent.server.routes._host_launch import account_launch_refusal
 
+    shared_account_error = (
+        "The session's Claude account could not be used on this host. "
+        "Ask a session manager to check the host configuration and launch logs."
+    )
     if (refusal := account_launch_refusal(conv.account, host_conn)) is not None:
+        _logger.error("Host refused account launch: %s", refusal)
         # Refuse before rotating the binding: no runner is coming.
         return _HostLaunchAttempt(
             runner_id=conv.runner_id or "",
             error_code=HARNESS_NOT_CONFIGURED_ERROR_CODE,
-            error=refusal,
+            error=shared_account_error,
         )
     await host_registry.admit_launch(host_conn, conv.id)
     if conv.runner_id and _resolve_harness(conv) == "codex-native":
@@ -6400,12 +6405,13 @@ async def _launch_runner_on_host_locked(
                     error_category=refusal_category,
                     error_impact=ErrorImpact.BLOCKING.value,
                     error_phase=ErrorPhase.RUNNER_LAUNCH.value,
+                    error_detail=result.get("error"),
                 ),
             )
             return _HostLaunchAttempt(
                 runner_id=new_runner_id,
                 error_code=result.get("error_code"),
-                error=result.get("error"),
+                error=shared_account_error if conv.account is not None else result.get("error"),
             )
         return _HostLaunchAttempt(runner_id=new_runner_id, acknowledged=True)
 
@@ -10351,22 +10357,22 @@ def _resolve_create_account(
             code=ErrorCode.INVALID_INPUT,
         )
     spec_account = _spec_account(spec) if harness == "claude-native" else None
+    chosen = requested or spec_account
+    if parent is not None:
+        if chosen is not None and chosen != parent.account:
+            raise OmnigentError(
+                "A child session runs on its parent's Claude account; "
+                "the requested account conflicts with that account.",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        return None
     if requested is not None and spec_account is not None and requested != spec_account:
         raise OmnigentError(
             f"The agent runs on Claude account {spec_account!r}, "
             f"so the session cannot use account {requested!r}.",
             code=ErrorCode.INVALID_INPUT,
         )
-    chosen = requested or spec_account
-    if parent is None:
-        return chosen
-    if chosen is not None and chosen != parent.account:
-        raise OmnigentError(
-            f"A child session runs on its parent's Claude account "
-            f"({parent.account or 'the default login'}), not {chosen!r}.",
-            code=ErrorCode.INVALID_INPUT,
-        )
-    return None
+    return chosen
 
 
 def _spec_config_flag_explicitly_disabled(spec: AgentSpec, key: str) -> bool:

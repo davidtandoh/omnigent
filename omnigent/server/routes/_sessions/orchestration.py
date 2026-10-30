@@ -168,6 +168,7 @@ from omnigent.server.routes._auth_helpers import (
     attribution_user as _attribution_user,
 )
 from omnigent.server.routes._auth_helpers import (
+    get_permission_level as _get_permission_level,
     require_access as _require_access,
 )
 from omnigent.server.routes._errors import agent_removed as _agent_removed
@@ -11355,6 +11356,7 @@ async def _create_session_from_existing_agent(
     # otherwise a forged parent link lets them inherit runner
     # bindings and establish a parent-child relationship with a
     # session they don't control.
+    parent_permission_level: int | None = None
     if body.parent_session_id is not None:
         await _require_access(
             user_id,
@@ -11362,6 +11364,9 @@ async def _create_session_from_existing_agent(
             LEVEL_READ,
             permission_store,
             conversation_store,
+        )
+        parent_permission_level = await _get_permission_level(
+            user_id, body.parent_session_id, permission_store
         )
 
     # Reject an undeclared sub-agent before persisting the row. Downstream
@@ -12126,6 +12131,8 @@ async def _create_session_from_existing_agent(
         conversation=conv,
         request=request,
     )
+    if parent_permission_level is not None and parent_permission_level < LEVEL_MANAGE:
+        response.account = None
     return response, conv
 
 

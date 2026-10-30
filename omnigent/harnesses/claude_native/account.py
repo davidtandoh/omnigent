@@ -92,8 +92,9 @@ def ensure_spec_account_selected(
     requested_config_dir: str | None,
     *,
     config: dict[str, object] | None = None,
+    session_account: str | None = None,
 ) -> None:
-    """Refuse when the agent spec names an extra account this launch does not use.
+    """Require the runner to use the session and agent spec Claude account.
 
     An agent whose ``executor.auth`` names an extra Claude account must run on
     that account, never silently on the default login or another account.
@@ -103,27 +104,48 @@ def ensure_spec_account_selected(
     :param requested_config_dir: The launch's ``CLAUDE_CONFIG_DIR``, or ``None``
         for the default login.
     :param config: Parsed user config; ``None`` reads the global config.
-    :raises RuntimeError: If the spec's account is not the launch's account.
+    :param session_account: The session's recorded account name, or ``None`` for default.
+    :raises RuntimeError: If the session or spec account does not match the runner.
     """
-    if spec_provider is None:
-        return
     from omnigent.config import load_global_config
-    from omnigent.onboarding.claude_accounts import account_name_from_provider
+    from omnigent.onboarding.claude_accounts import (
+        account_launch_environment,
+        account_name_for_config_dir,
+        account_name_from_provider,
+    )
     from omnigent.onboarding.provider_config import load_providers
 
-    account = account_name_from_provider(spec_provider)
-    if account is None:
+    spec_account = account_name_from_provider(spec_provider) if spec_provider else None
+    if session_account is None and spec_account is None and not requested_config_dir:
         return
-    entry = load_providers(load_global_config() if config is None else config).get(spec_provider)
-    if entry is not None and entry.config_dir is None:
-        # A ``claude-*`` provider that is not an extra account, e.g. a gateway.
+    config = load_global_config() if config is None else config
+    if spec_account is not None:
+        entry = load_providers(config).get(spec_provider)
+        if entry is None or (
+            entry.config_dir is not None and entry.config_dir != requested_config_dir
+        ):
+            raise RuntimeError(
+                f"config_mismatch: this agent runs on Claude account {spec_account!r}. "
+                f"Check that {_account_label(spec_account)} is set up, then launch "
+                "a new runner for this account."
+            )
+    if session_account is not None:
+        import socket
+
+        expected = account_launch_environment(
+            session_account, None, host_name=socket.gethostname(), config=config
+        ).get("CLAUDE_CONFIG_DIR")
+        if expected == (requested_config_dir or None):
+            return
+    elif (
+        not requested_config_dir
+        or account_name_for_config_dir(config, requested_config_dir) is None
+    ):
         return
-    if entry is not None and entry.config_dir == requested_config_dir:
-        return
+    subject = _account_label(session_account) if session_account else "the default Claude login"
     raise RuntimeError(
-        f"native-claude: this agent runs on Claude account {account!r}, but the session "
-        f"does not. Check that {_account_label(account)} is set up, then start a "
-        "new session for this agent so it records that account."
+        f"config_mismatch: this session requires {subject}, but this runner uses "
+        "a different Claude account. Launch a new runner for this session."
     )
 
 

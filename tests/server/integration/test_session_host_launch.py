@@ -906,6 +906,7 @@ async def test_inline_create_harness_not_configured_stays_lenient(
         "launch_error",
         "expected_fragments",
         "wrapper_command",
+        "account",
     ),
     [
         (
@@ -914,6 +915,7 @@ async def test_inline_create_harness_not_configured_stays_lenient(
             _HARNESS_REFUSAL,
             ("omnigent setup", "harness 'codex' is not configured"),
             None,
+            None,
         ),
         (
             HARNESS_NOT_CONFIGURED_ERROR_CODE,
@@ -921,12 +923,14 @@ async def test_inline_create_harness_not_configured_stays_lenient(
             "",
             ("isaac omni setup",),
             "isaac omni",
+            None,
         ),
         (
             WORKSPACE_MISSING_ERROR_CODE,
             WORKSPACE_MISSING_ERROR_CODE,
             "runner log tail: SECRET_TOKEN\nforged workspace failure",
             ("workspace path does not exist", "/work/repo"),
+            None,
             None,
         ),
         (
@@ -935,6 +939,7 @@ async def test_inline_create_harness_not_configured_stays_lenient(
             "workspace path does not exist: /work/repo",
             ("workspace path does not exist", "/work/repo"),
             None,
+            None,
         ),
         (
             "runner_crashed",
@@ -942,6 +947,15 @@ async def test_inline_create_harness_not_configured_stays_lenient(
             "runner log tail: private output",
             (),
             None,
+            None,
+        ),
+        (
+            HARNESS_NOT_CONFIGURED_ERROR_CODE,
+            HARNESS_NOT_CONFIGURED_ERROR_CODE,
+            "Claude account 'private-work' is not set up on host 'mac-mini'",
+            ("session manager", "launch logs"),
+            None,
+            "private-work",
         ),
     ],
 )
@@ -955,6 +969,7 @@ async def test_message_relaunch_deterministic_failure_persists_error_turn(
     launch_error: str,
     expected_fragments: tuple[str, ...],
     wrapper_command: str | None,
+    account: str | None,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A deterministic host relaunch refusal persists user msg + error.
@@ -991,17 +1006,25 @@ async def test_message_relaunch_deterministic_failure_persists_error_turn(
     )
     caplog.set_level(logging.WARNING)
 
-    comm = await _connect_host(app)
+    comm = await _connect_host(app, capabilities=[CAP_CLAUDE_ACCOUNT])
     agent = await create_test_agent(
         client,
-        executor={"type": "omnigent", "config": {"harness": "codex"}},
+        executor={
+            "type": "omnigent",
+            "config": {"harness": "claude-native" if account else "codex"},
+        },
     )
     # Create with a successful create-time launch so the session binds a
     # runner_id (the fake runner never actually connects).
     create_responder = asyncio.create_task(_serve_one_launch(comm, launch_status="launched"))
     create_resp = await client.post(
         "/v1/sessions",
-        json={"agent_id": agent["id"], "host_id": _HOST_ID, "workspace": _WORKSPACE},
+        json={
+            "agent_id": agent["id"],
+            "host_id": _HOST_ID,
+            "workspace": _WORKSPACE,
+            "account": account,
+        },
     )
     await create_responder
     assert create_resp.status_code == 201, create_resp.text
@@ -1080,6 +1103,9 @@ async def test_message_relaunch_deterministic_failure_persists_error_turn(
     assert error_items[0]["code"] == expected_error_code
     for fragment in expected_fragments:
         assert fragment in error_items[0]["message"]
+    if account:
+        assert account not in error_items[0]["message"]
+        assert account in refusal.attributes["error_detail"]
     if expected_error_code == WORKSPACE_MISSING_ERROR_CODE:
         assert error_items[0]["message"] == "workspace path does not exist: /work/repo"
         assert "SECRET_TOKEN" not in error_items[0]["message"]
@@ -2663,7 +2689,8 @@ async def test_older_host_is_never_sent_an_account(
     items = (await client.get(f"/v1/sessions/{session_id}/items")).json()["data"]
     [error] = [item for item in items if item.get("type") == "error"]
     assert error["code"] == HARNESS_NOT_CONFIGURED_ERROR_CODE
-    assert "'work'" in error["message"] and "Upgrade Omnigent" in error["message"]
+    assert "work" not in error["message"]
+    assert "session manager" in error["message"]
 
 
 async def test_agent_spec_that_names_an_account_records_it(

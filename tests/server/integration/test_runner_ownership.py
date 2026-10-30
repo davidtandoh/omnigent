@@ -21,7 +21,7 @@ import pytest
 from fastapi import FastAPI
 
 from omnigent.errors import ErrorCode
-from omnigent.server.auth import LEVEL_EDIT, LEVEL_OWNER, LEVEL_READ
+from omnigent.server.auth import LEVEL_EDIT, LEVEL_MANAGE, LEVEL_OWNER, LEVEL_READ
 from omnigent.stores.conversation_store import SIDE_CHAT_LABEL_KEY, SIDE_CHAT_SOURCE_LABEL_KEY
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.host_store import HostStore
@@ -505,3 +505,37 @@ async def test_no_auth_runner_listing_shows_all(
     # Both runners visible without auth.
     assert "runner_dev_a" in runner_ids, "runner_dev_a should be visible in no-auth mode."
     assert "runner_dev_b" in runner_ids, "runner_dev_b should be visible in no-auth mode."
+
+
+@pytest.mark.parametrize("level", [LEVEL_READ, LEVEL_MANAGE])
+async def test_child_create_keeps_account_private_from_parent_readers(
+    auth_client: httpx.AsyncClient, db_uri: str, level: int
+) -> None:
+    agent = await create_test_agent(
+        auth_client,
+        user=ALICE,
+        executor={"type": "omnigent", "config": {"harness": "claude-native"}},
+    )
+    parent_resp = await auth_client.post(
+        "/v1/sessions",
+        json={"agent_id": agent["id"], "account": "private-work"},
+        headers={"X-Forwarded-Email": ALICE},
+    )
+    assert parent_resp.status_code == 201, parent_resp.text
+    parent_id = parent_resp.json()["id"]
+    for session_id in (parent_id, agent["_session_id"]):
+        grant = await auth_client.put(
+            f"/v1/sessions/{session_id}/permissions",
+            json={"user_id": BOB, "level": level},
+            headers={"X-Forwarded-Email": ALICE},
+        )
+        assert grant.status_code == 200, grant.text
+    response = await auth_client.post(
+        "/v1/sessions",
+        json={"agent_id": agent["id"], "parent_session_id": parent_id},
+        headers={"X-Forwarded-Email": BOB},
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["account"] == ("private-work" if level == LEVEL_MANAGE else None)
+    child = SqlAlchemyConversationStore(db_uri).get_conversation(response.json()["id"])
+    assert child is not None and child.account == "private-work"

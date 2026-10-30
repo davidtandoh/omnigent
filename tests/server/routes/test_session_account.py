@@ -90,13 +90,15 @@ def test_child_keeps_its_parents_account(parent_account: str, requested: str | N
 
 @pytest.mark.parametrize(("parent_account", "requested"), [("work", "client-a"), (None, "work")])
 def test_child_cannot_switch_accounts(parent_account: str | None, requested: str) -> None:
-    with pytest.raises(OmnigentError, match="parent's Claude account"):
+    with pytest.raises(OmnigentError, match="parent's Claude account") as caught:
         _resolve_create_account(
             requested=requested,
             spec=None,
             harness="claude-native",
             parent=_parent(parent_account),
         )
+    if parent_account:
+        assert parent_account not in str(caught.value)
 
 
 def _conn(capabilities: list[str]) -> SimpleNamespace:
@@ -109,3 +111,14 @@ def test_account_launch_refusal_requires_host_support() -> None:
     refusal = account_launch_refusal("work", _conn([]))  # type: ignore[arg-type]
     assert refusal is not None
     assert "'work'" in refusal and "'mac-mini'" in refusal and "Upgrade Omnigent" in refusal
+
+
+def test_child_spec_conflict_does_not_reveal_the_parent_account() -> None:
+    with pytest.raises(OmnigentError) as caught:
+        _resolve_create_account(
+            requested="client-a",
+            spec=_spec("claude-work"),
+            harness="claude-native",
+            parent=_parent("work"),
+        )
+    assert "work" not in str(caught.value)

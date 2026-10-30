@@ -7631,12 +7631,15 @@ def _codex_native_model_from_spec(agent_spec: AgentSpec | ResolvedSpec | None) -
 
 
 def _ensure_spec_account_selected(
-    agent_spec: AgentSpec | ResolvedSpec | None, requested_config_dir: str | None
+    agent_spec: AgentSpec | ResolvedSpec | None,
+    requested_config_dir: str | None,
+    session_account: str | None,
 ) -> None:
     """Refuse a launch whose agent spec names a Claude account it does not use.
 
     :param agent_spec: Agent spec object, or a resolved wrapper; ``None`` passes.
     :param requested_config_dir: This runner's launch ``CLAUDE_CONFIG_DIR``.
+    :param session_account: The session's recorded account name, or ``None`` for default.
     """
     from omnigent.harnesses.claude_native.account import ensure_spec_account_selected
     from omnigent.spec.types import ProviderAuth
@@ -7644,7 +7647,9 @@ def _ensure_spec_account_selected(
     spec = agent_spec.spec if isinstance(agent_spec, ResolvedSpec) else agent_spec
     auth = spec.executor.auth if spec is not None else None
     ensure_spec_account_selected(
-        auth.name if isinstance(auth, ProviderAuth) else None, requested_config_dir
+        auth.name if isinstance(auth, ProviderAuth) else None,
+        requested_config_dir,
+        session_account=session_account,
     )
 
 
@@ -8735,6 +8740,7 @@ def _routed_spawn_launch_args(
 class _ClaudeSessionLaunchMetadata:
     """Persisted values consumed by Claude terminal launch."""
 
+    account: str | None = None
     reasoning_effort: str | None = None
     model_override: str | None = None
     terminal_launch_args: list[str] | None = None
@@ -8780,6 +8786,7 @@ def _claude_launch_metadata_from_envelope(
         routing_enabled=routing_class.routing_enabled,
         auto_harness=routing_class.auto_harness,
         turn_routing=routing_class.turn_routing,
+        account=snapshot.account,
         reasoning_effort=snapshot.reasoning_effort,
         model_override=snapshot.model_override,
         terminal_launch_args=snapshot.terminal_launch_args,
@@ -8836,6 +8843,7 @@ async def _load_legacy_claude_launch_metadata(
         routing_enabled=routing_class.routing_enabled,
         auto_harness=routing_class.auto_harness,
         turn_routing=routing_class.turn_routing,
+        account=snapshot.get("account") if isinstance(snapshot.get("account"), str) else None,
         reasoning_effort=effort if isinstance(effort, str) and effort else None,
         model_override=(
             model_override if isinstance(model_override, str) and model_override else None
@@ -9784,7 +9792,12 @@ async def _auto_create_claude_terminal(
         requested_account = native_launch_environment().get("CLAUDE_CONFIG_DIR")
         launch_env = _claude_terminal_launch_env(env_spec)
         launch_cwd = _claude_terminal_launch_cwd(env_spec, agent_os_env)
-        await asyncio.to_thread(_ensure_spec_account_selected, agent_spec, requested_account)
+        await asyncio.to_thread(
+            _ensure_spec_account_selected,
+            agent_spec,
+            launch_env.get("CLAUDE_CONFIG_DIR"),
+            launch_metadata.account,
+        )
         if requested_account is not None:
             from omnigent.harnesses.claude_native.account import ensure_claude_account_signed_in
             from omnigent.host.harness_startup import env_wrapper_command
