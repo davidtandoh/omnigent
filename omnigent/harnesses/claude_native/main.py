@@ -137,8 +137,8 @@ from omnigent.models.claude_model_vocabulary import (
     claude_model_alias,
     served_canonical_overrides,
 )
-from omnigent.native.launch_environment import native_launch_environment
 from omnigent.native._native_resume_hint import echo_native_resume_hint
+from omnigent.native.launch_environment import native_launch_environment
 from omnigent.native.native_coding_agents import native_shell_terminal_spec
 from omnigent.native.native_terminal import (
     DAEMON_HOST_ONLINE_TIMEOUT_S as _DAEMON_HOST_ONLINE_TIMEOUT_S,
@@ -2675,7 +2675,7 @@ def _clone_claude_transcript(
 
     Used to carry a forked claude-native session's history into the
     clone. We copy the source transcript ourselves into the clone's OWN
-    project dir (``~/.claude/projects/<enc(clone_workspace)>/``) under a
+    project dir in the selected account's ``projects`` folder under a
     uuid we assign, rewriting per-record ``sessionId`` →
     *target_external_session_id* and ``cwd`` → *clone_workspace* (the
     ``uuid`` / ``parentUuid`` chain is preserved). The clone then
@@ -5538,7 +5538,7 @@ async def _ensure_local_claude_resume_transcript(
 
     Cross-machine resume has the Omnigent conversation and Claude external
     session id on the server, but not Claude Code's local
-    ``~/.claude/projects/<cwd>/<sid>.jsonl`` file. Claude's
+    ``projects/<cwd>/<sid>.jsonl`` file in the selected account's folder. Claude's
     ``--resume <sid>`` consults that local project transcript. The
     wrapper always rewrites it from committed Omnigent items before launch so
     Omnigent remains the source of truth when a previous local Claude JSONL
@@ -5550,8 +5550,8 @@ async def _ensure_local_claude_resume_transcript(
     :param external_session_id: Claude-native session id, e.g.
         ``"02857840-6362-408f-b41f-309e396ed7c6"``.
     :param workspace: Resolved directory Claude will run in — its
-        ``~/.claude/projects/<encoded-workspace>/`` is where the
-        transcript must land for ``--resume`` to find it. The CLI
+        encoded project directory in the selected account's ``projects`` folder
+        is where the transcript must land for ``--resume`` to find it. The CLI
         passes ``Path.cwd()``; a runner-side launch passes its
         ``OMNIGENT_RUNNER_WORKSPACE``. Pass an already-resolved
         path (symlinks collapsed) so the project-dir encoding matches

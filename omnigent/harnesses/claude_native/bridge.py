@@ -2493,7 +2493,7 @@ def build_hook_settings(
         # to ``"in_progress"``). The payload carries ``tool_input.taskId``
         # and ``tool_input.status``.
         # ``EnterWorktree`` / ``ExitWorktree`` move the session transcript
-        # into the new cwd's ``~/.claude/projects/<slug>/`` dir; observing
+        # into the new cwd's project dir in the selected account; observing
         # them hands the forwarder the moved path now, not at the turn's Stop.
         "PostToolUse": [
             {"matcher": "TodoWrite", "hooks": [hook]},

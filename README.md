@@ -359,12 +359,17 @@ supported. Adding an account always runs `claude auth login --claudeai`, even
 if its retained folder already reports signed in. Pass
 `--account` again when you resume the session, because Omnigent does not store
 the account with the session. Resume lookup and transcript relocation use the
-selected account's folder, including when the original workspace is gone. The web UI and agent specs still use the default
-login. An extra account cannot be a default. Setup lists each account as
-**Subscription (claude-work)**. When an account's sign-in expires, select it
-and choose **Sign in again**, which runs `claude auth login` for that account
-only. Removing an account signs out only that account and keeps its folder,
-so adding the same name again restores its sessions.
+selected account's folder, including when the original workspace is gone.
+New sessions read reasoning effort from that account's `settings.json`;
+an explicit `--effort` takes precedence. The web UI and agent specs do not
+expose this account selector. An extra account cannot be a default. Setup
+lists each account as **Subscription (claude-work)**. When an account's
+sign-in expires, select it and choose **Sign in again**, which runs
+`claude auth login --claudeai` for that account only. Removing an account
+attempts to sign out only that account,
+removes its provider entry, and keeps its folder. If sign-out cannot be
+confirmed, setup warns that the login may remain. Adding the same name again
+reuses its sessions.
 
 On macOS, Claude stores each sign-in in the login keychain, which an SSH
 session cannot open. Over SSH, setup refuses the login step and exits with an
