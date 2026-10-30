@@ -9358,6 +9358,7 @@ async def _auto_create_claude_terminal(
         resolve_bound_model,
     )
 
+    inference_config = None
     claude_binding = None
     if "CLAUDE_CONFIG_DIR" not in native_launch_environment():
         inference_config = load_runtime_inference_config()
@@ -9415,7 +9416,7 @@ async def _auto_create_claude_terminal(
         if session_model_override
         else unpinned_launch_model
     )
-    if claude_binding is not None:
+    if claude_binding is not None and inference_config is not None:
         unpinned_launch_model = resolve_bound_model(
             inference_config, "claude-native", _claude_native_model_from_spec(agent_spec)
         )
