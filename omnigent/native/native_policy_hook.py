@@ -31,6 +31,7 @@ from typing import NotRequired, TypedDict
 
 import httpx
 
+from omnigent.runner.identity import runner_helper_environment
 from omnigent.util.http_retry import bounded_retry_after_seconds
 
 # How long to keep retrying transient 429 / 5xx / connect errors on the
@@ -182,8 +183,13 @@ def policy_hook_wrapper_script(server_url: str, session_id: str, hook_script_pat
     factory = _make_auth_token_factory(server_url=server_url)
     token = factory() if factory is not None else None
     auth_headers = databricks_request_headers(server_url, bearer_token=token)
+    helper_exports = "".join(
+        f"export {name}={shlex.quote(value)}\n"
+        for name, value in runner_helper_environment().items()
+    )
     return (
         "#!/bin/sh\n"
+        f"{helper_exports}"
         f"export _OMNIGENT_SERVER_URL={shlex.quote(server_url)}\n"
         f"export _OMNIGENT_SESSION_ID={shlex.quote(session_id)}\n"
         f"export {_AUTH_HEADERS_ENV}={shlex.quote(json.dumps(auth_headers))}\n"

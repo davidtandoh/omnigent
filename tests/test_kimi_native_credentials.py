@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import os
+import shlex
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -12,6 +17,40 @@ from omnigent.harnesses.kimi_native.credentials import (
     build_kimi_session_home,
     render_kimi_hooks_toml,
 )
+from omnigent.runner.identity import strip_runner_service_env
+
+
+def test_generated_hooks_restore_service_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = {
+        "OMNIGENT_CONFIG_HOME": str(tmp_path / "config 'quoted'"),
+        "OMNIGENT_DATA_DIR": str(tmp_path / 'data "quoted" \\ path'),
+        "OMNIGENT_RUNNER_SLICE_KEY": "replica-a",
+    }
+    for name, value in expected.items():
+        monkeypatch.setenv(name, value)
+    probe = tmp_path / "python-probe"
+    script = (
+        "import json, os; "
+        f"print(json.dumps({{key: os.environ.get(key) for key in {list(expected)!r}}}))"
+    )
+    probe.write_text(f"#!/bin/sh\nexec {shlex.join([sys.executable, '-c', script])}\n")
+    probe.chmod(0o700)
+    config = tomllib.loads(
+        render_kimi_hooks_toml(bridge_dir=tmp_path, python_executable=str(probe))
+    )
+    pane_env = strip_runner_service_env(os.environ)
+    for hook in config["hooks"]:
+        result = subprocess.run(
+            ["/bin/sh", "-c", hook["command"]],
+            env=pane_env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert json.loads(result.stdout) == expected
+    assert all(name not in pane_env for name in expected)
 
 
 def _fake_user_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:

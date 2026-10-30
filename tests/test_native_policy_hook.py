@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+from pathlib import Path
+
 import httpx
 import pytest
 
@@ -14,6 +19,45 @@ from omnigent.native.native_policy_hook import (
     hook_payload_to_evaluation_request,
     post_evaluate_with_retry,
 )
+from omnigent.runner.identity import strip_runner_service_env
+
+
+def test_policy_wrapper_restores_service_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import omnigent.cli_auth as cli_auth
+    import omnigent.runner._entry as entry
+
+    monkeypatch.setattr(entry, "_make_auth_token_factory", lambda **kwargs: None)
+    monkeypatch.setattr(cli_auth, "databricks_request_headers", lambda *args, **kwargs: {})
+    expected = {
+        "OMNIGENT_CONFIG_HOME": str(tmp_path / "config 'quoted'"),
+        "OMNIGENT_DATA_DIR": str(tmp_path / 'data "quoted" \\ path'),
+        "OMNIGENT_RUNNER_SLICE_KEY": "replica-a",
+    }
+    for name, value in expected.items():
+        monkeypatch.setenv(name, value)
+    hook = tmp_path / "hook probe.py"
+    hook.write_text(
+        "import json, os\n"
+        f"print(json.dumps({{key: os.environ.get(key) for key in {list(expected)!r}}}))\n"
+    )
+    wrapper = tmp_path / "hook.sh"
+    wrapper.write_text(
+        native_policy_hook.policy_hook_wrapper_script(
+            "http://localhost:6767", "conv-test", str(hook)
+        )
+    )
+    pane_env = strip_runner_service_env(os.environ)
+    result = subprocess.run(
+        ["/bin/sh", str(wrapper)],
+        env=pane_env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(result.stdout) == expected
+    assert all(name not in pane_env for name in expected)
 
 
 def test_pre_tool_use_maps_to_phase_tool_call() -> None:
