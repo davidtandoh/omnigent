@@ -9,6 +9,7 @@ import logging
 import os
 
 from omnigent.debug_logging import runner_primary_session_id
+from omnigent.native.launch_environment import native_launch_environment
 from omnigent.runner.background_titles.service import (
     BACKGROUND_TITLE_INFERENCE_TIMEOUT_SECONDS,
     BackgroundTitleContext,
@@ -32,16 +33,18 @@ async def generate_background_title(context: BackgroundTitleContext) -> str | No
     )
     from omnigent.runner.native.orchestration import _claude_terminal_env_unset
 
-    try:
-        claude_config = await asyncio.to_thread(resolve_native_claude_config, spec=None)
-    except Exception:  # match the native terminal's auth fallback
-        _logger.warning(
-            "background Claude Code title could not resolve provider config; "
-            "falling back to Claude Code's native login",
-            exc_info=True,
-            extra={"session_id": runner_primary_session_id()},
-        )
-        claude_config = None
+    launch_env = native_launch_environment()
+    claude_config = None
+    if "CLAUDE_CONFIG_DIR" not in launch_env:
+        try:
+            claude_config = await asyncio.to_thread(resolve_native_claude_config, spec=None)
+        except Exception:
+            _logger.warning(
+                "background Claude Code title skipped: provider config could not be resolved",
+                exc_info=True,
+                extra={"session_id": runner_primary_session_id()},
+            )
+            return None
     effective_model = (
         context.title_model
         or context.spawn_env.get("HARNESS_CLAUDE_SDK_MODEL")
@@ -94,6 +97,7 @@ async def generate_background_title(context: BackgroundTitleContext) -> str | No
                 return None
     env = dict(os.environ)
     env.update(build_native_claude_terminal_env(claude_config))
+    env.update(launch_env)
     for name in _claude_terminal_env_unset(claude_config):
         env.pop(name, None)
 

@@ -76,7 +76,7 @@ from omnigent.server.background_session_titles import (
 from omnigent.server.bundles import agent_needs_own_copy, copy_agent_bundle, validate_agent_bundle
 from omnigent.server.creation_logging import creation_metadata, creation_stage, session_created
 from omnigent.server.host_registry import HostRegistry, RunnerExitReports
-from omnigent.server.permissions import check_session_access
+from omnigent.server.permissions import check_session_access, session_account_for_viewer
 from omnigent.server.routes._auth_helpers import (
     get_permission_level as _get_permission_level,
 )
@@ -1155,6 +1155,9 @@ def register_core_routes(
                     LEVEL_OWNER,
                 )
             resp.permission_level = grant.level
+            resp.account = await asyncio.to_thread(
+                session_account_for_viewer, user_id, conv, permission_store, conversation_store
+            )
         await _accept_initial_input(request, resp.id, body.initial_input, user_id)
         # Managed host: schedule a BACKGROUND sandbox provision bound
         # to this session and return immediately — provisioning takes
@@ -1659,6 +1662,7 @@ def register_core_routes(
             sandbox_config=getattr(request.app.state, "sandbox_config", None),
             viewer_id=user_id,
             request=request,
+            permission_store=permission_store,
         )
 
     @router.get(
@@ -3569,6 +3573,7 @@ def register_core_routes(
             runner_exit_reports=runner_exit_reports,
             viewer_id=user_id,
             request=request,
+            permission_store=permission_store,
         )
 
     # ── POST /sessions/{source_id}/fork ─────────────────────────
@@ -3937,9 +3942,10 @@ def register_core_routes(
             if copy_model_settings and source.harness_override
             else await asyncio.to_thread(_agent_harness, base_agent)
         )
-        copy_account = fork_harness == "claude-native" and (
-            access.level is None or access.level >= LEVEL_MANAGE
+        source_account = await asyncio.to_thread(
+            session_account_for_viewer, user_id, source, permission_store, conversation_store
         )
+        copy_account = fork_harness == "claude-native" and source_account is not None
         resume_source_native_session = (
             (not switching_agent or copy_model_settings)
             and not target_is_cursor
@@ -4241,6 +4247,9 @@ def register_core_routes(
             list(reversed(fork_items.data)),
             "idle",
             permission_level=level,
+            account=await asyncio.to_thread(
+                session_account_for_viewer, user_id, new_conv, permission_store, conversation_store
+            ),
             last_task_error=None,
             agent_name=base_agent.name,
         )

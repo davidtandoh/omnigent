@@ -1641,3 +1641,43 @@ async def test_reused_runner_must_match_recorded_claude_account(
         registry.launch_required_terminal.assert_awaited_once()
     else:
         registry.launch_required_terminal.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["timeout", "non-200"])
+async def test_claude_terminal_refuses_unknown_account_metadata(
+    bridge_dir: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    from unittest.mock import AsyncMock, Mock
+
+    import httpx
+
+    from omnigent.runner.native import orchestration
+    from omnigent.runner.resource_registry import SessionResourceRegistry
+
+    monkeypatch.setenv("RUNNER_SERVER_URL", "http://server")
+    registry = Mock(spec=SessionResourceRegistry)
+    client = AsyncMock(spec=httpx.AsyncClient)
+    if failure == "timeout":
+        client.get.side_effect = httpx.ReadTimeout("timeout")
+    else:
+        client.get.return_value = httpx.Response(503)
+    with pytest.raises(RuntimeError, match="Could not confirm.*Claude account; retry"):
+        await orchestration._auto_create_claude_terminal(
+            "unknown-account",
+            registry,
+            Mock(),
+            server_client=client,
+            auth_token_factory=lambda: None,
+        )
+    registry.launch_required_terminal.assert_not_called()
+
+
+async def test_successful_legacy_lookup_without_account_means_default() -> None:
+    import httpx
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})),
+        base_url="http://server",
+    ) as client:
+        metadata = await _load_legacy_claude_launch_metadata(client, "default-account")
+    assert metadata.account_known and metadata.account is None

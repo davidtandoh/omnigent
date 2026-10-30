@@ -8741,6 +8741,7 @@ class _ClaudeSessionLaunchMetadata:
     """Persisted values consumed by Claude terminal launch."""
 
     account: str | None = None
+    account_known: bool = True
     reasoning_effort: str | None = None
     model_override: str | None = None
     terminal_launch_args: list[str] | None = None
@@ -8817,12 +8818,12 @@ async def _load_legacy_claude_launch_metadata(
         )
     except httpx.HTTPError:
         _logger.debug(
-            "Could not fetch session launch config for %s; terminal will use Claude's defaults",
+            "Could not confirm session launch config for %s",
             session_id,
         )
-        return _ClaudeSessionLaunchMetadata()
+        return _ClaudeSessionLaunchMetadata(account_known=False)
     if response.status_code != 200:
-        return _ClaudeSessionLaunchMetadata()
+        return _ClaudeSessionLaunchMetadata(account_known=False)
 
     snapshot = response.json()
     effort = snapshot.get("reasoning_effort")
@@ -9169,6 +9170,8 @@ async def _auto_create_claude_terminal(
         session_id=session_id,
         session_init=session_init,
     )
+    if not launch_metadata.account_known:
+        raise RuntimeError("Could not confirm this session's Claude account; retry.")
     session_effort = launch_metadata.reasoning_effort
     session_model_override = launch_metadata.model_override
     session_launch_args = launch_metadata.terminal_launch_args

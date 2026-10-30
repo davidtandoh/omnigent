@@ -2812,7 +2812,6 @@ def test_fork_counts_files_recorded_for_filesystem_delivery(
     [
         ({}, "claude-native", None, "work", True),
         ({}, "claude-native", 3, "work", True),
-        ({}, "claude-native", 1, None, True),
         ({"agent_id": "280d725b404d2915f9e9d6cccce91303"}, "codex-native", None, None, False),
     ],
 )

@@ -1005,6 +1005,12 @@ async def test_ensure_terminal_route_recreates_dead_registered_pane(
     :returns: None.
     """
     sid = "deadbeef12345678deadbeef12345678"
+    from omnigent.entities import Conversation
+    from omnigent.runner.session_init_protocol import (
+        RunnerSessionInitEnvelope,
+        build_runner_session_init_payload,
+    )
+
     auto_create_calls: list[str] = []
 
     async def _stub_auto_create(
@@ -1013,6 +1019,9 @@ async def test_ensure_terminal_route_recreates_dead_registered_pane(
         publish_event: object,
         **_kwargs: object,
     ) -> SessionResourceView:
+        envelope = _kwargs.get("session_init")
+        assert isinstance(envelope, RunnerSessionInitEnvelope)
+        assert envelope.snapshot.account == "work"
         auto_create_calls.append(session_id)
         return SessionResourceView(
             id="terminal_claude_main", type="terminal", session_id=session_id, name="re-created"
@@ -1054,6 +1063,24 @@ async def test_ensure_terminal_route_recreates_dead_registered_pane(
     )
 
     async with _runner_client(app) as client:
+        initialized = await client.post(
+            "/v1/sessions",
+            json=build_runner_session_init_payload(
+                Conversation(
+                    id=sid,
+                    agent_id="agent",
+                    created_at=0,
+                    updated_at=0,
+                    root_conversation_id=sid,
+                    account="work",
+                    workspace=str(tmp_path),
+                    harness_override="claude-native",
+                ),
+                server_version="test",
+            ),
+        )
+        assert initialized.status_code == 201, initialized.text
+        auto_create_calls.clear()
         if cached_predecessor:
             predecessor = make_test_terminal_instance("claude", "main", tmp_path / "old")
             with registry._lock:

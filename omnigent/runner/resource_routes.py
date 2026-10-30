@@ -67,6 +67,7 @@ from omnigent.runner.resource_registry import (
     QWEN_NATIVE_TERMINAL_ROLE,
     SessionResourceRegistry,
 )
+from omnigent.runner.session_init_protocol import RunnerSessionInitEnvelope
 from omnigent.spec.types import AgentSpec
 from omnigent.terminals.control_bridge import bridge_tmux_control_to_websocket
 from omnigent.terminals.ws_common import WS_CLOSE_TERMINAL_NOT_FOUND
@@ -111,6 +112,7 @@ def register_resource_routes(
     _discard_comment_relay: Callable[[str, ClaudeNativeToolRelay], None],
     _ensure_comment_relay_started: _EnsureCommentRelayStartedFn,
     _ensure_session_registered: Callable[[str], Coroutine[Any, Any, None]],
+    _fresh_session_init_envelope: Callable[[str], RunnerSessionInitEnvelope | None],
     _goose_terminal_ensure_locks: dict[str, asyncio.Lock],
     _hermes_terminal_ensure_locks: dict[str, asyncio.Lock],
     _kimi_terminal_ensure_locks: dict[str, asyncio.Lock],
@@ -399,6 +401,7 @@ def register_resource_routes(
                 event_dispatcher=getattr(app.state, "runner_event_dispatcher", None),
                 ensure_comment_relay=_ensure_comment_relay_started,
                 rebind_bridge=_rebind_claude_bridge,
+                session_init=_fresh_session_init_envelope(session_id),
             )
             _ensure_build: (
                 Callable[[NativeLaunchContext], Awaitable[NativeLaunchContext]] | None

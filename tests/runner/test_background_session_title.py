@@ -1468,3 +1468,52 @@ async def test_background_title_timeout_releases_process(
     assert response.json()["error"] == "title_harness_timeout"
     [process_key] = process_manager.released
     assert uuid.UUID(process_key).hex == process_key
+
+
+async def test_claude_title_uses_the_runners_selected_account(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "omnigent.native.launch_environment._installed_native_launch_environment",
+        {"CLAUDE_CONFIG_DIR": "/accounts/work"},
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ambient-key")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example")
+
+    def forbidden_provider_lookup(**kwargs):
+        raise AssertionError("selected account must bypass gateway configuration")
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"Account title", b""
+
+    async def spawn(command: str, *args: str, **kwargs: Any) -> FakeProcess:
+        captured.update(args=args, env=kwargs["env"])
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.main.resolve_native_claude_config",
+        forbidden_provider_lookup,
+    )
+    monkeypatch.setattr("omnigent._platform.resolve_cli_binary", lambda name: None)
+    monkeypatch.setattr(
+        "omnigent.claude_launcher.resolve_claude_launch", lambda command, args: (command, args)
+    )
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    title = await claude_native_titles.generate_background_title(
+        BackgroundTitleContext(
+            prompt="name this task",
+            harness="claude-native",
+            spawn_env={},
+            process_manager=None,
+            cwd=tmp_path,
+        )
+    )
+    assert title == "Account title"
+    assert captured["env"]["CLAUDE_CONFIG_DIR"] == "/accounts/work"
+    assert "ANTHROPIC_API_KEY" not in captured["env"]
+    assert "ANTHROPIC_BASE_URL" not in captured["env"]
+    assert "--settings" not in captured["args"]

@@ -135,7 +135,6 @@ from omnigent.server._elicitation_registry import (
 )
 from omnigent.server.auth import (
     LEVEL_EDIT,
-    LEVEL_MANAGE,
     LEVEL_READ,
 )
 from omnigent.server.background_session_titles import (
@@ -163,12 +162,11 @@ from omnigent.server.managed_hosts import (
     parse_repo_workspace,
     read_managed_repo_workspaces,
 )
-from omnigent.server.permissions import check_session_access
+from omnigent.server.permissions import check_session_access, session_account_for_viewer
 from omnigent.server.routes._auth_helpers import (
     attribution_user as _attribution_user,
 )
 from omnigent.server.routes._auth_helpers import (
-    get_permission_level as _get_permission_level,
     require_access as _require_access,
 )
 from omnigent.server.routes._errors import agent_removed as _agent_removed
@@ -1374,6 +1372,7 @@ def _build_session_response(
     agent_store: AgentStore | None = None,
     agent_cache: AgentCache | None = None,
     side_chat_sealed: bool = False,
+    account: str | None = None,
 ) -> SessionResponse:
     """
     Build a :class:`SessionResponse` from store-side entities.
@@ -1509,10 +1508,7 @@ def _build_session_response(
         cost_control_mode_override=conv.cost_control_mode_override,
         subagent_routing_override=conv.subagent_routing_override,
         share_workspace_files=conv.share_workspace_files,
-        # Users may name an account after an email, so only managers see it.
-        account=(
-            conv.account if permission_level is None or permission_level >= LEVEL_MANAGE else None
-        ),
+        account=account,
         context_window=context_window,
         last_total_tokens=last_total_tokens,
         # Seed the client's cost indicator on resume. Uses the SUBTREE
@@ -11356,7 +11352,6 @@ async def _create_session_from_existing_agent(
     # otherwise a forged parent link lets them inherit runner
     # bindings and establish a parent-child relationship with a
     # session they don't control.
-    parent_permission_level: int | None = None
     if body.parent_session_id is not None:
         await _require_access(
             user_id,
@@ -11364,9 +11359,6 @@ async def _create_session_from_existing_agent(
             LEVEL_READ,
             permission_store,
             conversation_store,
-        )
-        parent_permission_level = await _get_permission_level(
-            user_id, body.parent_session_id, permission_store
         )
 
     # Reject an undeclared sub-agent before persisting the row. Downstream
@@ -12130,9 +12122,9 @@ async def _create_session_from_existing_agent(
         liveness_lookup=liveness_lookup,
         conversation=conv,
         request=request,
+        viewer_id=user_id,
+        permission_store=permission_store,
     )
-    if parent_permission_level is not None and parent_permission_level < LEVEL_MANAGE:
-        response.account = None
     return response, conv
 
 
@@ -13289,6 +13281,7 @@ async def _get_session_snapshot(
     viewer_id: str | None = None,
     request: Request | None = None,
     include_usage: bool = True,
+    permission_store: PermissionStore | None = None,
 ) -> SessionResponse:
     """
     Read a full session snapshot from the store.
@@ -13584,6 +13577,9 @@ async def _get_session_snapshot(
         items,
         status,
         permission_level,
+        account=await asyncio.to_thread(
+            session_account_for_viewer, viewer_id, conv, permission_store, conv_store
+        ),
         side_chat_sealed=await _codex_side_chat_fork_sealed(conv, conv_store),
         background_task_count=_session_background_task_count_cache.get(session_id),
         background_tasks=_session_background_tasks_cache.get(session_id),

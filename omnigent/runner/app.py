@@ -7320,6 +7320,7 @@ def create_runner_app(
         _discard_comment_relay=_discard_comment_relay,
         _ensure_comment_relay_started=_ensure_comment_relay_started,
         _ensure_session_registered=_ensure_session_registered,
+        _fresh_session_init_envelope=_fresh_session_init_envelope,
         _goose_terminal_ensure_locks=_goose_terminal_ensure_locks,
         _hermes_terminal_ensure_locks=_hermes_terminal_ensure_locks,
         _kimi_terminal_ensure_locks=_kimi_terminal_ensure_locks,
