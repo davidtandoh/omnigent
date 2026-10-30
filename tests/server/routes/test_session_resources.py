@@ -10700,6 +10700,7 @@ async def test_account_refusal_details_require_manage_access(
             json={"terminal": "claude", "session_key": "main", "ensure_native_terminal": True},
             headers={"X-Forwarded-Email": "alice@example.com"},
         )
+    assert response.status_code == 412, response.text
     assert response.json()["error"]["code"] == AccountUnavailableError.code
     assert response.json()["error"]["message"] == (
         detail if level >= LEVEL_MANAGE else "Claude account unavailable"

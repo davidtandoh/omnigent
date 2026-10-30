@@ -16,6 +16,7 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 
+from omnigent.errors import ErrorCode
 from omnigent.onboarding.provider_config import SUBSCRIPTION_KIND, ProviderEntry, load_providers
 
 ACCOUNTS_DIRNAME = "claude-accounts"
@@ -209,7 +210,7 @@ class AccountUnavailableError(RuntimeError):
     The message is user-facing: it names the account, the machine, and the fix.
     """
 
-    code = "claude_account_unavailable"
+    code = ErrorCode.CLAUDE_ACCOUNT_UNAVAILABLE
     public_message = "Claude account unavailable"
 
 

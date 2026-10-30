@@ -768,7 +768,7 @@ def test_remote_resume_relocates_the_selected_account_transcript(
     assert not (tmp_path / "other-account").exists()
 
 
-def test_remote_resume_reads_local_settings_from_the_recorded_account(
+def test_remote_resume_bypasses_broken_default_provider(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Local reads use the session's account folder; only the name reaches the server."""
@@ -780,6 +780,7 @@ def test_remote_resume_reads_local_settings_from_the_recorded_account(
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
     spec_path = tmp_path / "claude.yaml"
     spec_path.write_text("name: claude-native-ui\nprompt: hi\n")
+    resumed_session_account = claude_native._resumed_session_account
     captured: dict[str, Any] = {}
     _install_daemon_seam_mocks(
         monkeypatch,
@@ -793,11 +794,19 @@ def test_remote_resume_reads_local_settings_from_the_recorded_account(
         captured=captured,
         ensured=[],
     )
-    monkeypatch.setattr(claude_native, "_resumed_session_account", lambda **k: "work")
+    monkeypatch.setattr(claude_native, "_resumed_session_account", resumed_session_account)
+    _session_lookup(
+        monkeypatch, httpx.Response(200, json={"id": "conv_existing", "account": "work"})
+    )
+    monkeypatch.setattr(claude_native, "_preflight_local_tools", lambda command: None)
 
-    claude_native._run_with_remote_server(
-        "https://example.com",
-        spec_path,
+    def broken_default_provider(**kwargs):
+        raise click.ClickException("Default gateway credential is unset")
+
+    monkeypatch.setattr(claude_native, "resolve_native_claude_config", broken_default_provider)
+
+    claude_native.run_claude_native(
+        server="https://example.com",
         session_id="conv_existing",
         resume_picker=False,
         claude_args=(),

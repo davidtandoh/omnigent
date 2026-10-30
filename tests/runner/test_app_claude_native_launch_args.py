@@ -1243,6 +1243,7 @@ async def _auto_create_claude_terminal_for_test(
     workspace: Path,
     registry: object,
     account: str | None = None,
+    external_session_id: str | None = None,
 ) -> None:
     """
     Run ``_auto_create_claude_terminal`` with host config and diagnostics stubbed.
@@ -1266,6 +1267,7 @@ async def _auto_create_claude_terminal_for_test(
     monkeypatch.setattr(diagnostics, "ClaudeDebugLogFollower", lambda _: Mock())
     session_init = _claude_auto_create_session_init(session_id, workspace)
     session_init.snapshot.account = account
+    session_init.snapshot.external_session_id = external_session_id
     await orchestration._auto_create_claude_terminal(
         session_id,
         registry,
@@ -1598,7 +1600,7 @@ async def test_reused_runner_must_match_recorded_claude_account(
     runner_dir: str | None,
     matches: bool,
 ) -> None:
-    from unittest.mock import Mock
+    from unittest.mock import AsyncMock, Mock
 
     from omnigent.runner.resource_registry import SessionResourceRegistry
 
@@ -1627,6 +1629,14 @@ async def test_reused_runner_must_match_recorded_claude_account(
         "omnigent.harnesses.claude_native.bridge.ensure_claude_workspace_trusted",
         lambda *args, **kwargs: None,
     )
+    transcript = AsyncMock(return_value=None)
+    catalog = AsyncMock()
+    if not matches:
+        monkeypatch.setattr(
+            "omnigent.harnesses.claude_native.main._ensure_local_claude_resume_transcript",
+            transcript,
+        )
+        monkeypatch.setattr("omnigent.harnesses.claude_native.main.claude_launch_catalog", catalog)
     registry = Mock(spec=SessionResourceRegistry)
     registry.launch_required_terminal.side_effect = RuntimeError("terminal reached")
     with pytest.raises(RuntimeError, match="terminal reached" if matches else "config_mismatch"):
@@ -1636,11 +1646,14 @@ async def test_reused_runner_must_match_recorded_claude_account(
             workspace=bridge_dir,
             registry=registry,
             account=account,
+            external_session_id="native-history" if not matches else None,
         )
     if matches:
         registry.launch_required_terminal.assert_awaited_once()
     else:
         registry.launch_required_terminal.assert_not_called()
+        transcript.assert_not_called()
+        catalog.assert_not_called()
 
 
 @pytest.mark.parametrize("failure", ["timeout", "non-200"])

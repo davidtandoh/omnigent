@@ -1697,24 +1697,15 @@ def run_claude_native(
     sanitized_args = _strip_resume_from_claude_args(claude_args)
     prompt = prompt if prompt and prompt.strip() else None
     startup_profiler.mark("claude args normalized")
-    # Resolve the launch config across all offerings: a configured provider
-    # (configure harnesses), the Databricks ucode profile, or Claude's own
-    # login — so `omnigent claude` honors the provider selection just like
-    # the in-process claude-sdk harness. ``use_claude_config`` forces the
-    # CLI's own ~/.claude config (skips all of it).
-    startup_profiler.mark("resolving claude config")
-    claude_config = None if use_claude_config else resolve_native_claude_config(spec=None)
-    startup_profiler.mark(
-        "claude config resolved",
-        detail="native config" if claude_config is not None else "claude cli config",
-    )
-
     with TemporaryDirectory(prefix="omnigent-claude-native-") as tmpdir:
         spec_path = _materialize_claude_agent_spec(Path(tmpdir))
         startup_profiler.mark("agent spec materialized")
         if server is None:
             if account is not None:
                 raise click.ClickException("--account needs an Omnigent server to record it.")
+            startup_profiler.mark("resolving claude config")
+            claude_config = None if use_claude_config else resolve_native_claude_config(spec=None)
+            startup_profiler.mark("claude config resolved")
             # Keep the one-shot local prompt ahead of variadic flag values.
             local_args = (prompt, *sanitized_args) if prompt is not None else sanitized_args
             _run_with_local_server(

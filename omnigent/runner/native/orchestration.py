@@ -9190,6 +9190,47 @@ async def _auto_create_claude_terminal(
         from omnigent.onboarding.claude_accounts import AccountUnavailableError
 
         raise AccountUnavailableError("Could not confirm this session's Claude account; retry.")
+    resolved_launch_env = native_launch_environment()
+    verify_sign_in = (
+        "CLAUDE_CONFIG_DIR" in resolved_launch_env or launch_metadata.account is not None
+    )
+    if "CLAUDE_CONFIG_DIR" not in resolved_launch_env and "CLAUDE_CONFIG_DIR" in os.environ:
+        resolved_launch_env["CLAUDE_CONFIG_DIR"] = os.environ["CLAUDE_CONFIG_DIR"]
+    requested_account = resolved_launch_env.get("CLAUDE_CONFIG_DIR")
+    await asyncio.to_thread(
+        _ensure_spec_account_selected, agent_spec, requested_account, launch_metadata.account
+    )
+    from omnigent.config import load_effective_config
+    from omnigent.harness_startup_config import (
+        resolve_harness_args,
+        resolve_harness_command,
+    )
+
+    _harness_cfg = load_effective_config(workspace=workspace)
+    launch_command = resolve_harness_command("claude-native", default="claude", cfg=_harness_cfg)
+    if requested_account is not None and verify_sign_in:
+        from omnigent.harnesses.claude_native.account import ensure_claude_account_signed_in
+        from omnigent.host.harness_startup import env_wrapper_command
+
+        probe_spec = TerminalEnvSpec(
+            os_env=OSEnvSpec(type="caller_process", cwd=workspace),
+            command=launch_command,
+            args=resolve_harness_args("claude-native", (), cfg=_harness_cfg),
+            env=resolved_launch_env,
+        )
+        probe_env = _claude_terminal_launch_env(probe_spec)
+        probe_command = launch_command
+        if Path(launch_command).name == "env":
+            probe_command = env_wrapper_command(
+                launch_command, list(probe_spec.args), _claude_terminal_pre_wrapper_env(probe_spec)
+            )
+        await asyncio.to_thread(
+            ensure_claude_account_signed_in,
+            probe_command,
+            requested_account,
+            env=probe_env,
+            cwd=_claude_terminal_launch_cwd(probe_spec, agent_os_env),
+        )
     session_effort = launch_metadata.reasoning_effort
     session_model_override = launch_metadata.model_override
     session_launch_args = launch_metadata.terminal_launch_args
@@ -9407,7 +9448,7 @@ async def _auto_create_claude_terminal(
 
     inference_config = None
     claude_binding = None
-    if "CLAUDE_CONFIG_DIR" not in native_launch_environment():
+    if "CLAUDE_CONFIG_DIR" not in resolved_launch_env:
         inference_config = load_runtime_inference_config()
         claude_binding = binding_for_harness(inference_config, "claude-native")
         try:
@@ -9748,14 +9789,6 @@ async def _auto_create_claude_terminal(
     # appended above, so the ``--`` stays first). Identity by default. This is
     # the same resolver the local-CLI native launch uses (see cli_native.py), so
     # both terminal-creation paths honour one config surface.
-    from omnigent.config import load_effective_config
-    from omnigent.harness_startup_config import (
-        resolve_harness_args,
-        resolve_harness_command,
-    )
-
-    _harness_cfg = load_effective_config(workspace=workspace)
-    launch_command = resolve_harness_command("claude-native", default="claude", cfg=_harness_cfg)
     launch_args = resolve_harness_args("claude-native", tuple(claude_args), cfg=_harness_cfg)
     # Validate the binary this terminal will actually spawn: ``launch_command``
     # already reflects the OMNIGENT_CLAUDE_PATH / config overrides, and a bare
@@ -9787,7 +9820,7 @@ async def _auto_create_claude_terminal(
         # ENABLE_TOOL_SEARCH=true so MCP schemas are loaded on demand.
         env={
             **build_native_claude_terminal_env(claude_config),
-            **native_launch_environment(),
+            **resolved_launch_env,
         },
         # Names to strip (see ``_claude_terminal_env_unset``). Dropping
         # ``DATABRICKS_CONFIG_PROFILE`` matters because Claude's MCP servers
@@ -9810,30 +9843,19 @@ async def _auto_create_claude_terminal(
     )
     # Seed trust and onboarding in the config selected by the terminal's launch environment.
     try:
-        requested_account = native_launch_environment().get("CLAUDE_CONFIG_DIR")
         launch_env = _claude_terminal_launch_env(env_spec)
         launch_cwd = _claude_terminal_launch_cwd(env_spec, agent_os_env)
-        await asyncio.to_thread(
-            _ensure_spec_account_selected,
-            agent_spec,
-            launch_env.get("CLAUDE_CONFIG_DIR"),
-            launch_metadata.account,
-        )
-        if requested_account is not None:
-            from omnigent.harnesses.claude_native.account import ensure_claude_account_signed_in
-            from omnigent.host.harness_startup import env_wrapper_command
+        if (
+            verify_sign_in
+            and requested_account is not None
+            and launch_env.get("CLAUDE_CONFIG_DIR") != requested_account
+        ):
+            from omnigent.harnesses.claude_native.account import _account_label
+            from omnigent.onboarding.claude_accounts import AccountUnavailableError
 
-            probe_command = launch_command
-            if Path(launch_command).name == "env":
-                probe_command = env_wrapper_command(
-                    launch_command, list(launch_args), _claude_terminal_pre_wrapper_env(env_spec)
-                )
-            await asyncio.to_thread(
-                ensure_claude_account_signed_in,
-                probe_command,
-                requested_account,
-                env=launch_env,
-                cwd=launch_cwd,
+            raise AccountUnavailableError(
+                f"{_account_label(launch_metadata.account)} would receive a different "
+                "CLAUDE_CONFIG_DIR. Check the harness launch command."
             )
         ensure_claude_workspace_trusted(
             launch_cwd,
