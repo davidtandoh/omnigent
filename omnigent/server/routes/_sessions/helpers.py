@@ -6954,6 +6954,10 @@ def _native_terminal_failure_from_runner_response(
                 and isinstance(raw_message, str)
                 and raw_message.strip()
             ):
+                from omnigent.onboarding.claude_accounts import AccountUnavailableError
+
+                if raw_code == AccountUnavailableError.code:
+                    raw_message = AccountUnavailableError.public_message
                 return _NativeTerminalEnsureOutcome(
                     error=ErrorData(source="execution", code=raw_code, message=raw_message),
                     failure_context=normalize_failure_context(body.get("failure_context")),

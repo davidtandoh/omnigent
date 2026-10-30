@@ -8339,7 +8339,11 @@ def _native_terminal_start_failure_cause(exc: BaseException) -> str:
 
 
 def _native_terminal_start_error_payload(
-    exc: BaseException, runtime_name: str, *, session_id: str
+    exc: BaseException,
+    runtime_name: str,
+    *,
+    session_id: str,
+    include_account_details: bool = False,
 ) -> dict[str, str]:
     """
     Build the structured error payload for a native terminal start failure.
@@ -8352,6 +8356,7 @@ def _native_terminal_start_error_payload(
         JSON error responses. Known actionable configuration errors surface
         their safe message directly; other causes point to the runner log.
     """
+    from omnigent.onboarding.claude_accounts import AccountUnavailableError
     from omnigent.terminals.registry import TerminalCleanupRefused
 
     error_id = f"err_{uuid.uuid4().hex}"
@@ -8394,6 +8399,13 @@ def _native_terminal_start_error_payload(
         else None,
         error_impact=ErrorImpact.BLOCKING.value,
     )
+    if isinstance(exc, AccountUnavailableError):
+        _logger.warning("Claude account unavailable; error_id=%s: %s", error_id, exc, extra=extra)
+        return {
+            "code": exc.code,
+            "error_id": error_id,
+            "message": str(exc) if include_account_details else exc.public_message,
+        }
     if isinstance(exc, OmnigentError) and configuration_error:
         _logger.warning(
             "Native %s configuration needs attention; error_id=%s: %s",
@@ -8580,13 +8592,17 @@ def _native_terminal_start_error_response(
         agent or workspace, else 500,
         with an ``error`` object carrying the real failure message.
     """
-    status_code = 500
+    from omnigent.onboarding.claude_accounts import AccountUnavailableError
+
+    status_code = 412 if isinstance(exc, AccountUnavailableError) else 500
     if isinstance(exc, OmnigentError) and (
         exc.code in _NATIVE_TERMINAL_LIFECYCLE_ERROR_CODES
         or exc.code == ErrorCode.HARNESS_NOT_CONFIGURED
     ):
         status_code = exc.http_status
-    error = _native_terminal_start_error_payload(exc, runtime_name, session_id=session_id)
+    error = _native_terminal_start_error_payload(
+        exc, runtime_name, session_id=session_id, include_account_details=True
+    )
     return JSONResponse(
         status_code=status_code,
         content={
@@ -9171,7 +9187,9 @@ async def _auto_create_claude_terminal(
         session_init=session_init,
     )
     if not launch_metadata.account_known:
-        raise RuntimeError("Could not confirm this session's Claude account; retry.")
+        from omnigent.onboarding.claude_accounts import AccountUnavailableError
+
+        raise AccountUnavailableError("Could not confirm this session's Claude account; retry.")
     session_effort = launch_metadata.reasoning_effort
     session_model_override = launch_metadata.model_override
     session_launch_args = launch_metadata.terminal_launch_args

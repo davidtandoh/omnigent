@@ -203,11 +203,14 @@ def account_name_for_config_dir(config: dict[str, object], config_dir: str) -> s
     return None
 
 
-class AccountUnavailableError(Exception):
+class AccountUnavailableError(RuntimeError):
     """A session's recorded Claude account cannot be used on this machine.
 
     The message is user-facing: it names the account, the machine, and the fix.
     """
+
+    code = "claude_account_unavailable"
+    public_message = "Claude account unavailable"
 
 
 def account_launch_environment(

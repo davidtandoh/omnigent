@@ -10644,3 +10644,63 @@ async def test_host_write_timeout_preserves_comment_uncertainty(
         )
     else:
         assert response.json()["error"]["code"] == "runner_unavailable"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("level", [LEVEL_EDIT, LEVEL_MANAGE, LEVEL_OWNER])
+@pytest.mark.parametrize("child", [False, True])
+async def test_account_refusal_details_require_manage_access(
+    runner_globals_reset: None, level: int, child: bool
+) -> None:
+    from omnigent.onboarding.claude_accounts import AccountUnavailableError
+    from omnigent.runner.native.orchestration import _native_terminal_start_error_response
+
+    store = _ConversationStore()
+    session_id = "79b22ebd2309e48fdeb450c65611d51b"
+    parent_id = "5d29bee4350489d66feafecfebd94a97"
+    conversation = store.get_conversation(session_id)
+    assert conversation is not None
+    permissions = _StubPermissionStore()
+    permissions.add_grant("alice@example.com", parent_id if child else session_id, level)
+    if child:
+        conversation.parent_conversation_id = parent_id
+        permissions.add_grant("alice@example.com", session_id, LEVEL_OWNER)
+    detail = "Claude account 'private-work' on host 'mac-mini' is signed out. Run omnigent setup."
+    runner_response = _native_terminal_start_error_response(
+        AccountUnavailableError(detail), "Claude", session_id=session_id
+    )
+    set_runner_client(
+        _FakeRunnerClient(
+            payload=json.loads(runner_response.body), status_code=runner_response.status_code
+        )
+    )
+    application = FastAPI()
+
+    @application.exception_handler(OmnigentError)
+    async def handle_error(request: Request, exc: OmnigentError) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.http_status,
+            content={"error": {"code": exc.code, "message": exc.message}},
+        )
+
+    application.include_router(
+        create_sessions_router(
+            store,  # type: ignore[arg-type]
+            Mock(),
+            auth_provider=UnifiedAuthProvider(source="header", local_single_user=False),
+            permission_store=permissions,  # type: ignore[arg-type]
+        ),
+        prefix="/v1",
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=application), base_url="http://server"
+    ) as client:
+        response = await client.post(
+            f"/v1/sessions/{session_id}/resources/terminals",
+            json={"terminal": "claude", "session_key": "main", "ensure_native_terminal": True},
+            headers={"X-Forwarded-Email": "alice@example.com"},
+        )
+    assert response.json()["error"]["code"] == AccountUnavailableError.code
+    assert response.json()["error"]["message"] == (
+        detail if level >= LEVEL_MANAGE else "Claude account unavailable"
+    )

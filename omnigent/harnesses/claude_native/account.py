@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from omnigent.native.launch_environment import native_launch_environment
+from omnigent.onboarding.claude_accounts import AccountUnavailableError
 
 _logger = logging.getLogger(__name__)
 
@@ -105,7 +106,7 @@ def ensure_spec_account_selected(
         for the default login.
     :param config: Parsed user config; ``None`` reads the global config.
     :param session_account: The session's recorded account name, or ``None`` for default.
-    :raises RuntimeError: If the session or spec account does not match the runner.
+    :raises AccountUnavailableError: If the session or spec account does not match the runner.
     """
     from omnigent.config import load_global_config
     from omnigent.onboarding.claude_accounts import (
@@ -124,7 +125,7 @@ def ensure_spec_account_selected(
         if entry is None or (
             entry.config_dir is not None and entry.config_dir != requested_config_dir
         ):
-            raise RuntimeError(
+            raise AccountUnavailableError(
                 f"config_mismatch: this agent runs on Claude account {spec_account!r}. "
                 f"Check that {_account_label(spec_account)} is set up, then launch "
                 "a new runner for this account."
@@ -143,7 +144,7 @@ def ensure_spec_account_selected(
     ):
         return
     subject = _account_label(session_account) if session_account else "the default Claude login"
-    raise RuntimeError(
+    raise AccountUnavailableError(
         f"config_mismatch: this session requires {subject}, but this runner uses "
         "a different Claude account. Launch a new runner for this session."
     )
@@ -162,9 +163,10 @@ def ensure_claude_account_signed_in(
     Account enforcement needs a fresh verdict under the child's exact environment.
     """
     if env.get("CLAUDE_CONFIG_DIR") != requested_config_dir:
-        raise RuntimeError(
-            "native-claude: the child would receive a different CLAUDE_CONFIG_DIR "
-            "than the requested account. Check the harness launch command."
+        raise AccountUnavailableError(
+            f"native-claude: {_account_label(_account_name_for_config_dir(requested_config_dir))} "
+            "would receive a different CLAUDE_CONFIG_DIR than the requested account. "
+            "Check the harness launch command."
         )
     if command is None:
         _logger.warning(
@@ -178,7 +180,7 @@ def ensure_claude_account_signed_in(
         from omnigent.cli_invocation import cli_invocation
 
         label = _account_label(_account_name_for_config_dir(requested_config_dir))
-        raise RuntimeError(
+        raise AccountUnavailableError(
             f"native-claude: {label} is signed out. "
             f"Run `{cli_invocation()} setup` on that machine and sign in to the account "
             "again, or start a new session on another account."
