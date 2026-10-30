@@ -225,15 +225,20 @@ def test_session_account_survives_children_and_forks(
     parent = conversation_store.create_conversation(account="work", model_override="m")
     assert parent.account == "work"
 
-    child = conversation_store.create_conversation(parent_conversation_id=parent.id)
+    child = conversation_store.create_conversation(
+        parent_conversation_id=parent.id, account=parent.account
+    )
     bundled_child = conversation_store.create_session_with_agent(
         agent_id="1b6cf1f0662a1eab8722ca44e9d0b111",
         agent_name="child-agent",
         agent_bundle_location="1b6cf1f0662a1eab8722ca44e9d0b111/bundle1",
         agent_description=None,
         parent_conversation_id=parent.id,
+        account=parent.account,
     ).conversation
-    grandchild = conversation_store.create_conversation(parent_conversation_id=child.id)
+    grandchild = conversation_store.create_conversation(
+        parent_conversation_id=child.id, account=child.account
+    )
     for conv in (child, bundled_child, grandchild):
         fetched = conversation_store.get_conversation(conv.id)
         assert fetched is not None and fetched.account == "work"

@@ -38,14 +38,14 @@ def test_account_is_rejected_off_claude_native() -> None:
 
 @pytest.mark.parametrize(("parent_account", "requested"), [("work", None), ("work", "work")])
 def test_child_keeps_its_parents_account(parent_account: str, requested: str | None) -> None:
-    """The store copies the parent's account, so the route records nothing extra."""
+    """Creation resolves the inherited account before persistence."""
     assert (
         _resolve_create_account(
             requested=requested,
             harness="claude-native",
             parent=_parent(parent_account),
         )
-        is None
+        == parent_account
     )
 
 
@@ -71,3 +71,19 @@ def test_account_launch_refusal_requires_host_support() -> None:
     refusal = account_launch_refusal("work", _conn([]))  # type: ignore[arg-type]
     assert refusal is not None
     assert "'work'" in refusal and "'mac-mini'" in refusal and "Upgrade Omnigent" in refusal
+
+
+@pytest.mark.parametrize("harness", ["codex-native", "pi", "openai-agents"])
+def test_non_claude_child_has_no_account(harness: str) -> None:
+    assert (
+        _resolve_create_account(requested=None, harness=harness, parent=_parent("private-work"))
+        is None
+    )
+
+
+def test_sdk_child_cannot_inherit_a_claude_account() -> None:
+    with pytest.raises(OmnigentError, match="Claude SDK children") as caught:
+        _resolve_create_account(
+            requested=None, harness="claude-sdk", parent=_parent("private-work")
+        )
+    assert "private-work" not in str(caught.value)

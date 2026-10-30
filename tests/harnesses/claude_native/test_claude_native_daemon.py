@@ -374,19 +374,14 @@ def test_resume_on_another_account_is_refused_and_points_at_new_session(
     assert "Start a new session" in caught.value.message
 
 
-def test_unreadable_session_refuses_only_an_explicit_account(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("requested", [None, "work"])
+def test_unreadable_session_refuses_resume(
+    monkeypatch: pytest.MonkeyPatch, requested: str | None
 ) -> None:
     _session_lookup(monkeypatch, httpx.Response(500, json={"detail": "boom"}))
-    assert (
+    with pytest.raises(click.ClickException, match="Cannot confirm.*Claude account; retry"):
         claude_native._resumed_session_account(
-            base_url="https://e.com", headers={}, session_id="conv_a", requested=None
-        )
-        is None
-    )
-    with pytest.raises(click.ClickException, match="check its Claude account"):
-        claude_native._resumed_session_account(
-            base_url="https://e.com", headers={}, session_id="conv_a", requested="work"
+            base_url="https://e.com", headers={}, session_id="conv_a", requested=requested
         )
 
 
@@ -814,3 +809,47 @@ def test_remote_resume_bypasses_broken_default_provider(
 
     assert captured["settings_env"] == {"CLAUDE_CONFIG_DIR": str(account_dir)}
     assert captured["launch_env"] is None
+
+
+@pytest.mark.parametrize("failure", ["timeout", "non-200"])
+@pytest.mark.parametrize("requested", [None, "work"])
+def test_resume_lookup_failure_stops_before_local_transcript_handling(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str, requested: str | None
+) -> None:
+    from unittest.mock import Mock
+
+    resumed_session_account = claude_native._resumed_session_account
+    captured: dict[str, Any] = {}
+    _install_daemon_seam_mocks(
+        monkeypatch,
+        prepared=claude_native.PreparedClaudeTerminal(
+            session_id="conv_existing",
+            terminal_id=claude_native.claude_terminal_resource_id(),
+            bridge_dir=tmp_path / "bridge",
+            reattached=False,
+        ),
+        attach_outcome=claude_native._AttachOutcome.EXITED,
+        captured=captured,
+        ensured=[],
+    )
+    monkeypatch.setattr(claude_native, "_resumed_session_account", resumed_session_account)
+    lookup = (
+        Mock(side_effect=httpx.ReadTimeout("transient failure"))
+        if failure == "timeout"
+        else Mock(return_value=httpx.Response(500))
+    )
+    monkeypatch.setattr(httpx.Client, "get", lookup)
+    align = Mock()
+    monkeypatch.setattr(claude_native, "_align_working_directory_with_session", align)
+    with pytest.raises(click.ClickException, match="Claude account; retry"):
+        claude_native._run_with_remote_server(
+            "https://example.com",
+            tmp_path / "agent.yaml",
+            session_id="conv_existing",
+            resume_picker=False,
+            claude_args=(),
+            account=requested,
+        )
+    lookup.assert_called_once()
+    align.assert_not_called()
+    assert captured == {}

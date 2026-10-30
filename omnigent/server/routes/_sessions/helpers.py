@@ -10328,14 +10328,13 @@ def _resolve_create_account(
     """Choose the Claude account a new session records.
 
     Only explicit requests select an account for a top-level claude-native
-    session. A child always runs on its parent's account, which the store
-    copies, so a child may only restate it.
+    session. Claude-native children inherit the parent's account. Other
+    harnesses do not record a Claude account; Claude SDK children refuse one.
 
     :param requested: The create request's ``account``, e.g. ``"work"``.
     :param harness: The session's canonical harness, e.g. ``"claude-native"``.
     :param parent: The parent conversation for a child create, else ``None``.
-    :returns: The account to store, or ``None`` for the default login (or,
-        for a child, the parent's account).
+    :returns: The effective account to store, or ``None`` for no account.
     :raises OmnigentError: ``INVALID_INPUT`` when the request conflicts with
         the harness or the parent's account.
     """
@@ -10345,13 +10344,21 @@ def _resolve_create_account(
             code=ErrorCode.INVALID_INPUT,
         )
     if parent is not None:
+        if harness == "claude-sdk" and parent.account is not None:
+            raise OmnigentError(
+                "Claude SDK children cannot use an inherited Claude account. "
+                "Use a claude-native child instead.",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        if harness != "claude-native":
+            return None
         if requested is not None and requested != parent.account:
             raise OmnigentError(
                 "A child session runs on its parent's Claude account; "
                 "the requested account conflicts with that account.",
                 code=ErrorCode.INVALID_INPUT,
             )
-        return None
+        return parent.account
     return requested
 
 

@@ -545,6 +545,7 @@ async def test_child_create_keeps_account_private_from_parent_readers(
     existing_child = store.create_conversation(
         agent_id=agent["id"],
         parent_conversation_id=child.id,
+        account=child.account,
     )
     for session_id in (child.id, existing_child.id):
         snapshot = await auth_client.get(
@@ -562,3 +563,63 @@ async def test_child_create_keeps_account_private_from_parent_readers(
         assert fork.json()["account"] == expected_account
         fork_row = store.get_conversation(fork.json()["id"])
         assert fork_row is not None and fork_row.account == expected_account
+
+
+@pytest.mark.parametrize("harness", ["claude-native", "claude-sdk", "codex-native", "pi"])
+@pytest.mark.parametrize("bundled", [False, True])
+async def test_child_account_follows_the_child_harness(
+    auth_client: httpx.AsyncClient, db_uri: str, harness: str, bundled: bool
+) -> None:
+    from tests.server.helpers import build_agent_bundle
+
+    parent_agent = await create_test_agent(
+        auth_client,
+        user=ALICE,
+        executor={"type": "omnigent", "config": {"harness": "claude-native"}},
+    )
+    parent = await auth_client.post(
+        "/v1/sessions",
+        json={"agent_id": parent_agent["id"], "account": "private-work"},
+        headers={"X-Forwarded-Email": ALICE},
+    )
+    assert parent.status_code == 201, parent.text
+    parent_id = parent.json()["id"]
+    grant = await auth_client.put(
+        f"/v1/sessions/{parent_id}/permissions",
+        json={"user_id": BOB, "level": LEVEL_READ},
+        headers={"X-Forwarded-Email": ALICE},
+    )
+    assert grant.status_code == 200, grant.text
+    executor = {"type": "omnigent", "config": {"harness": harness}}
+    if bundled:
+        response = await auth_client.post(
+            "/v1/sessions",
+            data={"metadata": json.dumps({"parent_session_id": parent_id})},
+            files={
+                "bundle": (
+                    "agent.tar.gz",
+                    build_agent_bundle(name="child", executor=executor),
+                    "application/gzip",
+                )
+            },
+            headers={"X-Forwarded-Email": BOB},
+        )
+    else:
+        child_agent = await create_test_agent(
+            auth_client, user=BOB, name="child", executor=executor
+        )
+        response = await auth_client.post(
+            "/v1/sessions",
+            json={"agent_id": child_agent["id"], "parent_session_id": parent_id},
+            headers={"X-Forwarded-Email": BOB},
+        )
+    if harness == "claude-sdk":
+        assert response.status_code == 400, response.text
+        assert "Claude SDK children" in response.text
+        assert "private-work" not in response.text
+    else:
+        assert response.status_code == 201, response.text
+        child_id = response.json()["session_id" if bundled else "id"]
+        child = SqlAlchemyConversationStore(db_uri).get_conversation(child_id)
+        assert child is not None
+        assert child.account == ("private-work" if harness == "claude-native" else None)

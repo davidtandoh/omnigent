@@ -570,7 +570,7 @@ class ConversationStore(ABC):
         :param subagent_routing_override: Optional per-session sub-agent routing mode.
         :param harness_override: Optional per-session harness override.
         :param account: Extra Claude account name, e.g. ``"work"``. ``None``
-            inherits the parent's account for a child, else the default login.
+            records no account. The caller resolves child inheritance.
         :returns: The newly created :class:`Conversation`.
         :raises NameAlreadyExistsError: If
             ``parent_conversation_id`` is not ``None`` and a
@@ -1924,7 +1924,7 @@ class ConversationStore(ABC):
             session-scoped agent so its code can only be mutated by the
             owner. ``None`` in single-user mode.
         :param account: Extra Claude account name, e.g. ``"work"``. ``None``
-            inherits the parent's account for a child, else the default login.
+            records no account. The caller resolves child inheritance.
         :returns: The committed conversation and agent entities.
         :raises ConversationNotFoundError: If
             ``parent_conversation_id`` is set but no such

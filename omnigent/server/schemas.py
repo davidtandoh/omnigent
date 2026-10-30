@@ -1671,9 +1671,10 @@ class _SessionCreateRequestBase(BaseModel):
     :param account: Optional extra Claude account for a claude-native
         session, by its short name, e.g. ``"work"``. Only the name is
         stored; the launching host resolves it from its own config and
-        refuses the launch when it cannot. ``None`` inherits a child's
-        parent account; a top-level session without an explicit account uses
-        the host's default login. Create-time only.
+        refuses the launch when it cannot. Claude-native children inherit
+        their parent's account; Claude SDK children refuse inherited accounts,
+        and other child harnesses record no Claude account. A top-level session
+        without an explicit account uses the host's default login. Create-time only.
     """
 
     inference_configuration_revision: str | None = None

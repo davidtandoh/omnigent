@@ -372,7 +372,9 @@ including when the original workspace is gone. New sessions read reasoning
 effort from that account's `settings.json`; an explicit `--effort` takes
 precedence. Agent spec provider names do not set the recorded session account.
 Choose an account explicitly with `--account` or the API `account` field;
-children and forks inherit accounts under the rules above. If an agent spec
+Claude-native children inherit the parent account. Claude SDK children refuse
+an inherited account; other child harnesses record no Claude account. Forks
+inherit accounts under the rules above. If an agent spec
 names an extra account with `executor.auth: {type: provider, name: claude-work}`,
 the runner refuses a launch that would not use that account. A gateway provider
 such as `claude-gateway` remains a normal provider. Only Claude

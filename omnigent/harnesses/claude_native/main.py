@@ -2423,8 +2423,8 @@ def _resumed_session_account(
     :param session_id: Omnigent conversation id, e.g. ``"conv_abc123"``.
     :param requested: The ``--account`` value, or ``None`` when not passed.
     :returns: The recorded account name, or ``None`` for the default login.
-    :raises click.ClickException: If ``--account`` was passed and the session
-        cannot be read or runs on another account.
+    :raises click.ClickException: If the session cannot be read or an explicit
+        account conflicts with its recorded account.
     """
     try:
         with httpx.Client(
@@ -2434,16 +2434,11 @@ def _resumed_session_account(
             trust_env=not is_loopback_url(base_url),
         ) as client:
             resp = client.get(f"/v1/sessions/{url_component(session_id)}")
-        payload = resp.json() if resp.status_code < 400 else None
+        payload = resp.json() if resp.status_code == 200 else None
     except (httpx.HTTPError, ValueError):
         payload = None
     if not isinstance(payload, dict):
-        if requested is not None:
-            raise click.ClickException(
-                f"Cannot read session {session_id} to check its Claude account."
-            )
-        # The server still sends the recorded account to the host on launch.
-        return None
+        raise click.ClickException(f"Cannot confirm session {session_id}'s Claude account; retry.")
     recorded = payload.get("account")
     recorded = recorded if isinstance(recorded, str) and recorded else None
     if requested is not None and requested != recorded:

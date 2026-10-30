@@ -1080,8 +1080,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         :param conversation_id: Optional caller-supplied identifier.
             ``None`` generates a new random id.
         :param account: Extra Claude account name, e.g. ``"work"``.
-            ``None`` inherits the parent's account for a child, and
-            otherwise records the default login.
+            ``None`` records no account. The caller resolves child inheritance.
         :returns: The newly created :class:`Conversation`.
         :raises NameAlreadyExistsError: If
             ``parent_conversation_id`` is set and a sibling row
@@ -1131,14 +1130,6 @@ class SqlAlchemyConversationStore(ConversationStore):
                             f"parent conversation {parent_conversation_id!r} does not exist"
                         )
                     root_id = parent_row.root_conversation_id
-                    parent_account = _decode_session_overrides(parent_row.session_overrides)[
-                        "account"
-                    ]
-                if account is None and parent_account is not None:
-                    # A child runs on its parent's account, whichever runner hosts it.
-                    encoded_overrides = _encode_session_overrides(
-                        {**overrides, "account": parent_account}
-                    )
                 if inference_snapshot is None:
                     parent_meta = self._get_meta(parent_conversation_id)
                     encoded_inference_snapshot = (
@@ -4639,7 +4630,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             session-scoped agent so its code can only be mutated by the
             owner. ``None`` in single-user mode.
         :param account: Extra Claude account name, e.g. ``"work"``.
-            ``None`` inherits the parent's account for a child.
+            ``None`` records no account. The caller resolves child inheritance.
         :returns: A :class:`CreatedSession` with both entities.
         :raises ConversationNotFoundError: If
             ``parent_conversation_id`` is set but no such
@@ -4718,11 +4709,6 @@ class SqlAlchemyConversationStore(ConversationStore):
                         f"parent conversation {parent_conversation_id!r} does not exist"
                     )
                 root_conversation_id = parent_row.root_conversation_id
-                parent_account = _decode_session_overrides(parent_row.session_overrides)["account"]
-            if account is None and parent_account is not None:
-                encoded_overrides = _encode_session_overrides(
-                    {**overrides, "account": parent_account}
-                )
             if inference_snapshot is None:
                 parent_meta = self._get_meta(parent_conversation_id)
                 encoded_inference_snapshot = (
