@@ -2493,7 +2493,7 @@ def build_hook_settings(
         # to ``"in_progress"``). The payload carries ``tool_input.taskId``
         # and ``tool_input.status``.
         # ``EnterWorktree`` / ``ExitWorktree`` move the session transcript
-        # into the new cwd's ``~/.claude/projects/<slug>/`` dir; observing
+        # into the new cwd's project dir in the selected account; observing
         # them hands the forwarder the moved path now, not at the turn's Stop.
         "PostToolUse": [
             {"matcher": "TodoWrite", "hooks": [hook]},
@@ -8675,18 +8675,23 @@ def read_user_status_line_command() -> str | None:
     return None
 
 
-def read_user_effort_level() -> str | None:
+def read_user_effort_level(*, config_dir: Path | None = None) -> str | None:
     """
     Return the user's configured Claude Code effort level, if any.
 
-    Read client-side from ``effortLevel`` in ``~/.claude/settings.json`` —
-    the level the wrapped ``claude`` runs at when no ``--effort`` is passed.
+    Read ``effortLevel`` from the selected account's ``settings.json``,
+    or ``~/.claude/settings.json`` for the default account. This is the level
+    the wrapped ``claude`` runs at when no ``--effort`` is passed.
 
+    :param config_dir: Selected account folder, or ``None`` for the default settings.
     :returns: A recognized effort, e.g. ``"medium"``; ``None`` when unset,
         unreadable, or not a valid Claude effort (fail-soft, never blocks launch).
     """
     try:
-        raw = _USER_CLAUDE_SETTINGS_PATH.read_text(encoding="utf-8")
+        settings_path = (
+            config_dir / "settings.json" if config_dir is not None else _USER_CLAUDE_SETTINGS_PATH
+        )
+        raw = settings_path.read_text(encoding="utf-8")
     except OSError:
         return None
     try:
@@ -8701,7 +8706,9 @@ def read_user_effort_level() -> str | None:
     return None
 
 
-def resolve_launch_effort_level(claude_args: tuple[str, ...]) -> str | None:
+def resolve_launch_effort_level(
+    claude_args: tuple[str, ...], *, config_dir: Path | None = None
+) -> str | None:
     """
     Return the effort the wrapped ``claude`` will run at for ``claude_args``.
 
@@ -8712,10 +8719,11 @@ def resolve_launch_effort_level(claude_args: tuple[str, ...]) -> str | None:
 
     :param claude_args: Pass-through Claude CLI args, e.g.
         ``("--effort", "xhigh")``.
+    :param config_dir: Selected account folder, or ``None`` for the default settings.
     :returns: A recognized effort, e.g. ``"xhigh"``; ``None`` when neither
-        the args nor ``~/.claude/settings.json`` carry a valid one.
+        the args nor the selected account settings carry a valid one.
     """
-    return _launch_effort_arg(claude_args) or read_user_effort_level()
+    return _launch_effort_arg(claude_args) or read_user_effort_level(config_dir=config_dir)
 
 
 def _usage_from_transcript_entry(entry: _JsonObject) -> dict[str, int] | None:

@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import os
 import tomllib
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -592,6 +593,7 @@ def test_add_menu_options_ordering() -> None:
         "Other provider — API key",
         # Bedrock is appended last so it never shifts the established order.
         "AWS Bedrock — API key",
+        "Claude — another subscription account",
     ]
 
     # Codex (openai) scoped: API key, subscription, Gateway, OpenRouter,
@@ -616,6 +618,7 @@ def test_add_menu_options_ordering() -> None:
         "Gateway — custom base URL + key",
         "Databricks — workspace",
         "AWS Bedrock — API key",
+        "Claude — another subscription account",
     ]
 
     gemini = [o.label.split(None, 1)[1] for o in add_menu_options_for_family(GEMINI_FAMILY)]
@@ -3973,3 +3976,281 @@ def test_databricks_setup_recovers_from_malformed_profile(
     assert "Traceback" not in result.output
     assert "private-malformed-secret" not in result.output
     assert "databricks-gemini-broken" not in _config_yaml(isolated_config).get("providers", {})
+
+
+# A fake ``claude`` that keeps one sign-in marker per CLAUDE_CONFIG_DIR and logs
+# each call's argv and selected folder, so tests never touch a real account.
+_FAKE_CLAUDE = """#!/bin/sh
+printf '%s|%s\\n' "$*" "${CLAUDE_CONFIG_DIR-unset}" >> "$FAKE_CLAUDE_LOG"
+marker="${CLAUDE_CONFIG_DIR:-/nonexistent}/signed-in"
+case "$*" in
+  "auth status")
+    [ -n "$FAKE_CLAUDE_STATUS_INVALID" ] && echo 'invalid' && exit 1
+    [ -f "$marker" ] && echo '{"loggedIn": true}' && exit 0
+    echo '{"loggedIn": false}'; exit 1 ;;
+  "auth login --claudeai")
+    [ -n "$FAKE_CLAUDE_LOGIN_FAILS" ] && exit 1
+    : > "$marker" ;;
+  "auth logout") [ -n "$FAKE_CLAUDE_LOGOUT_FAILS" ] && exit 1; rm -f "$marker" ;;
+
+esac
+"""
+
+
+@pytest.fixture()
+def fake_claude(isolated_config, monkeypatch):
+    """Put the fake ``claude`` first on ``PATH``; return its call-log path."""
+    bin_dir = isolated_config / "bin"
+    bin_dir.mkdir()
+    claude = bin_dir / "claude"
+    claude.write_text(_FAKE_CLAUDE)
+    claude.chmod(0o755)
+    log = isolated_config / "claude-calls.log"
+    log.touch()
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(log))
+    for name in ("SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT", "CLAUDE_CONFIG_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    return log
+
+
+# L1 1=Claude → L2 1=+Add → anthropic menu 6="another subscription account".
+_ADD_ACCOUNT_KEYS = ["1", "1", "6"]
+
+
+def test_add_claude_account_signs_in_its_own_folder(isolated_config, fake_claude) -> None:
+    """An extra account gets a folder under the config home and a non-default entry."""
+    stdin = "\n".join([*_ADD_ACCOUNT_KEYS, "Work", "work", "q", "q"]) + "\n"
+    result = CliRunner().invoke(cli, ["setup", "--no-internal-beta"], input=stdin)
+    assert result.exit_code == 0, result.output
+
+    config_dir = str(isolated_config / "claude-accounts" / "work")
+    assert _config_yaml(isolated_config)["providers"] == {
+        "claude-work": {"kind": "subscription", "cli": "claude", "config_dir": config_dir}
+    }
+    assert "Use lowercase letters" in result.output  # "Work" was re-prompted
+    calls = fake_claude.read_text().splitlines()
+    assert calls == [
+        f"auth login --claudeai|{config_dir}",
+        f"auth status|{config_dir}",
+    ]
+
+
+def test_add_claude_account_writes_nothing_when_login_fails(
+    isolated_config, fake_claude, monkeypatch
+) -> None:
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_FAILS", "1")
+    stdin = "\n".join([*_ADD_ACCOUNT_KEYS, "work", "q", "q"]) + "\n"
+    result = CliRunner().invoke(cli, ["setup", "--no-internal-beta"], input=stdin)
+    assert result.exit_code == 0, result.output
+    assert fake_claude.read_text().splitlines()[-1].startswith("auth login --claudeai|")
+    assert "providers" not in _config_yaml(isolated_config)
+
+
+def test_add_claude_account_over_ssh_on_macos_fails_before_any_change(
+    isolated_config, fake_claude, monkeypatch
+) -> None:
+    """Over SSH the keychain login cannot stick, so setup must not appear to succeed."""
+    import functools
+
+    from omnigent.onboarding import claude_accounts
+
+    monkeypatch.setattr(
+        claude_accounts,
+        "ssh_login_refusal",
+        functools.partial(claude_accounts.ssh_login_refusal, platform="darwin"),
+    )
+    monkeypatch.setenv("SSH_CONNECTION", "10.0.0.2 50000 10.0.0.1 22")
+    stdin = "\n".join([*_ADD_ACCOUNT_KEYS, "work", "q", "q"]) + "\n"
+    result = CliRunner().invoke(cli, ["setup", "--no-internal-beta"], input=stdin)
+
+    assert result.exit_code != 0
+    assert "Screen Sharing" in result.output
+    assert "providers" not in _config_yaml(isolated_config)
+    assert not (isolated_config / "claude-accounts").exists()
+    assert fake_claude.read_text() == ""
+
+
+def test_remove_claude_account_signs_out_only_that_account(
+    isolated_config, fake_claude, monkeypatch
+) -> None:
+    """Removing an extra account must not sign out the default Claude login."""
+    config_dir = isolated_config / "claude-accounts" / "work"
+    config_dir.mkdir(parents=True)
+    (config_dir / "signed-in").touch()
+    _seed_config(
+        isolated_config,
+        {
+            "claude-subscription": {"kind": "subscription", "cli": "claude", "default": True},
+            "claude-work": {
+                "kind": "subscription",
+                "cli": "claude",
+                "config_dir": str(config_dir),
+            },
+        },
+    )
+
+    def _default_logout(family: str) -> bool:
+        raise AssertionError("removing an extra account signed out the default login")
+
+    monkeypatch.setattr("omnigent.onboarding.harness_install.harness_logout", _default_logout)
+    # L1 1=Claude → L2 2=claude-work → L3 2=Remove (no Make default) → 1=Yes → q → q.
+    stdin = "\n".join(["1", "2", "2", "1", "q", "q"]) + "\n"
+    result = CliRunner().invoke(cli, ["setup", "--no-internal-beta"], input=stdin)
+    assert result.exit_code == 0, result.output
+
+    assert "Subscription (claude-work)" in result.output
+    assert "Make default" not in result.output
+    assert list(_config_yaml(isolated_config)["providers"]) == ["claude-subscription"]
+    assert f"auth logout|{config_dir}" in fake_claude.read_text().splitlines()
+    assert config_dir.is_dir() and not (config_dir / "signed-in").exists()
+
+
+def test_replacing_the_default_subscription_keeps_extra_accounts(isolated_config) -> None:
+    extra = {"kind": "subscription", "cli": "claude", "config_dir": "/accounts/work"}
+    _seed_config(
+        isolated_config,
+        {
+            "claude": {"kind": "subscription", "default": True, "cli": "claude"},
+            "claude-work": extra,
+        },
+    )
+    # L1 1=Claude → L2 3=+Add → 2=Claude subscription → 1=Replace it → q → q.
+    stdin = "\n".join(["1", "3", "2", "1", "q", "q"]) + "\n"
+    result = CliRunner().invoke(cli, ["setup", "--no-internal-beta"], input=stdin)
+    assert result.exit_code == 0, result.output
+
+    providers = _config_yaml(isolated_config)["providers"]
+    assert set(providers) == {"claude-subscription", "claude-work"}
+    assert providers["claude-work"] == extra
+
+
+def _seed_default_and_work_accounts(isolated_config) -> Path:
+    config_dir = isolated_config / "claude-accounts" / "work"
+    config_dir.mkdir(parents=True)
+    (config_dir / "signed-in").touch()
+    _seed_config(
+        isolated_config,
+        {
+            "claude-subscription": {"kind": "subscription", "cli": "claude", "default": True},
+            "claude-work": {
+                "kind": "subscription",
+                "cli": "claude",
+                "config_dir": str(config_dir),
+            },
+        },
+    )
+    return config_dir
+
+
+# L1 1=Claude → L2 2=claude-work → L3 1=Sign in again → q → q.
+_SIGN_IN_AGAIN_KEYS = ["1", "2", "1", "q", "q"]
+
+
+def test_sign_in_again_logs_in_only_that_account(
+    isolated_config, fake_claude, monkeypatch
+) -> None:
+    """An expired sign-in can still report signed in, so the login always runs."""
+    config_dir = _seed_default_and_work_accounts(isolated_config)
+    before = _config_yaml(isolated_config)
+
+    def _default_login(*args: object, **kwargs: object) -> bool:
+        raise AssertionError("signing in again touched the default login")
+
+    monkeypatch.setattr("omnigent.onboarding.harness_install.harness_login", _default_login)
+    stdin = "\n".join(_SIGN_IN_AGAIN_KEYS) + "\n"
+    result = CliRunner().invoke(cli, ["setup", "--no-internal-beta"], input=stdin)
+    assert result.exit_code == 0, result.output
+
+    assert fake_claude.read_text().splitlines() == [
+        f"auth login --claudeai|{config_dir}",
+        f"auth status|{config_dir}",
+    ]
+    assert _config_yaml(isolated_config) == before
+    assert sorted(path.name for path in config_dir.iterdir()) == ["signed-in"]
+
+
+def test_sign_in_again_reports_whether_the_login_was_confirmed(
+    isolated_config, fake_claude, monkeypatch
+) -> None:
+    from omnigent.cli_config import _sign_in_claude_account_again
+
+    config_dir = _seed_default_and_work_accounts(isolated_config)
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_FAILS", "1")
+    assert _sign_in_claude_account_again("claude-work", str(config_dir)) == (
+        "✗ Claude login for claude-work not confirmed"
+    )
+    monkeypatch.delenv("FAKE_CLAUDE_LOGIN_FAILS")
+    assert _sign_in_claude_account_again("claude-work", str(config_dir)) == (
+        "✓ Signed in to claude-work again"
+    )
+    missing = str(isolated_config / "claude-accounts" / "gone")
+    assert "is missing" in _sign_in_claude_account_again("claude-gone", missing)
+    assert not os.path.exists(missing)
+
+
+def test_sign_in_again_over_ssh_on_macos_fails_without_running_claude(
+    isolated_config, fake_claude, monkeypatch
+) -> None:
+    import functools
+
+    from omnigent.onboarding import claude_accounts
+
+    _seed_default_and_work_accounts(isolated_config)
+    before = _config_yaml(isolated_config)
+    monkeypatch.setattr(
+        claude_accounts,
+        "ssh_login_refusal",
+        functools.partial(claude_accounts.ssh_login_refusal, platform="darwin"),
+    )
+    monkeypatch.setenv("SSH_TTY", "/dev/ttys001")
+    stdin = "\n".join(_SIGN_IN_AGAIN_KEYS) + "\n"
+    result = CliRunner().invoke(cli, ["setup", "--no-internal-beta"], input=stdin)
+
+    assert result.exit_code != 0
+    assert "Screen Sharing" in result.output
+    assert fake_claude.read_text() == ""
+    assert _config_yaml(isolated_config) == before
+
+
+def test_sign_in_again_is_not_offered_for_the_default_login(isolated_config, fake_claude) -> None:
+    _seed_default_and_work_accounts(isolated_config)
+    # L1 1=Claude → L2 1=claude-subscription → q → q → q.
+    stdin = "\n".join(["1", "1", "q", "q", "q"]) + "\n"
+    result = CliRunner().invoke(cli, ["setup", "--no-internal-beta"], input=stdin)
+    assert result.exit_code == 0, result.output
+    assert "Remove" in result.output
+    assert "Sign in again" not in result.output
+
+
+@pytest.mark.parametrize("status_invalid", [False, True])
+def test_remove_account_requires_definitive_signed_out_status(
+    isolated_config, fake_claude, monkeypatch, status_invalid
+) -> None:
+    from omnigent.cli_config import _remove_claude_account
+
+    config_dir = _seed_default_and_work_accounts(isolated_config)
+    monkeypatch.setenv("FAKE_CLAUDE_LOGOUT_FAILS", "1")
+    if status_invalid:
+        monkeypatch.setenv("FAKE_CLAUDE_STATUS_INVALID", "1")
+    monkeypatch.setattr("omnigent.onboarding.interactive.select", lambda *a, **kw: 0)
+    result = _remove_claude_account("claude-work", str(config_dir))
+    assert "sign-out could not be confirmed" in result
+    assert (config_dir / "signed-in").exists()
+    assert "claude-work" not in _config_yaml(isolated_config)["providers"]
+
+
+@pytest.mark.parametrize("login_fails", [False, True])
+def test_add_retained_account_always_runs_login(
+    isolated_config, fake_claude, monkeypatch, login_fails
+) -> None:
+    config_dir = isolated_config / "claude-accounts" / "work"
+    config_dir.mkdir(parents=True)
+    (config_dir / "signed-in").touch()
+    if login_fails:
+        monkeypatch.setenv("FAKE_CLAUDE_LOGIN_FAILS", "1")
+    stdin = "\n".join([*_ADD_ACCOUNT_KEYS, "work", "q", "q"]) + "\n"
+    result = CliRunner().invoke(cli, ["setup", "--no-internal-beta"], input=stdin)
+    assert result.exit_code == 0, result.output
+    assert fake_claude.read_text().splitlines()[0] == f"auth login --claudeai|{config_dir}"
+    assert ("claude-work" in _config_yaml(isolated_config).get("providers", {})) is not login_fails

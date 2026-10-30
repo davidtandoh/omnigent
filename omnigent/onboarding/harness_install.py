@@ -43,6 +43,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import NamedTuple
 
@@ -1283,6 +1284,48 @@ def harness_cli_logged_in(key: str, timeout: float = _DEFAULT_CLI_PROBE_TIMEOUT_
     return logged_in
 
 
+def run_interactive_login(argv: list[str], *, env: Mapping[str, str] | None = None) -> bool:
+    """Run a vendor login command in the foreground on the user's terminal.
+
+    :param argv: The login command, e.g. ``["claude", "auth", "login", "--claudeai"]``.
+    :param env: The child's full environment, or ``None`` to inherit this process's.
+    :returns: ``True`` only when the process exits successfully. The caller
+        confirms the login with the CLI's status command.
+    """
+    try:
+        # Open /dev/tty explicitly so the child process sees a real TTY even
+        # when the parent's stdio is piped (e.g. launched via `uv tool run` or
+        # another wrapper). The Claude CLI checks isatty() and skips opening the
+        # browser when it returns false, which strands the login until it times
+        # out. Fall back to inherited stdio when /dev/tty can't be opened (a
+        # headless run with no controlling terminal).
+        tty_fd: int | None = None
+        if not sys.stdin.isatty():
+            try:
+                tty_fd = os.open("/dev/tty", os.O_RDWR)
+            except OSError:
+                tty_fd = None
+        try:
+            if tty_fd is not None:
+                result = subprocess.run(
+                    argv,
+                    check=False,
+                    timeout=600,
+                    env=env,
+                    stdin=tty_fd,
+                    stdout=tty_fd,
+                    stderr=tty_fd,
+                )
+            else:
+                result = subprocess.run(argv, check=False, timeout=600, env=env)
+        finally:
+            if tty_fd is not None:
+                os.close(tty_fd)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
 def harness_login(key: str) -> bool:
     """Run the harness CLI's interactive subscription login; return logged-in state.
 
@@ -1311,31 +1354,7 @@ def harness_login(key: str) -> bool:
     argv_binary = binary if key == GEMINI_FAMILY else spec.binary
     if harness_cli_logged_in(key):
         return True
-    try:
-        # Open /dev/tty explicitly so the child process sees a real TTY even
-        # when the parent's stdio is piped (e.g. launched via `uv tool run` or
-        # another wrapper). The Claude CLI checks isatty() and skips opening the
-        # browser when it returns false, which strands the login until it times
-        # out. Fall back to inherited stdio when /dev/tty can't be opened (a
-        # headless run with no controlling terminal).
-        tty_fd: int | None = None
-        if not sys.stdin.isatty():
-            try:
-                tty_fd = os.open("/dev/tty", os.O_RDWR)
-            except OSError:
-                tty_fd = None
-        argv = [argv_binary, *spec.login_args]
-        try:
-            if tty_fd is not None:
-                subprocess.run(
-                    argv, check=False, timeout=600, stdin=tty_fd, stdout=tty_fd, stderr=tty_fd
-                )
-            else:
-                subprocess.run(argv, check=False, timeout=600)
-        finally:
-            if tty_fd is not None:
-                os.close(tty_fd)
-    except (OSError, subprocess.TimeoutExpired):
+    if not run_interactive_login([argv_binary, *spec.login_args]):
         return False
     return harness_cli_logged_in(key)
 

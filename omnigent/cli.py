@@ -14555,7 +14555,9 @@ def _ensure_bundled_agent_brain_credential(name: str) -> None:
         candidates = [
             (entry_name, entry)
             for entry_name, entry in load_providers(config).items()
-            if family in provider_families(entry) and entry_name in disk_block
+            if family in provider_families(entry)
+            and entry_name in disk_block
+            and entry.config_dir is None
         ]
         if not candidates:
             return

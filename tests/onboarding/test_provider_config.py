@@ -1064,3 +1064,14 @@ def test_resolve_model_tier_without_models_map_is_passthrough() -> None:
     """No ``models:`` map → nothing to resolve."""
     family = FamilyConfig(base_url="http://bifrost.example.com/v1")
     assert family.resolve_model_tier("gpt-5") == "gpt-5"
+
+
+@pytest.mark.parametrize("family", [None, ANTHROPIC_FAMILY])
+def test_set_default_rejects_extra_account_without_mutation(family: str | None) -> None:
+    providers = {
+        "claude-work": {"kind": "subscription", "cli": "claude", "config_dir": "/accounts/work"}
+    }
+    with pytest.raises(OmnigentError, match="extra Claude account cannot be a default"):
+        set_default_provider(providers, "claude-work", family)
+    assert load_providers({"providers": providers})["claude-work"].default_families == frozenset()
+    assert "default" not in providers["claude-work"]

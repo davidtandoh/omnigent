@@ -21,6 +21,10 @@ except ImportError:
 # deliberately replaces ambient state; subprocesses inherit the safe override.
 _TEST_OMNIGENT_DATA_DIR = Path(tempfile.mkdtemp(prefix="omnigent-pytest-")).resolve()
 os.environ["OMNIGENT_DATA_DIR"] = str(_TEST_OMNIGENT_DATA_DIR)
+# An inherited config home (e.g. a managed service's) outranks tests that patch
+# ``omnigent.cli._GLOBAL_CONFIG_PATH``, so they would write to it. Tests that
+# need one set it themselves.
+os.environ.pop("OMNIGENT_CONFIG_HOME", None)
 # Servers and runners booted by tests otherwise sweep the developer's live
 # harness root. Prefer /tmp for the AF_UNIX path-length limit; some sandboxes
 # only allow the default temp dir.

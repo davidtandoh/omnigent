@@ -1898,6 +1898,10 @@ async def test_native_launch_arms_resolve_agent_spec_for_terminal(
     [
         None,
         "signed-in",
+        "managed-url",
+        "managed-helper",
+        "managed-gateway",
+        "managed-neutral",
         "signed-out",
         "mismatch",
         "wrapped-signed-in",
@@ -1918,6 +1922,22 @@ async def test_auto_create_claude_terminal_enforces_requested_account(
 ) -> None:
     """Probe the selected account before creating a terminal or seeding its config."""
     import sys
+    from unittest.mock import AsyncMock
+
+    from omnigent.harnesses.claude_native.main import ClaudeNativeUcodeConfig
+
+    resolver = AsyncMock(
+        return_value=ClaudeNativeUcodeConfig(
+            env={
+                "ANTHROPIC_BASE_URL": "https://gateway.invalid",
+                "ANTHROPIC_AUTH_TOKEN": "other-key",
+            },
+            api_key_helper="printf other-key",
+            model="other-provider-model",
+        )
+        if account
+        else None
+    )
 
     monkeypatch.setattr(claude_native_bridge, "_TRUSTED_PARENT", tmp_path)
     monkeypatch.setattr(claude_native_bridge, "_BRIDGE_ROOT", tmp_path / "root")
@@ -1934,6 +1954,26 @@ async def test_auto_create_claude_terminal_enforces_requested_account(
         "omnigent.runner.native.orchestration.native_launch_environment",
         lambda: {"CLAUDE_CONFIG_DIR": selected} if account else {},
     )
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.main.native_launch_environment",
+        lambda: {"CLAUDE_CONFIG_DIR": selected} if account else {},
+    )
+    conflicting_env_vars = (
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "ANTHROPIC_BEDROCK_BASE_URL",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_GATEWAY",
+        "ANTHROPIC_CUSTOM_HEADERS",
+        "ANTHROPIC_MODEL",
+    )
+    if account:
+        for name in conflicting_env_vars:
+            monkeypatch.setenv(name, "other-account")
     observation = tmp_path / "probe.json"
     command = tmp_path / "claude"
     logged_in = None if account == "inconclusive" else account != "signed-out"
@@ -1950,6 +1990,20 @@ async def test_auto_create_claude_terminal_enforces_requested_account(
     command.chmod(0o755)
     config_home = tmp_path / "config"
     config_home.mkdir()
+    managed_conflict = account in {"managed-url", "managed-helper", "managed-gateway"}
+    if account and account.startswith("managed-"):
+        managed_settings = config_home / "managed-settings.json"
+        settings = {
+            "managed-url": {"env": {"ANTHROPIC_BASE_URL": "https://managed.invalid"}},
+            "managed-helper": {"apiKeyHelper": "printf managed-token"},
+            "managed-gateway": {"env": {"CLAUDE_CODE_USE_GATEWAY": "1"}},
+            "managed-neutral": {},
+        }
+        managed_settings.write_text(json.dumps(settings[account]))
+        monkeypatch.setattr(
+            "omnigent.harnesses.claude_native.main._CLAUDE_CODE_MANAGED_SETTINGS_PATHS",
+            (managed_settings,),
+        )
     if account in {"mismatch", "wrapped-signed-in"}:
         wrapper_account = str(tmp_path / "different") if account == "mismatch" else selected
         launch_config = (
@@ -1985,9 +2039,20 @@ async def test_auto_create_claude_terminal_enforces_requested_account(
         transport=httpx.MockTransport(lambda req: httpx.Response(200, json={"labels": {}})),
     ) as client:
         launch = _auto_create_claude_terminal(
-            "a" * 32, _RecordingClaudeRegistry(captured), lambda *_: None, server_client=client
+            "a" * 32,
+            _RecordingClaudeRegistry(captured),
+            lambda *_: None,
+            server_client=client,
+            resolve_launch_config=resolver,
         )
-        if account in {"signed-out", "mismatch"} or (account and "conflicting" in account):
+        if managed_conflict:
+            with pytest.raises(
+                RuntimeError, match="managed settings override the selected account"
+            ):
+                await launch
+            assert captured == {}
+            assert not (tmp_path / "selected-account").exists()
+        elif account in {"signed-out", "mismatch"} or (account and "conflicting" in account):
             with pytest.raises(RuntimeError, match=r"not signed in|different CLAUDE_CONFIG_DIR"):
                 await launch
             assert captured == {}
@@ -2000,8 +2065,17 @@ async def test_auto_create_claude_terminal_enforces_requested_account(
             expected_account = selected if account else str(tmp_path / "daemon-account")
             assert env["CLAUDE_CONFIG_DIR"] == expected_account
             assert env["USER"] == env["LOGNAME"] == "alice"
+            if account:
+                assert not set(conflicting_env_vars).intersection(env)
+            assert "ANTHROPIC_BASE_URL" not in captured["spec"].env
+            assert "ANTHROPIC_AUTH_TOKEN" not in captured["spec"].env
+    if account:
+        resolver.assert_not_awaited()
+    else:
+        resolver.assert_awaited_once()
     if account in {
         "signed-in",
+        "managed-neutral",
         "signed-out",
         "wrapped-signed-in",
         "inconclusive",

@@ -111,3 +111,40 @@ def test_failed_probe_does_not_claim_signed_out_or_expose_output(
     assert "/accounts/work" in caplog.text
     assert "continuing" in caplog.text
     assert "private" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("launch_env", "process_env", "expected"),
+    [
+        ({"CLAUDE_CONFIG_DIR": "/accounts/work"}, "/accounts/other", "/accounts/work"),
+        ({"CLAUDE_CONFIG_DIR": ""}, "/accounts/other", None),
+        ({}, "/accounts/other", "/accounts/other"),
+        ({}, None, None),
+    ],
+)
+def test_runner_launch_account_selects_transcript_and_session_dirs(
+    launch_env: dict[str, str],
+    process_env: str | None,
+    expected: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Resume transcripts and session files follow the account the child runs on."""
+    from omnigent.harnesses.claude_native import main as claude_native
+    from omnigent.harnesses.claude_native.status_file import sessions_dir
+    from omnigent.native import launch_environment
+
+    monkeypatch.setattr(launch_environment, "_installed_native_launch_environment", launch_env)
+    if process_env is None:
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    else:
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", process_env)
+    default_projects = tmp_path / "default-projects"
+    monkeypatch.setattr(claude_native, "_CLAUDE_PROJECTS_DIR", default_projects)
+
+    if expected is None:
+        assert claude_native._claude_projects_dir() == default_projects
+        assert sessions_dir() == Path.home() / ".claude" / "sessions"
+    else:
+        assert claude_native._claude_projects_dir() == Path(expected) / "projects"
+        assert sessions_dir() == Path(expected) / "sessions"

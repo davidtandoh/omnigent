@@ -49,6 +49,7 @@ def _stub_picker(
     default: str = "claude-opus-5",
     control_failure: str | None = None,
     legacy_failure: bool = False,
+    expected_account: str | None = None,
     help_text: str = "Usage: /model <name>. Available: opus, fable, best, fable[1m], default, "
     "or a full model ID.",
 ) -> list[tuple[str, ...]]:
@@ -122,6 +123,10 @@ def _stub_picker(
 
     async def spawn(command: str, *args: str, **kwargs: Any) -> Process:
         launches.append(args)
+        if expected_account is not None:
+            assert kwargs["env"]["CLAUDE_CONFIG_DIR"] == expected_account
+            assert "ANTHROPIC_API_KEY" not in kwargs["env"]
+            assert "ANTHROPIC_BASE_URL" not in kwargs["env"]
         alias = args[args.index("--model") + 1] if "--model" in args else None
         if "--input-format" in args:
             assert kwargs["stdin"] == asyncio.subprocess.PIPE
@@ -318,3 +323,44 @@ async def test_catalog_keeps_enabled_fable_and_future_picker_models(
         },
         {"id": "future", "model": "vendor-future", "displayName": "Future model"},
     ]
+
+
+async def test_selected_account_has_its_own_probed_launch_catalog(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from omnigent.native import launch_environment
+
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "default-account"))
+    monkeypatch.setattr(launch_environment, "_installed_native_launch_environment", {})
+    monkeypatch.setattr(
+        "omnigent.claude_launcher.resolve_claude_launch", lambda command, args: (command, args)
+    )
+    monkeypatch.setattr(claude_native, "managed_claude_gateway_signal", lambda: (None, False))
+    monkeypatch.setattr("omnigent.onboarding.ambient.claude_managed_model_picker", lambda: None)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    _stub_picker(
+        monkeypatch,
+        [{"value": "sonnet", "resolvedModel": "claude-sonnet-5", "displayName": "Sonnet"}],
+        default="claude-sonnet-5",
+    )
+    default_rows = await claude_native.claude_launch_catalog(None)
+    assert next(row for row in default_rows if row.get("isDefault"))["model"] == "claude-sonnet-5"
+    account = str(tmp_path / "work-account")
+    monkeypatch.setattr(
+        launch_environment, "_installed_native_launch_environment", {"CLAUDE_CONFIG_DIR": account}
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "other-key")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://other-gateway.invalid")
+    launches = _stub_picker(
+        monkeypatch,
+        [{"value": "opus", "resolvedModel": "claude-opus-5", "displayName": "Opus"}],
+        expected_account=account,
+    )
+    work_rows = await claude_native.claude_launch_catalog(None)
+    assert launches
+    assert next(row for row in work_rows if row.get("isDefault"))["model"] == "claude-opus-5"
+    count = len(launches)
+    assert await claude_native.claude_launch_catalog(None) == work_rows
+    assert len(launches) == count

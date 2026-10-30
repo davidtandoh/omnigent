@@ -9358,30 +9358,43 @@ async def _auto_create_claude_terminal(
         resolve_bound_model,
     )
 
-    inference_config = load_runtime_inference_config()
-    claude_binding = binding_for_harness(inference_config, "claude-native")
-    try:
-        if resolve_launch_config is not None:
-            claude_config = await resolve_launch_config()
-        else:
-            claude_config = await asyncio.to_thread(resolve_native_claude_config, spec=None)
-    except click.ClickException:
-        # An authoritative Databricks response with no Claude models is a
-        # configuration failure, not permission to bypass the gateway.
-        raise
-    except Exception:
-        if claude_binding is not None:
+    inference_config = None
+    claude_binding = None
+    if "CLAUDE_CONFIG_DIR" not in native_launch_environment():
+        inference_config = load_runtime_inference_config()
+        claude_binding = binding_for_harness(inference_config, "claude-native")
+        try:
+            if resolve_launch_config is not None:
+                claude_config = await resolve_launch_config()
+            else:
+                claude_config = await asyncio.to_thread(resolve_native_claude_config, spec=None)
+        except click.ClickException:
+            # An authoritative Databricks response with no Claude models is a
+            # configuration failure, not permission to bypass the gateway.
             raise
-        _logger.warning(
-            "native-claude: could not derive a provider/ucode launch config "
-            "— FALLING BACK to Claude Code's own login; "
-            "your configured provider will NOT be used. Check "
-            "`omnigent setup --no-internal-beta` "
-            "and that the secret resolves in this process.",
-            exc_info=True,
-            extra={"session_id": session_id},
-        )
-        _launch_config_resolution_failed = True
+        except Exception:
+            if claude_binding is not None:
+                raise
+            _logger.warning(
+                "native-claude: could not derive a provider/ucode launch config "
+                "— FALLING BACK to Claude Code's own login; "
+                "your configured provider will NOT be used. Check "
+                "`omnigent setup --no-internal-beta` "
+                "and that the secret resolves in this process.",
+                exc_info=True,
+                extra={"session_id": session_id},
+            )
+            _launch_config_resolution_failed = True
+    else:
+        from omnigent.harnesses.claude_native.main import managed_claude_gateway_signal
+
+        managed_base_url, managed_credential = managed_claude_gateway_signal()
+        if managed_base_url or managed_credential:
+            raise RuntimeError(
+                "native-claude: managed settings override the selected account. "
+                "A subscription account cannot be selected while managed Claude settings "
+                "configure a gateway or apiKeyHelper."
+            )
     # A transient resolver failure must not be cached as "no provider configured".
     # A routed session's turn-1 ``/model`` can only reach ids this launch env
     # spells, so point the family aliases at the router's frozen arms before the
@@ -9403,7 +9416,7 @@ async def _auto_create_claude_terminal(
         if session_model_override
         else unpinned_launch_model
     )
-    if claude_binding is not None:
+    if claude_binding is not None and inference_config is not None:
         unpinned_launch_model = resolve_bound_model(
             inference_config, "claude-native", _claude_native_model_from_spec(agent_spec)
         )

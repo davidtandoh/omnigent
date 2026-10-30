@@ -331,6 +331,50 @@ explicit `CLAUDE_CONFIG_DIR` keep their existing behavior.
 **Capabilities** when the installed build enforces the selected account. A
 launcher can check for that line instead of pinning an Omnigent version.
 
+To keep extra Claude subscriptions next to your default login, run
+`omnigent setup`, choose **Claude**, then **Claude — another subscription
+account**. Setup asks for a short name such as `work`, creates
+`claude-accounts/work` in the Omnigent config folder (`~/.omnigent` unless
+`OMNIGENT_CONFIG_HOME` is set), and runs `claude auth login` there. It saves
+the account to `config.yaml` as `claude-work` only after `claude auth status`
+confirms the sign-in:
+
+```yaml
+providers:
+  claude-work:
+    kind: subscription
+    cli: claude
+    config_dir: /Users/me/.omnigent/claude-accounts/work
+```
+
+Start a session on that account with `omnigent claude --account work`, which
+passes the account's `CLAUDE_CONFIG_DIR` to the launch check above and uses
+Claude's own subscription routing, bypassing Omnigent gateway, key, and Bedrock
+providers for this launch. If managed Claude settings configure a gateway or
+`apiKeyHelper`, the launch is refused because those settings override the
+selected account. `NAME` is always the exact short account name;
+provider names are not aliases. Omit `--account` to use the default login
+when subscription routing is configured. No explicit default-login alias is
+supported. Adding an account always runs `claude auth login --claudeai`, even
+if its retained folder already reports signed in. Pass
+`--account` again when you resume the session, because Omnigent does not store
+the account with the session. Resume lookup and transcript relocation use the
+selected account's folder, including when the original workspace is gone.
+New sessions read reasoning effort from that account's `settings.json`;
+an explicit `--effort` takes precedence. The web UI and agent specs do not
+expose this account selector. An extra account cannot be a default. Setup
+lists each account as **Subscription (claude-work)**. When an account's
+sign-in expires, select it and choose **Sign in again**, which runs
+`claude auth login --claudeai` for that account only. Removing an account
+attempts to sign out only that account,
+removes its provider entry, and keeps its folder. If sign-out cannot be
+confirmed, setup warns that the login may remain. Adding the same name again
+reuses its sessions.
+
+On macOS, Claude stores each sign-in in the login keychain, which an SSH
+session cannot open. Over SSH, setup refuses the login step and exits with an
+error. Add the account from the Mac's own screen or through Screen Sharing.
+
 For Codex, Omnigent applies these variables to both the app-server that runs
 tools and the attached terminal UI. The agent's tool shell therefore receives
 the explicit launch environment.

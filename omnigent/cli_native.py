@@ -75,6 +75,32 @@ def _parse_native_env_option(entries: tuple[str, ...]) -> dict[str, str]:
         raise click.UsageError(str(exc)) from None
 
 
+def _claude_account_launch_env(
+    config: dict[str, object], account: str, launch_env: dict[str, str]
+) -> dict[str, str]:
+    """Add the named Claude account's ``CLAUDE_CONFIG_DIR`` to *launch_env*.
+
+    The runner then checks that account before launch, as for ``--env``.
+    """
+    from omnigent.cli_invocation import cli_invocation
+    from omnigent.errors import OmnigentError
+    from omnigent.onboarding.claude_accounts import find_account
+
+    if "CLAUDE_CONFIG_DIR" in launch_env:
+        raise click.UsageError("--account and --env CLAUDE_CONFIG_DIR=... are mutually exclusive.")
+    try:
+        entry = find_account(config, account)
+    except OmnigentError as exc:
+        raise click.ClickException(str(exc)) from None
+    if entry is None:
+        raise click.UsageError(
+            f"No Claude account named {account!r}. "
+            f"Add or list accounts with `{cli_invocation()} setup`."
+        )
+    assert entry.config_dir is not None
+    return {**launch_env, "CLAUDE_CONFIG_DIR": entry.config_dir}
+
+
 def _late_bound(
     getter: Callable[[], Callable[_Args, _Return]],
 ) -> Callable[_Args, _Return]:
@@ -103,6 +129,7 @@ def register_native_commands(cli: click.Group) -> None:
     _build_kiro_launch_args = _late_bound(lambda: _cli._build_kiro_launch_args)
     _ensure_backend = _late_bound(lambda: _cli._ensure_backend)
     _load_effective_config = _late_bound(lambda: _cli._load_effective_config)
+    _load_global_config = _late_bound(lambda: _cli._load_global_config)
     _reject_reserved_codex_transport_args = _late_bound(
         lambda: _cli._reject_reserved_codex_transport_args
     )
@@ -207,6 +234,16 @@ def register_native_commands(cli: click.Group) -> None:
     )
     @_native_env_option
     @click.option(
+        "--account",
+        "account",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Run this session on a Claude account added with `omnigent setup`, "
+            "e.g. --account work. Pass it again when you resume the session."
+        ),
+    )
+    @click.option(
         "--smart-routing",
         "smart_routing",
         is_flag=True,
@@ -229,6 +266,7 @@ def register_native_commands(cli: click.Group) -> None:
         prompt: str | None,
         smart_routing: bool,
         launch_env_entries: tuple[str, ...],
+        account: str | None,
         claude_args: tuple[str, ...],
     ) -> None:
         # Param docs live in comments — Click uses the docstring for --help.
@@ -241,6 +279,7 @@ def register_native_commands(cli: click.Group) -> None:
         # :param prompt: Optional initial TUI prompt.
         # :param smart_routing: When True, arm Smart Routing for the session so
         #     the first typed message picks the model.
+        # :param account: Optional short Claude account name.
         # :param claude_args: Pass-through args for ``claude``.
         """Launch Claude Code with Omnigent.
 
@@ -251,6 +290,7 @@ def register_native_commands(cli: click.Group) -> None:
           omnigent claude --resume                  # interactive picker
           omnigent claude --server https://<app>.databricksapps.com
           omnigent claude --smart-routing           # first message picks the model
+          omnigent claude --account work            # use an extra Claude account
 
         \b
         Capabilities:
@@ -272,6 +312,10 @@ def register_native_commands(cli: click.Group) -> None:
 
         # Apply config defaults (same as ``run`` does).
         cfg = _load_effective_config()
+        if account is not None:
+            # Accounts are user-owned, so a project config cannot redirect one.
+            launch_env = _claude_account_launch_env(_load_global_config(), account, launch_env)
+            use_claude_config = True
         if server is None:
             server = cfg.get("server")
         auto_open_conversation = _resolve_auto_open_conversation_from_config(cfg)

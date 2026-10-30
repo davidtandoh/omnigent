@@ -90,6 +90,7 @@ from omnigent.databricks_ai_gateway import (
     with_gateway_attribution_lines,
 )
 from omnigent.entities.session_resources import terminal_resource_id
+from omnigent.harnesses.claude_native.account import selected_claude_config_dir
 from omnigent.harnesses.claude_native.bridge import (
     BRIDGE_ID_LABEL_KEY,
     RESUME_COPY_MARKER_SUFFIX,
@@ -137,6 +138,7 @@ from omnigent.models.claude_model_vocabulary import (
     served_canonical_overrides,
 )
 from omnigent.native._native_resume_hint import echo_native_resume_hint
+from omnigent.native.launch_environment import native_launch_environment
 from omnigent.native.native_coding_agents import native_shell_terminal_spec
 from omnigent.native.native_terminal import (
     DAEMON_HOST_ONLINE_TIMEOUT_S as _DAEMON_HOST_ONLINE_TIMEOUT_S,
@@ -477,7 +479,11 @@ def _ambient_env_is_non_anthropic_gateway() -> bool:
     fingerprint must treat the env as a non-canonical endpoint.
     """
     managed_base_url, _ = managed_claude_gateway_signal()
-    base_url = managed_base_url or os.environ.get(_UCODE_CLAUDE_BASE_URL_ENV, "")
+    base_url = managed_base_url or (
+        os.environ.get(_UCODE_CLAUDE_BASE_URL_ENV, "")
+        if "CLAUDE_CONFIG_DIR" not in native_launch_environment()
+        else ""
+    )
     if not base_url:
         return False
     host = (urlparse(base_url).hostname or "").lower()
@@ -965,6 +971,7 @@ def _claude_model_probe_invocation(
     command, launch_args = resolve_claude_launch("claude", args)
     env = dict(os.environ)
     env.update(build_native_claude_terminal_env(claude_config))
+    env.update(native_launch_environment())
     env.update(
         {
             "DISABLE_TELEMETRY": "1",
@@ -1323,10 +1330,15 @@ def claude_catalog_fingerprint(claude_config: ClaudeNativeUcodeConfig | None) ->
     ambient_gateway = None
     if claude_config is None:
         managed_base_url, _ = managed_claude_gateway_signal()
-        ambient_gateway = managed_base_url or os.environ.get(_UCODE_CLAUDE_BASE_URL_ENV)
+        ambient_gateway = managed_base_url or (
+            os.environ.get(_UCODE_CLAUDE_BASE_URL_ENV)
+            if "CLAUDE_CONFIG_DIR" not in native_launch_environment()
+            else None
+        )
     return fingerprint_of(
         "claude-native",
         "control-picker-v3",
+        native_launch_environment().get("CLAUDE_CONFIG_DIR", os.environ.get("CLAUDE_CONFIG_DIR")),
         sorted(claude_config.env.items()) if claude_config is not None else None,
         claude_config.api_key_helper if claude_config is not None else None,
         claude_config.model if claude_config is not None else None,
@@ -1527,9 +1539,27 @@ def claude_launch_catalog_is_stale(claude_config: ClaudeNativeUcodeConfig | None
 def native_claude_auth_env_unset(
     claude_config: ClaudeNativeUcodeConfig | None,
 ) -> tuple[str, ...]:
-    """Credentials that would override the explicitly configured auth helper."""
+    """Credentials and routing variables that override explicit authentication."""
+    credentials = (_ANTHROPIC_API_KEY_ENV, "ANTHROPIC_AUTH_TOKEN")
+    if "CLAUDE_CONFIG_DIR" in native_launch_environment():
+        return tuple(
+            sorted(
+                {
+                    *credentials,
+                    *_CONNECT_BROKER_UCODE_ENV_ALLOWLIST,
+                    "CLAUDE_CODE_OAUTH_TOKEN",
+                    _ANTHROPIC_BEDROCK_BASE_URL_ENV,
+                    _AWS_BEARER_TOKEN_BEDROCK_ENV,
+                    _CLAUDE_CODE_USE_BEDROCK_ENV,
+                    "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+                    "CLAUDE_CODE_USE_VERTEX",
+                    "CLAUDE_CODE_SKIP_VERTEX_AUTH",
+                    "ANTHROPIC_VERTEX_BASE_URL",
+                }
+            )
+        )
     if claude_config is not None and claude_config.api_key_helper:
-        return (_ANTHROPIC_API_KEY_ENV, "ANTHROPIC_AUTH_TOKEN")
+        return credentials
     return ()
 
 
@@ -1777,6 +1807,7 @@ def _align_working_directory_with_session(
     *,
     base_url: str | None = None,
     headers: dict[str, str] | None = None,
+    launch_env: Mapping[str, str] | None = None,
 ) -> None:
     """
     Resolve cwd mismatch before resuming a Claude-native session.
@@ -1845,7 +1876,7 @@ def _align_working_directory_with_session(
         headers=headers or {},
         session_id=session_id,
     )
-    redirect_available = _redirect_available(external_session_id)
+    redirect_available = _redirect_available(external_session_id, launch_env=launch_env)
     if not recorded_path.is_dir() and not redirect_available:
         raise click.ClickException(
             f"Session {session_id} was created in {recorded_path}, but that "
@@ -1870,6 +1901,7 @@ def _align_working_directory_with_session(
             session_id=session_id,
             external_session_id=external_session_id,
             current=current,
+            launch_env=launch_env,
         )
         return
     raise click.ClickException("Resume cancelled.")
@@ -2398,7 +2430,9 @@ def _fetch_external_session_id_for_redirect(
     return external_session_id
 
 
-def _redirect_available(external_session_id: str | None) -> bool:
+def _redirect_available(
+    external_session_id: str | None, *, launch_env: Mapping[str, str] | None = None
+) -> bool:
     """
     Return whether a Claude transcript can be redirected.
 
@@ -2407,7 +2441,7 @@ def _redirect_available(external_session_id: str | None) -> bool:
     """
     if external_session_id is None:
         return False
-    return _find_claude_transcript(external_session_id) is not None
+    return _find_claude_transcript(external_session_id, launch_env=launch_env) is not None
 
 
 def _redirect_claude_transcript_to_current_project(
@@ -2415,6 +2449,7 @@ def _redirect_claude_transcript_to_current_project(
     session_id: str,
     external_session_id: str,
     current: Path,
+    launch_env: Mapping[str, str] | None = None,
 ) -> Path:
     """
     Move a Claude transcript into the current cwd's Claude project.
@@ -2433,18 +2468,23 @@ def _redirect_claude_transcript_to_current_project(
     :raises click.ClickException: If the source transcript is missing
         or unsafe.
     """
-    target_dir = _claude_project_dir_for_cwd(current)
+    target_dir = _claude_project_dir_for_cwd(current, launch_env=launch_env)
     target = target_dir / f"{external_session_id}.jsonl"
-    source = _find_claude_transcript(external_session_id, exclude=target)
+    source = _find_claude_transcript(external_session_id, exclude=target, launch_env=launch_env)
     if source is None and target.is_file():
         redirect_launch_state(session_id, str(current))
         return target
     if source is None:
         raise click.ClickException(
             f"Claude transcript {external_session_id!r} was not found under "
-            f"{_claude_projects_dir()}."
+            f"{_claude_projects_dir(launch_env=launch_env)}."
         )
-    if find_background_holder(external_session_id) is not None:
+    if (
+        find_background_holder(
+            external_session_id, config_dir=selected_claude_config_dir(launch_env)
+        )
+        is not None
+    ):
         # Cold resume will rebuild a copy in the requested workspace.
         redirect_launch_state(session_id, str(current))
         click.echo("Keeping the background job's transcript; resuming a copy here.", err=True)
@@ -2635,7 +2675,7 @@ def _clone_claude_transcript(
 
     Used to carry a forked claude-native session's history into the
     clone. We copy the source transcript ourselves into the clone's OWN
-    project dir (``~/.claude/projects/<enc(clone_workspace)>/``) under a
+    project dir in the selected account's ``projects`` folder under a
     uuid we assign, rewriting per-record ``sessionId`` →
     *target_external_session_id* and ``cwd`` → *clone_workspace* (the
     ``uuid`` / ``parentUuid`` chain is preserved). The clone then
@@ -2691,7 +2731,10 @@ def _clone_claude_transcript(
 
 
 def _find_claude_transcript(
-    external_session_id: str, *, exclude: Path | None = None
+    external_session_id: str,
+    *,
+    exclude: Path | None = None,
+    launch_env: Mapping[str, str] | None = None,
 ) -> Path | None:
     """
     Find a local Claude transcript by session id.
@@ -2704,7 +2747,7 @@ def _find_claude_transcript(
     """
     if not _CLAUDE_SESSION_ID_RE.fullmatch(external_session_id):
         return None
-    projects_dir = _claude_projects_dir()
+    projects_dir = _claude_projects_dir(launch_env=launch_env)
     if not projects_dir.is_dir():
         return None
     matches: list[Path] = []
@@ -2722,20 +2765,21 @@ def _find_claude_transcript(
     return matches[0]
 
 
-def _claude_projects_dir() -> Path:
+def _claude_projects_dir(*, launch_env: Mapping[str, str] | None = None) -> Path:
     """
     Return the directory Claude Code keeps its project transcripts in.
 
     Mirrors Claude's own resolution: ``$CLAUDE_CONFIG_DIR/projects`` when set,
-    otherwise ``~/.claude/projects``.
+    otherwise ``~/.claude/projects``. A runner's explicit launch value wins
+    (see :func:`selected_claude_config_dir`).
 
     :returns: The projects directory (not guaranteed to exist).
     """
-    configured = os.environ.get("CLAUDE_CONFIG_DIR")
-    return Path(configured).expanduser() / "projects" if configured else _CLAUDE_PROJECTS_DIR
+    configured = selected_claude_config_dir(launch_env)
+    return configured / "projects" if configured is not None else _CLAUDE_PROJECTS_DIR
 
 
-def _claude_project_dir_for_cwd(cwd: Path) -> Path:
+def _claude_project_dir_for_cwd(cwd: Path, *, launch_env: Mapping[str, str] | None = None) -> Path:
     """
     Return Claude's project transcript directory for *cwd*.
 
@@ -2746,7 +2790,7 @@ def _claude_project_dir_for_cwd(cwd: Path) -> Path:
     :param cwd: Absolute cwd, e.g. ``Path("/home/me/repo")``.
     :returns: Claude project transcript directory.
     """
-    return _claude_projects_dir() / _sanitize_claude_project_name(str(cwd))
+    return _claude_projects_dir(launch_env=launch_env) / _sanitize_claude_project_name(str(cwd))
 
 
 def _sanitize_claude_project_name(path: str) -> str:
@@ -4698,6 +4742,7 @@ async def _prepare_claude_terminal_via_daemon(
                     bridge_id=None,
                     claude_args=tuple(persist_args),
                     terminal_launch_args=persist_args or None,
+                    launch_env=launch_env,
                 ),
                 wait_for_host_online(client, host_id, timeout_s=_DAEMON_HOST_ONLINE_TIMEOUT_S),
             )
@@ -4950,6 +4995,7 @@ def _run_with_remote_server(
                     resolved_session_id,
                     base_url=base_url,
                     headers=headers,
+                    launch_env=launch_env,
                 )
                 _mark_startup_step(
                     startup_profiler,
@@ -5492,7 +5538,7 @@ async def _ensure_local_claude_resume_transcript(
 
     Cross-machine resume has the Omnigent conversation and Claude external
     session id on the server, but not Claude Code's local
-    ``~/.claude/projects/<cwd>/<sid>.jsonl`` file. Claude's
+    ``projects/<cwd>/<sid>.jsonl`` file in the selected account's folder. Claude's
     ``--resume <sid>`` consults that local project transcript. The
     wrapper always rewrites it from committed Omnigent items before launch so
     Omnigent remains the source of truth when a previous local Claude JSONL
@@ -5504,8 +5550,8 @@ async def _ensure_local_claude_resume_transcript(
     :param external_session_id: Claude-native session id, e.g.
         ``"02857840-6362-408f-b41f-309e396ed7c6"``.
     :param workspace: Resolved directory Claude will run in — its
-        ``~/.claude/projects/<encoded-workspace>/`` is where the
-        transcript must land for ``--resume`` to find it. The CLI
+        encoded project directory in the selected account's ``projects`` folder
+        is where the transcript must land for ``--resume`` to find it. The CLI
         passes ``Path.cwd()``; a runner-side launch passes its
         ``OMNIGENT_RUNNER_WORKSPACE``. Pass an already-resolved
         path (symlinks collapsed) so the project-dir encoding matches
@@ -6349,6 +6395,7 @@ async def _create_claude_session(
     bridge_id: str | None,
     claude_args: tuple[str, ...] = (),
     terminal_launch_args: list[str] | None = None,
+    launch_env: Mapping[str, str] | None = None,
 ) -> str:
     """
     Create a bundled terminal-first Claude session.
@@ -6377,6 +6424,7 @@ async def _create_claude_session(
         and applies them when it auto-launches the terminal. ``None``
         (the CLI-direct path, which passes args via the live terminal
         POST instead) persists nothing.
+    :param launch_env: Explicit launch values used to select the account settings.
     :returns: New session id, e.g. ``"conv_abc123"``.
     :raises click.ClickException: If creation fails.
     """
@@ -6387,7 +6435,9 @@ async def _create_claude_session(
     if terminal_launch_args:
         metadata["terminal_launch_args"] = terminal_launch_args
     # Stamp the wrapped claude's real effort so the pill isn't a guess.
-    effort = resolve_launch_effort_level(claude_args)
+    effort = resolve_launch_effort_level(
+        claude_args, config_dir=selected_claude_config_dir(launch_env)
+    )
     if effort is not None:
         metadata["reasoning_effort"] = effort
     resp = await client.post(

@@ -51,3 +51,17 @@ def test_pytest_does_not_inherit_debug_log_delivery_credentials() -> None:
         timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_pytest_does_not_inherit_a_real_omnigent_config_home() -> None:
+    """Config writes in tests must never reach the caller's config home."""
+    env = {**os.environ, "OMNIGENT_CONFIG_HOME": "/managed/omnigent/config"}
+    check = "import os; assert 'OMNIGENT_CONFIG_HOME' not in os.environ"
+    result = subprocess.run(
+        [sys.executable, "-c", f"import tests.conftest; {check}"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
