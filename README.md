@@ -347,22 +347,35 @@ providers:
     config_dir: /Users/me/.omnigent/claude-accounts/work
 ```
 
-Start a session on that account with `omnigent claude --account work`, which
-passes the account's `CLAUDE_CONFIG_DIR` to the launch check above and uses
-Claude's own subscription routing, bypassing Omnigent gateway, key, and Bedrock
-providers for this launch. If managed Claude settings configure a gateway or
-`apiKeyHelper`, the launch is refused because those settings override the
-selected account. `NAME` is always the exact short account name;
-provider names are not aliases. Omit `--account` to use the default login
-when subscription routing is configured. No explicit default-login alias is
+Start a session on that account with `omnigent claude --account work`. The
+session records the account's name, never its folder. On every start,
+relaunch, resume, fork, and child session, the machine that launches the
+session looks the name up in its own `config.yaml`, passes that account's
+`CLAUDE_CONFIG_DIR` to the launch check above, and uses Claude's own
+subscription routing, bypassing Omnigent gateway, key, and Bedrock providers.
+If the account is missing, renamed, removed, or signed out on that machine, the
+launch is refused with the account and machine named; it never falls back to
+the default login. Moving a session to another machine therefore needs an
+account with the same name there. An older Omnigent host that cannot select
+accounts is refused rather than sent the account. If managed Claude settings
+configure a gateway or `apiKeyHelper`, the launch is refused because those
+settings override the selected account. `NAME` is always the exact short
+account name; provider names are not aliases. Sessions started without
+`--account` keep using the default login. No explicit default-login alias is
 supported. Adding an account always runs `claude auth login --claudeai`, even
-if its retained folder already reports signed in. Pass
-`--account` again when you resume the session, because Omnigent does not store
-the account with the session. Resume lookup and transcript relocation use the
-selected account's folder, including when the original workspace is gone.
-New sessions read reasoning effort from that account's `settings.json`;
-an explicit `--effort` takes precedence. The web UI and agent specs do not
-expose this account selector. An extra account cannot be a default. Setup
+if its retained folder already reports signed in. Resume needs no `--account`:
+the session keeps its account. Resuming with a different `--account` is
+refused, because switching accounts is a fork onto the other account; the
+fork API (`POST /v1/sessions/{id}/fork`) takes an `account`, and a fork onto a
+different account rebuilds the Claude transcript in that account's folder.
+Resume lookup and transcript relocation use the session's account folder,
+including when the original workspace is gone. New sessions read reasoning
+effort from that account's `settings.json`; an explicit `--effort` takes
+precedence. An agent spec selects an account with
+`executor.auth: {type: provider, name: claude-work}`; sessions of that agent
+record the account, and a launch that would not use it is refused. Only Claude
+Code (`claude-native`) sessions can use an extra account. The web UI does not
+expose this account selector yet. An extra account cannot be a default. Setup
 lists each account as **Subscription (claude-work)**. When an account's
 sign-in expires, select it and choose **Sign in again**, which runs
 `claude auth login --claudeai` for that account only. Removing an account

@@ -218,6 +218,51 @@ def test_create_persists_initial_labels_and_overrides(
     assert fetched.harness_override == "codex-native"
 
 
+def test_session_account_survives_children_and_forks(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """A recorded Claude account is inherited by children and copied by forks."""
+    parent = conversation_store.create_conversation(account="work", model_override="m")
+    assert parent.account == "work"
+
+    child = conversation_store.create_conversation(parent_conversation_id=parent.id)
+    bundled_child = conversation_store.create_session_with_agent(
+        agent_id="1b6cf1f0662a1eab8722ca44e9d0b111",
+        agent_name="child-agent",
+        agent_bundle_location="1b6cf1f0662a1eab8722ca44e9d0b111/bundle1",
+        agent_description=None,
+        parent_conversation_id=parent.id,
+    ).conversation
+    grandchild = conversation_store.create_conversation(parent_conversation_id=child.id)
+    for conv in (child, bundled_child, grandchild):
+        fetched = conversation_store.get_conversation(conv.id)
+        assert fetched is not None and fetched.account == "work"
+
+    fork = conversation_store.fork_conversation(parent.id, copy_model_settings=False)
+    assert fork.account == "work"
+    assert fork.model_override is None
+    moved = conversation_store.fork_conversation(
+        parent.id, override_account="client-a", override_account_set=True
+    )
+    assert moved.account == "client-a"
+    cleared = conversation_store.fork_conversation(
+        parent.id, override_account=None, override_account_set=True
+    )
+    assert cleared.account is None
+
+
+def test_session_without_account_keeps_the_default_login(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """Sessions with no recorded account store nothing new and read back as default."""
+    created = conversation_store.create_conversation()
+    child = conversation_store.create_conversation(parent_conversation_id=created.id)
+    assert created.account is None and child.account is None
+    fetched = conversation_store.get_conversation(created.id)
+    assert fetched is not None and fetched.account is None
+    assert conversation_store.fork_conversation(created.id).account is None
+
+
 def test_create_with_existing_caller_supplied_id_raises(db_uri: str) -> None:
     """A stable caller id turns a retry from another store into a typed conflict."""
     from omnigent.stores.conversation_store import ConversationAlreadyExistsError

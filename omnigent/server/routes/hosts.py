@@ -66,6 +66,7 @@ from omnigent.server.host_registry import HostConnection, HostRegistry
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._host_launch import (
     LAUNCH_TIMEOUT_ENV_VAR,
+    account_launch_refusal,
     host_absent_error,
     resolve_host_launch,
     resolve_launch_timeout_s,
@@ -971,6 +972,9 @@ def create_hosts_router(
             except WorktreeError as exc:
                 raise HTTPException(status_code=400, detail=exc.message) from exc
 
+        if (refusal := account_launch_refusal(target.conv.account, conn)) is not None:
+            raise OmnigentError(refusal, code=ErrorCode.HARNESS_NOT_CONFIGURED)
+
         # Resolve the harness before creating host-side state.
         harness: str | None = None
         if agent_store is not None and agent_cache is not None:
@@ -1190,6 +1194,7 @@ def create_hosts_router(
                 native_env=native_env or None,
                 # The session had no runner bound, so nothing is superseded.
                 superseded_runner_ids=(),
+                account=target.conv.account,
             )
         )
         try:

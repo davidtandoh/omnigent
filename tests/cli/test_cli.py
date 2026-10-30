@@ -576,23 +576,25 @@ def test_native_wrapper_env_rejects_duplicates_before_backend_start(
 
 
 @pytest.mark.parametrize(
-    ("args", "expected_env"),
+    ("args", "expected_account", "expected_env"),
     [
-        (["--account", "work"], {"CLAUDE_CONFIG_DIR": "/home/u/.omnigent/claude-accounts/work"}),
+        (["--account", "work"], "work", {}),
         (
             ["--account", "claude-work", "--env", "FM_TASK_ID=7"],
-            {"FM_TASK_ID": "7", "CLAUDE_CONFIG_DIR": "/accounts/claude-work"},
+            "claude-work",
+            {"FM_TASK_ID": "7"},
         ),
     ],
 )
 @pytest.mark.parametrize("default_kind", ["subscription", "key", "gateway", "bedrock"])
-def test_claude_account_option_selects_the_account_config_dir(
+def test_claude_account_option_records_the_account_name(
     args: list[str],
+    expected_account: str,
     expected_env: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
     default_kind: str,
 ) -> None:
-    """``--account`` resolves a user-config Claude account into the launch env."""
+    """``--account`` checks the account is set up here and passes only its name on."""
     providers = {
         "claude-subscription": {"kind": "subscription", "cli": "claude", "default": True},
         "claude-work": {
@@ -628,6 +630,8 @@ def test_claude_account_option_selects_the_account_config_dir(
     result = CliRunner().invoke(cli, ["claude", *args])
 
     assert result.exit_code == 0, result.output
+    assert captured["account"] == expected_account
+    # The folder is resolved by the host daemon from the name, never sent.
     assert captured["launch_env"] == expected_env
     assert captured["use_claude_config"] is True
 
@@ -642,6 +646,7 @@ def test_claude_account_option_selects_the_account_config_dir(
             ["--account", "work", "--env", "CLAUDE_CONFIG_DIR=/elsewhere"],
             "mutually exclusive",
         ),
+        (["--account", "work", "--smart-routing"], "cannot be combined with --smart-routing"),
     ],
 )
 def test_claude_account_option_rejects_before_backend_start(

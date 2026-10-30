@@ -12,6 +12,7 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import dataclasses
 import errno
 import functools
 import json
@@ -1954,6 +1955,26 @@ class HostProcess:
             ``"failed"`` result. Deterministic preflight refusals
             include a machine-readable ``error_code``.
         """
+        if frame.account is not None:
+            from omnigent.onboarding.claude_accounts import (
+                AccountUnavailableError,
+                account_launch_environment,
+            )
+
+            # Resolve before the reuse and custody checks, so both compare the
+            # account's folder: a live runner on another account is refused.
+            try:
+                account_env = await asyncio.to_thread(
+                    account_launch_environment,
+                    frame.account,
+                    frame.native_env,
+                    host_name=self._identity.name,
+                )
+            except AccountUnavailableError as exc:
+                return self._launch_failed(
+                    frame, str(exc), error_code=HARNESS_NOT_CONFIGURED_ERROR_CODE
+                )
+            frame = dataclasses.replace(frame, native_env=account_env)
         durable = IS_POSIX and frame.harness in SUPPORTED_HARNESSES and bool(frame.session_id)
         if IS_POSIX and frame.session_id:
             try:

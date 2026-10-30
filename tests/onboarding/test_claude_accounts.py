@@ -9,8 +9,12 @@ import pytest
 from omnigent.errors import OmnigentError
 from omnigent.onboarding.ambient import DetectedProvider
 from omnigent.onboarding.claude_accounts import (
+    AccountUnavailableError,
     account_config_dir,
+    account_launch_environment,
     account_name_error,
+    account_name_for_config_dir,
+    account_name_from_provider,
     find_account,
     ssh_login_refusal,
 )
@@ -132,3 +136,78 @@ def test_default_login_is_not_an_extra_account() -> None:
         )
         is None
     )
+
+
+@pytest.mark.parametrize(
+    ("provider", "account"),
+    [
+        ("claude-work", "work"),
+        ("claude-client-a", "client-a"),
+        ("claude-subscription", None),
+        ("claude-", None),
+        ("claude-Work", None),
+        ("anthropic", None),
+        ("work", None),
+    ],
+)
+def test_account_name_from_provider_inverts_only_account_keys(
+    provider: str, account: str | None
+) -> None:
+    assert account_name_from_provider(provider) == account
+
+
+def test_account_name_for_config_dir_finds_the_owning_account() -> None:
+    config = {"providers": {"claude-work": _WORK}}
+    assert account_name_for_config_dir(config, "/accounts/work") == "work"
+    assert account_name_for_config_dir(config, "/accounts/other") is None
+
+
+def test_host_resolves_a_recorded_name_from_its_own_config() -> None:
+    env = account_launch_environment(
+        "work",
+        {"FOO": "1"},
+        host_name="mac-mini",
+        config={"providers": {"claude-work": _WORK}},
+    )
+    assert env == {"FOO": "1", "CLAUDE_CONFIG_DIR": "/accounts/work"}
+
+
+@pytest.mark.parametrize(
+    ("config", "native_env", "message"),
+    [
+        ({}, None, "'work' is not set up on host 'mac-mini'.*setup"),
+        (
+            {"providers": {"claude-subscription": {"kind": "subscription", "cli": "claude"}}},
+            None,
+            "not set up on host 'mac-mini'",
+        ),
+        (
+            {"providers": {"claude-work": _WORK}},
+            {"CLAUDE_CONFIG_DIR": "/accounts/other"},
+            "select different sign-in folders",
+        ),
+        (
+            {"providers": {"claude-work": {**_WORK, "config_dir": "relative"}}},
+            None,
+            "cannot be checked on host 'mac-mini'",
+        ),
+    ],
+)
+def test_host_refuses_an_account_it_cannot_resolve(
+    config: dict[str, object], native_env: dict[str, str] | None, message: str
+) -> None:
+    """A missing, renamed or conflicting account never falls back to the default login."""
+    with pytest.raises(AccountUnavailableError, match=message):
+        account_launch_environment("work", native_env, host_name="mac-mini", config=config)
+
+
+def test_host_reads_accounts_from_the_user_config_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "config.yaml").write_text(
+        "providers:\n  claude-work:\n    kind: subscription\n    cli: claude\n"
+        "    config_dir: /accounts/work\n"
+    )
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    env = account_launch_environment("work", None, host_name="mac-mini")
+    assert env == {"CLAUDE_CONFIG_DIR": "/accounts/work"}

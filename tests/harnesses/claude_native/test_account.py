@@ -9,7 +9,10 @@ from unittest.mock import Mock
 
 import pytest
 
-from omnigent.harnesses.claude_native.account import ensure_claude_account_signed_in
+from omnigent.harnesses.claude_native.account import (
+    ensure_claude_account_signed_in,
+    ensure_spec_account_selected,
+)
 
 
 @pytest.mark.parametrize("config_dir", ["/accounts/work", "/accounts/cafe\u0301/"])
@@ -67,7 +70,7 @@ def test_status_verdict_is_structural_and_output_is_private(
     )
     monkeypatch.setattr("omnigent.harnesses.claude_native.account.subprocess.run", probe)
     if signed_out:
-        with pytest.raises(RuntimeError, match="not signed in") as caught:
+        with pytest.raises(RuntimeError, match="signed out") as caught:
             ensure_claude_account_signed_in(
                 "claude",
                 "/accounts/work",
@@ -148,3 +151,70 @@ def test_runner_launch_account_selects_transcript_and_session_dirs(
     else:
         assert claude_native._claude_projects_dir() == Path(expected) / "projects"
         assert sessions_dir() == Path(expected) / "sessions"
+
+
+def _write_user_config(home: Path, body: str) -> None:
+    (home / "config.yaml").write_text(body)
+
+
+def test_signed_out_refusal_names_the_account_and_machine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_user_config(
+        tmp_path,
+        "host:\n  name: mac-mini\nproviders:\n  claude-work:\n    kind: subscription\n"
+        "    cli: claude\n    config_dir: /accounts/work\n",
+    )
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    probe = Mock(return_value=subprocess.CompletedProcess([], 1, '{"loggedIn":false}', ""))
+    monkeypatch.setattr("omnigent.harnesses.claude_native.account.subprocess.run", probe)
+    with pytest.raises(RuntimeError) as caught:
+        ensure_claude_account_signed_in(
+            "claude", "/accounts/work", env={"CLAUDE_CONFIG_DIR": "/accounts/work"}, cwd=tmp_path
+        )
+    message = str(caught.value)
+    assert "Claude account 'work' on host 'mac-mini' is signed out" in message
+    assert "setup" in message
+
+
+_SPEC_ACCOUNT_CONFIG = {
+    "providers": {
+        "claude-work": {"kind": "subscription", "cli": "claude", "config_dir": "/accounts/work"},
+        "claude-gateway": {
+            "kind": "gateway",
+            "anthropic": {"base_url": "https://gw.example/anthropic", "api_key": "$GW"},
+        },
+    }
+}
+
+
+@pytest.mark.parametrize(
+    ("provider", "launch_dir"),
+    [
+        (None, None),
+        ("claude-work", "/accounts/work"),
+        ("anthropic", None),
+        ("claude-subscription", None),
+        ("claude-gateway", None),
+    ],
+)
+def test_spec_account_guard_allows_matching_or_unrelated_providers(
+    provider: str | None, launch_dir: str | None
+) -> None:
+    ensure_spec_account_selected(provider, launch_dir, config=_SPEC_ACCOUNT_CONFIG)
+
+
+@pytest.mark.parametrize(
+    ("provider", "launch_dir"),
+    [
+        ("claude-work", None),
+        ("claude-work", "/accounts/other"),
+        ("claude-missing", None),
+    ],
+)
+def test_spec_account_guard_never_runs_a_named_account_elsewhere(
+    provider: str, launch_dir: str | None
+) -> None:
+    """An agent that names an account runs on it or is refused, never on the default."""
+    with pytest.raises(RuntimeError, match="runs on Claude account"):
+        ensure_spec_account_selected(provider, launch_dir, config=_SPEC_ACCOUNT_CONFIG)

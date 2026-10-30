@@ -135,6 +135,7 @@ from omnigent.server._elicitation_registry import (
 )
 from omnigent.server.auth import (
     LEVEL_EDIT,
+    LEVEL_MANAGE,
     LEVEL_READ,
 )
 from omnigent.server.background_session_titles import (
@@ -338,6 +339,7 @@ from omnigent.server.routes._sessions.helpers import (
     _repl_terminal_ui_labels,
     _require_declared_subagent,
     _require_external_status_forward,
+    _resolve_create_account,
     _resolve_harness,
     _resolve_llm_model,
     _resolve_subagent_spec,
@@ -1506,6 +1508,10 @@ def _build_session_response(
         cost_control_mode_override=conv.cost_control_mode_override,
         subagent_routing_override=conv.subagent_routing_override,
         share_workspace_files=conv.share_workspace_files,
+        # Users may name an account after an email, so only managers see it.
+        account=(
+            conv.account if permission_level is None or permission_level >= LEVEL_MANAGE else None
+        ),
         context_window=context_window,
         last_total_tokens=last_total_tokens,
         # Seed the client's cost indicator on resume. Uses the SUBTREE
@@ -11836,6 +11842,12 @@ async def _create_session_from_existing_agent(
             agent_for_user, agent_store, artifact_store, agent, user_id
         )
 
+    session_account = _resolve_create_account(
+        requested=body.account,
+        spec=selection_spec,
+        harness=selected_harness,
+        parent=_parent_for_routing,
+    )
     try:
         # Include spec-seeded defaults before create; overflow must not leave a session.
         encode_session_overrides(
@@ -11845,6 +11857,7 @@ async def _create_session_from_existing_agent(
                 "cost_control_mode_override": cost_control_mode_override,
                 "subagent_routing_override": subagent_routing_override,
                 "harness_override": harness_override,
+                "account": session_account,
             }
         )
         with creation_stage("create_persistence_ms"):
@@ -11866,6 +11879,7 @@ async def _create_session_from_existing_agent(
                 cost_control_mode_override=cost_control_mode_override,
                 subagent_routing_override=subagent_routing_override,
                 harness_override=harness_override,
+                account=session_account,
                 **snapshot_kwargs,
             )
     except NameAlreadyExistsError as exc:
@@ -12207,6 +12221,22 @@ def _create_session_from_bundle(
             ) from exc
         if terminal_launch_args is not None:
             metadata = metadata.model_copy(update={"terminal_launch_args": terminal_launch_args})
+
+    bundle_parent = (
+        conversation_store.get_conversation(metadata.parent_session_id)
+        if metadata.parent_session_id is not None
+        else None
+    )
+    metadata = metadata.model_copy(
+        update={
+            "account": _resolve_create_account(
+                requested=metadata.account,
+                spec=spec,
+                harness=_spec_harness(spec),
+                parent=bundle_parent,
+            )
+        }
+    )
 
     if agent_store is not None and metadata.parent_session_id is None:
         agent = uploaded_agent_for(

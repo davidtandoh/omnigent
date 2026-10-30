@@ -187,6 +187,8 @@ class _ConversationStore:
         override_reasoning_effort_set: bool = False,
         override_terminal_launch_args: list[str] | None = None,
         override_terminal_launch_args_set: bool = False,
+        override_account: str | None = None,
+        override_account_set: bool = False,
         dropped_label_keys: frozenset[str] = frozenset(),
         extra_labels: dict[str, str] | None = None,
         carry_history_into_native: bool = False,
@@ -253,6 +255,8 @@ class _ConversationStore:
                 "override_reasoning_effort_set": override_reasoning_effort_set,
                 "override_terminal_launch_args": override_terminal_launch_args,
                 "override_terminal_launch_args_set": override_terminal_launch_args_set,
+                "override_account": override_account,
+                "override_account_set": override_account_set,
                 "dropped_label_keys": dropped_label_keys,
                 "extra_labels": extra_labels,
                 "carry_history_into_native": carry_history_into_native,
@@ -500,6 +504,7 @@ def _make_conversation(
     title: str = "Source Chat",
     kind: str = "default",
     labels: dict[str, str] | None = None,
+    account: str | None = None,
 ) -> Conversation:
     """
     Build a minimal Conversation entity for testing.
@@ -511,6 +516,7 @@ def _make_conversation(
         ``"sub_agent"``.
     :param labels: Session labels, e.g. the sandbox repository a managed
         source recorded. Empty when omitted.
+    :param account: The source's Claude account name, e.g. ``"work"``.
     :returns: A Conversation.
     """
     return Conversation(
@@ -522,6 +528,7 @@ def _make_conversation(
         title=title,
         kind=kind,
         labels=dict(labels or {}),
+        account=account,
     )
 
 
@@ -2799,3 +2806,71 @@ def test_fork_counts_files_recorded_for_filesystem_delivery(
         assert [f.source_metadata for f in copied if f.filename == "trace.gz"] == [recorded]
     else:
         assert not conv_store.fork_calls
+
+
+@pytest.mark.parametrize(
+    ("body", "target_harness", "expect_account", "expect_resume_source"),
+    [
+        # Same account: the fork keeps it and may clone the source transcript.
+        ({}, "claude-native", "work", True),
+        ({"account": "work"}, "claude-native", "work", True),
+        # Another account: the source transcript lives in the source account's
+        # folder, so the runner must rebuild instead of cloning a stale copy.
+        ({"account": "client-a"}, "claude-native", "client-a", False),
+        ({"account": None}, "claude-native", None, False),
+        # A non-Claude fork carries no account.
+        ({"agent_id": "280d725b404d2915f9e9d6cccce91303"}, "codex-native", None, False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_fork_keeps_the_account_and_rebuilds_when_it_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    body: dict[str, object],
+    target_harness: str,
+    expect_account: str | None,
+    expect_resume_source: bool,
+) -> None:
+    source_id = "e9f8f58523cec9a57d3bdf93be543e8c"
+    conv_store = _ConversationStore(
+        conversations={source_id: _make_conversation(account="work")},
+        items_by_conv={source_id: [_make_item("9980c8a9248139f14f4165e5d53088aa", "Hi")]},
+    )
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions.get_agent_cache",
+        lambda: _StubAgentCache(
+            {
+                "087b7cb7ac30abf4debfaa578d052ec6": "claude-native",
+                "280d725b404d2915f9e9d6cccce91303": target_harness,
+            }
+        ),
+    )
+    client = TestClient(_build_app(conv_store, agent_store=_switch_agent_store()))
+
+    resp = client.post(f"/v1/sessions/{source_id}/fork", json=body)
+
+    assert resp.status_code == 201, resp.text
+    [fork_call] = conv_store.fork_calls
+    assert fork_call["override_account_set"] is True
+    assert fork_call["override_account"] == expect_account
+    assert fork_call["resume_source_native_session"] is expect_resume_source
+
+
+@pytest.mark.asyncio
+async def test_fork_rejects_an_account_for_a_non_claude_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_id = "e9f8f58523cec9a57d3bdf93be543e8c"
+    conv_store = _ConversationStore(
+        conversations={source_id: _make_conversation()},
+        items_by_conv={source_id: [_make_item("9980c8a9248139f14f4165e5d53088aa", "Hi")]},
+    )
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions.get_agent_cache",
+        lambda: _StubAgentCache({"087b7cb7ac30abf4debfaa578d052ec6": "codex-native"}),
+    )
+    client = TestClient(_build_app(conv_store, agent_store=_switch_agent_store()))
+
+    resp = client.post(f"/v1/sessions/{source_id}/fork", json={"account": "work"})
+
+    assert resp.status_code == 400, resp.text
+    assert conv_store.fork_calls == []

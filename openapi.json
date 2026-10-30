@@ -6614,6 +6614,18 @@
         "additionalProperties": false,
         "description": "Request body for `POST /v1/sessions/{source_id}/fork`.\n\nCreates a deep copy of an existing session's items into a new\nsession. All fields are optional.",
         "properties": {
+          "account": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Claude account short name for the fork, e.g. `\"work\"`. **Omitting** the field keeps the source's account; a different account makes the runner rebuild the transcript in that account instead of cloning the source's native session.",
+            "title": "Account"
+          },
           "agent_id": {
             "anyOf": [
               {
@@ -7840,6 +7852,18 @@
       "SessionResponse": {
         "description": "API representation of a session.\n\nReturned by `POST /v1/sessions`, `GET /v1/sessions/{id}`,\nand `PATCH /v1/sessions/{id}`.",
         "properties": {
+          "account": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The extra Claude account the session runs on, e.g. `\"work\"`. Shown only to viewers who can manage the session, since users may name accounts after an email; `None` otherwise and for the default login.",
+            "title": "Account"
+          },
           "active_response_id": {
             "anyOf": [
               {

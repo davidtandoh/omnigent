@@ -506,6 +506,7 @@ class ConversationStore(ABC):
         cost_control_mode_override: str | None = None,
         subagent_routing_override: str | None = None,
         harness_override: str | None = None,
+        account: str | None = None,
     ) -> Conversation:
         """
         Create a new conversation. Generates a unique
@@ -568,6 +569,8 @@ class ConversationStore(ABC):
         :param cost_control_mode_override: Optional per-session cost-control mode.
         :param subagent_routing_override: Optional per-session sub-agent routing mode.
         :param harness_override: Optional per-session harness override.
+        :param account: Extra Claude account name, e.g. ``"work"``. ``None``
+            inherits the parent's account for a child, else the default login.
         :returns: The newly created :class:`Conversation`.
         :raises NameAlreadyExistsError: If
             ``parent_conversation_id`` is not ``None`` and a
@@ -1875,6 +1878,7 @@ class ConversationStore(ABC):
         host_id: str | None = None,
         inference_snapshot: dict[str, Any] | None = None,
         created_by: str | None = None,
+        account: str | None = None,
     ) -> CreatedSession:
         """
         Atomically create a session and its session-scoped agent.
@@ -1919,6 +1923,8 @@ class ConversationStore(ABC):
         :param created_by: Identity of the creating user, recorded on the
             session-scoped agent so its code can only be mutated by the
             owner. ``None`` in single-user mode.
+        :param account: Extra Claude account name, e.g. ``"work"``. ``None``
+            inherits the parent's account for a child, else the default login.
         :returns: The committed conversation and agent entities.
         :raises ConversationNotFoundError: If
             ``parent_conversation_id`` is set but no such
@@ -1945,6 +1951,8 @@ class ConversationStore(ABC):
         override_reasoning_effort_set: bool = False,
         override_terminal_launch_args: list[str] | None = None,
         override_terminal_launch_args_set: bool = False,
+        override_account: str | None = None,
+        override_account_set: bool = False,
         dropped_label_keys: frozenset[str] = frozenset(),
         extra_labels: dict[str, str] | None = None,
         carry_history_into_native: bool = False,
@@ -2015,6 +2023,10 @@ class ConversationStore(ABC):
             — then it supersedes the ``copy_terminal_launch_args`` copy.
         :param override_terminal_launch_args_set: Whether the caller chose
             explicit launch args.
+        :param override_account: The fork's Claude account name, or ``None``
+            for the default login; applied only when *override_account_set*.
+        :param override_account_set: Whether the caller chose the fork's
+            account. ``False`` keeps the source's account.
         :param dropped_label_keys: Source labels to NOT copy onto the fork,
             beyond the always-dropped instance-scoped set (e.g. the
             permission-mode / codex-bypass label keys when the dialog picks

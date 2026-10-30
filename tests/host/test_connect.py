@@ -10036,6 +10036,85 @@ async def test_live_custody_refuses_relaunch_drift_without_replacing_native(
     _cleanup_host(host)
 
 
+def _write_account_config(config_home: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Give the host one extra Claude account named ``work``; return its folder."""
+    folder = str(config_home / "claude-accounts" / "work")
+    (config_home / "config.yaml").write_text(
+        "providers:\n  claude-work:\n    kind: subscription\n    cli: claude\n"
+        f"    config_dir: {folder}\n"
+    )
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(config_home))
+    return folder
+
+
+@pytest.mark.parametrize(("account", "reused"), [("work", True), ("client-a", False)])
+async def test_live_runner_is_reused_only_for_the_same_account(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, account: str, reused: bool
+) -> None:
+    """The host resolves the account before the reuse check, so another account is refused."""
+    from omnigent.native.launch_environment import native_launch_environment_digest
+    from omnigent.runner.identity import token_bound_runner_id
+
+    folder = _write_account_config(tmp_path, monkeypatch)
+    host = _make_host_process()
+    monkeypatch.setattr("omnigent.host.connect.SUPPORTED_HARNESSES", frozenset({"claude-native"}))
+    monkeypatch.setattr(host, "_adopt_custodied_runners", lambda: None)
+    process = Mock()
+    process.poll.return_value = None
+    handle = _RunnerHandle(
+        proc=process, log_path=tmp_path / "owner.log", session_id="conv_acct", durable=True
+    )
+    handle.environment_digest = native_launch_environment_digest({"CLAUDE_CONFIG_DIR": folder})
+    host._runners[token_bound_runner_id("acct-binding")] = handle
+    result = await host._handle_launch(
+        HostLaunchRunnerFrame(
+            request_id="relaunch",
+            binding_token="acct-binding",
+            session_id="conv_acct",
+            workspace=str(tmp_path),
+            harness="claude-native",
+            account=account,
+        )
+    )
+    if reused:
+        assert result.status == "launched"
+    else:
+        # client-a is not set up here: refused, never started on the default login.
+        assert result.status == "failed"
+        assert result.error_code == "harness_not_configured"
+        assert "'client-a' is not set up on host 'test-laptop'" in (result.error or "")
+    process.terminate.assert_not_called()
+    _cleanup_host(host)
+
+
+async def test_account_launch_passes_only_the_resolved_folder_to_the_runner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A fresh launch hands the runner the folder the host resolved from its own config."""
+    folder = _write_account_config(tmp_path, monkeypatch)
+    host = _make_host_process()
+    monkeypatch.setattr("omnigent.host.connect.harness_is_configured", lambda harness: True)
+    captured: dict[str, object] = {}
+
+    def _capture_env(*args: object, **kwargs: object) -> dict[str, str]:
+        captured.update(kwargs)
+        raise RuntimeError("stop before spawn")
+
+    monkeypatch.setattr("omnigent.host.connect._build_runner_env", _capture_env)
+    with pytest.raises(RuntimeError, match="stop before spawn"):
+        await host._handle_launch(
+            HostLaunchRunnerFrame(
+                request_id="fresh",
+                binding_token="fresh-binding",
+                workspace=str(tmp_path),
+                harness=None,
+                account="work",
+            )
+        )
+    assert captured["native_env"] == {"CLAUDE_CONFIG_DIR": folder}
+    _cleanup_host(host)
+
+
 async def test_ended_custodian_releases_attachment_for_a_new_session_generation(
     tmp_path: Path,
 ) -> None:

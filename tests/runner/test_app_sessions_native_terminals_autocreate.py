@@ -2053,7 +2053,7 @@ async def test_auto_create_claude_terminal_enforces_requested_account(
             assert captured == {}
             assert not (tmp_path / "selected-account").exists()
         elif account in {"signed-out", "mismatch"} or (account and "conflicting" in account):
-            with pytest.raises(RuntimeError, match=r"not signed in|different CLAUDE_CONFIG_DIR"):
+            with pytest.raises(RuntimeError, match=r"signed out|different CLAUDE_CONFIG_DIR"):
                 await launch
             assert captured == {}
             assert not (tmp_path / "selected-account").exists()

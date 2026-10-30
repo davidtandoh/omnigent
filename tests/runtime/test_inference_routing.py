@@ -124,6 +124,22 @@ def test_pi_invalid_saved_profile_does_not_fall_back_to_native_login(
         resolve_pi_native_provider()
 
 
+@pytest.mark.parametrize(("harness", "refused"), [("claude-sdk", True), ("claude-native", False)])
+def test_extra_claude_account_runs_only_on_claude_code(
+    harness: str, refused: bool, tmp_path: Path
+) -> None:
+    """Off claude-native an extra account would silently use the default login."""
+    account = {"kind": "subscription", "cli": "claude", "config_dir": str(tmp_path / "work")}
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump({"providers": {"claude-work": account}}))
+    spec = _spec(harness, provider="claude-work")
+    if refused:
+        with pytest.raises(OmnigentError, match="only Claude Code"):
+            _resolve_provider_for_build(spec, harness_type=harness)
+    else:
+        provider = _resolve_provider_for_build(spec, harness_type=harness)
+        assert provider is not None and provider.config_dir == str(tmp_path / "work")
+
+
 @pytest.mark.parametrize("harness", ["claude-sdk", "codex", "pi", "qwen", "openai-agents"])
 def test_unbound_host_keeps_its_explicit_provider_and_model(harness, tmp_path) -> None:
     from omnigent.runner.app import _HARNESS_MODEL_ENV_KEY, _build_spawn_env_from_spec

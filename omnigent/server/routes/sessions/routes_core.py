@@ -123,6 +123,7 @@ from omnigent.server.routes._sessions.helpers import (
     SessionLiveness,
     _agent_carries_cursor_fork_history,
     _agent_carries_native_fork_history,
+    _agent_harness,
     _announce_session_added,
     _apply_liveness_to_items,
     _authorize_bundled_parent_and_inherit_runner,
@@ -743,6 +744,7 @@ def register_core_routes(
         from omnigent.runner.identity import token_bound_runner_id
         from omnigent.server.routes._host_launch import (
             LAUNCH_TIMEOUT_ENV_VAR,
+            account_launch_refusal,
             resolve_host_launch,
             resolve_launch_timeout_s,
         )
@@ -786,6 +788,11 @@ def register_core_routes(
                 stage="runner_launch",
             ),
         )
+        if (refusal := account_launch_refusal(target.conv.account, conn)) is not None:
+            # Never send an account the host would drop; the first message's
+            # relaunch surfaces this refusal to the user.
+            _logger.warning("Host %s cannot launch session %s: %s", host_id, session_id, refusal)
+            return runner_id, True
         request_id = secrets.token_hex(8)
         future: asyncio.Future[dict[str, str | None]] = asyncio.get_running_loop().create_future()
         conn.pending_launches[request_id] = future
@@ -812,6 +819,7 @@ def register_core_routes(
                 ),
                 # The session had no runner bound, so nothing is superseded.
                 superseded_runner_ids=(),
+                account=target.conv.account,
             )
         )
         launch_timeout_s = resolve_launch_timeout_s()
@@ -3924,10 +3932,37 @@ def register_core_routes(
         # OWN fresh sandbox, whose filesystem has no copy of the source's local
         # native rollout, so the clone is likewise doomed — skip the directive
         # so the runner rebuilds from the copied Omnigent items instead.
+        # A fork runs on the source's Claude account unless the request names
+        # one. Only claude-native sessions carry an account.
+        fork_harness = (
+            source.harness_override
+            if copy_model_settings and source.harness_override
+            else await asyncio.to_thread(_agent_harness, base_agent)
+        )
+        account_set = "account" in body.model_fields_set
+        if (
+            account_set
+            and body.account is not None
+            and fork_harness not in {"claude-native", None}
+        ):
+            raise OmnigentError(
+                "A Claude account applies only to Claude Code (claude-native) sessions.",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        # An unresolvable harness keeps the account rather than silently
+        # dropping the fork onto the default login.
+        fork_account = (
+            body.account
+            if account_set
+            else (source.account if fork_harness in {"claude-native", None} else None)
+        )
+        # The source's native transcript lives in the source account's folder, so
+        # a fork onto another account rebuilds it there from the copied items.
         resume_source_native_session = (
             (not switching_agent or copy_model_settings)
             and not target_is_cursor
             and body.host_type != "managed"
+            and fork_account == source.account
         )
 
         # On an agent switch, recompute the Web UI presentation labels for
@@ -4075,6 +4110,8 @@ def register_core_routes(
                 override_reasoning_effort_set=effort_set,
                 override_terminal_launch_args=override_launch_args,
                 override_terminal_launch_args_set=launch_args_set,
+                override_account=fork_account,
+                override_account_set=True,
                 dropped_label_keys=dropped_label_keys,
                 extra_labels=extra_labels,
                 # Launch flags are CLI-specific. On an agent switch the fork may

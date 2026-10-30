@@ -6232,9 +6232,21 @@ async def _launch_runner_on_host_locked(
     host_conn: HostConnection,
 ) -> _HostLaunchAttempt:
     """The launch round-trip proper; runs under the conversation's lock."""
-    from omnigent.host.frames import HostLaunchRunnerFrame, encode_host_frame
+    from omnigent.host.frames import (
+        HARNESS_NOT_CONFIGURED_ERROR_CODE,
+        HostLaunchRunnerFrame,
+        encode_host_frame,
+    )
     from omnigent.runner.identity import token_bound_runner_id
+    from omnigent.server.routes._host_launch import account_launch_refusal
 
+    if (refusal := account_launch_refusal(conv.account, host_conn)) is not None:
+        # Refuse before rotating the binding: no runner is coming.
+        return _HostLaunchAttempt(
+            runner_id=conv.runner_id or "",
+            error_code=HARNESS_NOT_CONFIGURED_ERROR_CODE,
+            error=refusal,
+        )
     await host_registry.admit_launch(host_conn, conv.id)
     if conv.runner_id and _resolve_harness(conv) == "codex-native":
         if conv.host_id is None or host_registry.get(conv.host_id) is not host_conn:
@@ -6330,6 +6342,7 @@ async def _launch_runner_on_host_locked(
                 # Only the binding we just replaced: an unbound session's old
                 # runner may now serve its /clear or /switch successor.
                 superseded_runner_ids=(superseded_runner_id,) if superseded_runner_id else (),
+                account=conv.account,
             )
         )
         try:
@@ -8949,6 +8962,25 @@ def _agent_carries_cursor_fork_history(agent: Agent) -> bool:
     return canonicalize_harness(spec.executor.harness_kind) in _CURSOR_FORK_HISTORY_HARNESSES
 
 
+def _agent_harness(agent: Agent) -> str | None:
+    """Return *agent*'s canonical harness, or ``None`` when its bundle can't load.
+
+    :param agent: The agent to classify.
+    :returns: e.g. ``"claude-native"``.
+    """
+    from omnigent.harness_aliases import canonicalize_harness
+
+    try:
+        spec = (
+            get_agent_cache()
+            .load(agent.id, agent.bundle_location, expand_env=agent.operator_authored)
+            .spec
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    return canonicalize_harness(spec.executor.harness_kind) or spec.executor.harness_kind
+
+
 def _filesystem_attachment_in_history(
     session_id: str,
     conversation_store: ConversationStore,
@@ -10277,6 +10309,66 @@ def _spec_harness(spec: AgentSpec) -> str:
     return canonicalize_harness(harness) or harness
 
 
+def _spec_account(spec: AgentSpec | None) -> str | None:
+    """Return the Claude account an agent spec names through ``executor.auth``.
+
+    :param spec: A parsed agent / sub-agent spec, or ``None``.
+    :returns: e.g. ``"work"`` for ``auth: {type: provider, name: claude-work}``;
+        ``None`` when the spec names no account-shaped provider.
+    """
+    from omnigent.onboarding.claude_accounts import account_name_from_provider
+    from omnigent.spec.types import ProviderAuth
+
+    auth = spec.executor.auth if spec is not None else None
+    return account_name_from_provider(auth.name) if isinstance(auth, ProviderAuth) else None
+
+
+def _resolve_create_account(
+    *,
+    requested: str | None,
+    spec: AgentSpec | None,
+    harness: str | None,
+    parent: Conversation | None,
+) -> str | None:
+    """Choose the Claude account a new session records.
+
+    An explicit request wins, else the account the agent spec names. Only
+    claude-native sessions take one. A child always runs on its parent's
+    account, which the store copies, so a child may only restate it.
+
+    :param requested: The create request's ``account``, e.g. ``"work"``.
+    :param spec: The session's resolved agent spec, if loaded.
+    :param harness: The session's canonical harness, e.g. ``"claude-native"``.
+    :param parent: The parent conversation for a child create, else ``None``.
+    :returns: The account to store, or ``None`` for the default login (or,
+        for a child, the parent's account).
+    :raises OmnigentError: ``INVALID_INPUT`` when the request conflicts with
+        the harness, the spec, or the parent's account.
+    """
+    if requested is not None and harness != "claude-native":
+        raise OmnigentError(
+            "A Claude account applies only to Claude Code (claude-native) sessions.",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    spec_account = _spec_account(spec) if harness == "claude-native" else None
+    if requested is not None and spec_account is not None and requested != spec_account:
+        raise OmnigentError(
+            f"The agent runs on Claude account {spec_account!r}, "
+            f"so the session cannot use account {requested!r}.",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    chosen = requested or spec_account
+    if parent is None:
+        return chosen
+    if chosen is not None and chosen != parent.account:
+        raise OmnigentError(
+            f"A child session runs on its parent's Claude account "
+            f"({parent.account or 'the default login'}), not {chosen!r}.",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    return None
+
+
 def _spec_config_flag_explicitly_disabled(spec: AgentSpec, key: str) -> bool:
     """
     Return whether an ``executor.config`` flag is explicitly set false.
@@ -10787,6 +10879,7 @@ def _persist_stored_session_bundle(
             workspace=metadata.workspace,
             terminal_launch_args=metadata.terminal_launch_args,
             parent_conversation_id=metadata.parent_session_id,
+            account=metadata.account,
             runner_id=runner_id,
             project_id=metadata.project_id,
             host_id=metadata.host_id,
@@ -10870,6 +10963,7 @@ def _persist_session_for_uploaded_agent(
             inference_snapshot=inference_snapshot,
             labels=metadata.labels,
             reasoning_effort=metadata.reasoning_effort,
+            account=metadata.account,
             model_override=inference_model,
         )
     except IntegrityError as exc:

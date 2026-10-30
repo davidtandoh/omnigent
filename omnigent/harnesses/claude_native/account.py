@@ -58,6 +58,75 @@ def claude_auth_status(command: str, *, env: Mapping[str, str], cwd: Path) -> bo
     return None
 
 
+def _account_label(account: str | None) -> str:
+    """Name *account* and this machine for a refusal message.
+
+    :returns: e.g. ``"Claude account 'work' on host 'mac-mini'"``.
+    """
+    import socket
+
+    from omnigent.config import load_global_config
+
+    try:
+        host = load_global_config().get("host")
+        host_name = host.get("name") if isinstance(host, dict) else None
+    except Exception:  # noqa: BLE001 - the label must never hide the refusal
+        host_name = None
+    subject = f"Claude account {account!r}" if account else "The selected Claude account"
+    return f"{subject} on host {str(host_name or socket.gethostname())!r}"
+
+
+def _account_name_for_config_dir(config_dir: str) -> str | None:
+    """Return the account name whose sign-in folder is *config_dir*, if known."""
+    from omnigent.config import load_global_config
+    from omnigent.onboarding.claude_accounts import account_name_for_config_dir
+
+    try:
+        return account_name_for_config_dir(load_global_config(), config_dir)
+    except Exception:  # noqa: BLE001 - the label must never hide the refusal
+        return None
+
+
+def ensure_spec_account_selected(
+    spec_provider: str | None,
+    requested_config_dir: str | None,
+    *,
+    config: dict[str, object] | None = None,
+) -> None:
+    """Refuse when the agent spec names an extra account this launch does not use.
+
+    An agent whose ``executor.auth`` names an extra Claude account must run on
+    that account, never silently on the default login or another account.
+
+    :param spec_provider: The spec's ``executor.auth`` provider name, e.g.
+        ``"claude-work"``; ``None`` when it names none.
+    :param requested_config_dir: The launch's ``CLAUDE_CONFIG_DIR``, or ``None``
+        for the default login.
+    :param config: Parsed user config; ``None`` reads the global config.
+    :raises RuntimeError: If the spec's account is not the launch's account.
+    """
+    if spec_provider is None:
+        return
+    from omnigent.config import load_global_config
+    from omnigent.onboarding.claude_accounts import account_name_from_provider
+    from omnigent.onboarding.provider_config import load_providers
+
+    account = account_name_from_provider(spec_provider)
+    if account is None:
+        return
+    entry = load_providers(load_global_config() if config is None else config).get(spec_provider)
+    if entry is not None and entry.config_dir is None:
+        # A ``claude-*`` provider that is not an extra account, e.g. a gateway.
+        return
+    if entry is not None and entry.config_dir == requested_config_dir:
+        return
+    raise RuntimeError(
+        f"native-claude: this agent runs on Claude account {account!r}, but the session "
+        f"does not. Check that {_account_label(account)} is set up, then start a "
+        "new session for this agent so it records that account."
+    )
+
+
 def ensure_claude_account_signed_in(
     command: str | None,
     requested_config_dir: str,
@@ -84,9 +153,13 @@ def ensure_claude_account_signed_in(
         return
     logged_in = claude_auth_status(command, env=env, cwd=cwd)
     if logged_in is False:
+        from omnigent.cli_invocation import cli_invocation
+
+        label = _account_label(_account_name_for_config_dir(requested_config_dir))
         raise RuntimeError(
-            "native-claude: the selected CLAUDE_CONFIG_DIR account is not signed in. "
-            "Run claude auth login with that exact CLAUDE_CONFIG_DIR before launching."
+            f"native-claude: {label} is signed out. "
+            f"Run `{cli_invocation()} setup` on that machine and sign in to the account "
+            "again, or start a new session on another account."
         )
     if logged_in is None:
         _logger.warning(

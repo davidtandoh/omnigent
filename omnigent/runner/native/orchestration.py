@@ -7630,6 +7630,24 @@ def _codex_native_model_from_spec(agent_spec: AgentSpec | ResolvedSpec | None) -
     return config_model if isinstance(config_model, str) and config_model else None
 
 
+def _ensure_spec_account_selected(
+    agent_spec: AgentSpec | ResolvedSpec | None, requested_config_dir: str | None
+) -> None:
+    """Refuse a launch whose agent spec names a Claude account it does not use.
+
+    :param agent_spec: Agent spec object, or a resolved wrapper; ``None`` passes.
+    :param requested_config_dir: This runner's launch ``CLAUDE_CONFIG_DIR``.
+    """
+    from omnigent.harnesses.claude_native.account import ensure_spec_account_selected
+    from omnigent.spec.types import ProviderAuth
+
+    spec = agent_spec.spec if isinstance(agent_spec, ResolvedSpec) else agent_spec
+    auth = spec.executor.auth if spec is not None else None
+    ensure_spec_account_selected(
+        auth.name if isinstance(auth, ProviderAuth) else None, requested_config_dir
+    )
+
+
 def _claude_native_model_from_spec(agent_spec: AgentSpec | ResolvedSpec | None) -> str | None:
     """
     Read the Claude Code model id to launch the native TUI with, from a spec.
@@ -9766,6 +9784,7 @@ async def _auto_create_claude_terminal(
         requested_account = native_launch_environment().get("CLAUDE_CONFIG_DIR")
         launch_env = _claude_terminal_launch_env(env_spec)
         launch_cwd = _claude_terminal_launch_cwd(env_spec, agent_os_env)
+        await asyncio.to_thread(_ensure_spec_account_selected, agent_spec, requested_account)
         if requested_account is not None:
             from omnigent.harnesses.claude_native.account import ensure_claude_account_signed_in
             from omnigent.host.harness_startup import env_wrapper_command

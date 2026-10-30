@@ -3982,7 +3982,7 @@ def test_databricks_setup_recovers_from_malformed_profile(
 # each call's argv and selected folder, so tests never touch a real account.
 _FAKE_CLAUDE = """#!/bin/sh
 printf '%s|%s\\n' "$*" "${CLAUDE_CONFIG_DIR-unset}" >> "$FAKE_CLAUDE_LOG"
-marker="${CLAUDE_CONFIG_DIR:-/nonexistent}/signed-in"
+marker="${CLAUDE_CONFIG_DIR:-${FAKE_CLAUDE_DEFAULT_DIR:-/nonexistent}}/signed-in"
 case "$*" in
   "auth status")
     [ -n "$FAKE_CLAUDE_STATUS_INVALID" ] && echo 'invalid' && exit 1
@@ -4104,6 +4104,43 @@ def test_remove_claude_account_signs_out_only_that_account(
     assert list(_config_yaml(isolated_config)["providers"]) == ["claude-subscription"]
     assert f"auth logout|{config_dir}" in fake_claude.read_text().splitlines()
     assert config_dir.is_dir() and not (config_dir / "signed-in").exists()
+
+
+def test_removing_one_account_never_signs_out_another(
+    isolated_config, fake_claude, monkeypatch
+) -> None:
+    """Removing one extra account leaves every other account, and the default, signed in."""
+    default_dir = isolated_config / "default-claude"
+    work_dir = isolated_config / "claude-accounts" / "work"
+    client_dir = isolated_config / "claude-accounts" / "client-a"
+    for folder in (default_dir, work_dir, client_dir):
+        folder.mkdir(parents=True)
+        (folder / "signed-in").touch()
+    monkeypatch.setenv("FAKE_CLAUDE_DEFAULT_DIR", str(default_dir))
+    account = {"kind": "subscription", "cli": "claude"}
+    _seed_config(
+        isolated_config,
+        {
+            "claude-subscription": {**account, "default": True},
+            "claude-work": {**account, "config_dir": str(work_dir)},
+            "claude-client-a": {**account, "config_dir": str(client_dir)},
+        },
+    )
+
+    # L1 1=Claude → L2 3=claude-work (sorted by name) → L3 2=Remove → 1=Yes → q → q.
+    stdin = "\n".join(["1", "3", "2", "1", "q", "q"]) + "\n"
+    result = CliRunner().invoke(cli, ["setup", "--no-internal-beta"], input=stdin)
+    assert result.exit_code == 0, result.output
+
+    assert set(_config_yaml(isolated_config)["providers"]) == {
+        "claude-subscription",
+        "claude-client-a",
+    }
+    logouts = [line for line in fake_claude.read_text().splitlines() if "logout" in line]
+    assert logouts == [f"auth logout|{work_dir}"]
+    assert not (work_dir / "signed-in").exists()
+    assert (client_dir / "signed-in").exists()
+    assert (default_dir / "signed-in").exists()
 
 
 def test_replacing_the_default_subscription_keeps_extra_accounts(isolated_config) -> None:
