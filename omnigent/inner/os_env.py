@@ -1904,7 +1904,10 @@ def _same_path(entry: str, root: Path) -> bool:
 
 def _child_shell_env() -> dict[str, str]:
     """
-    Environment for agent shell commands, minus omnigent's own package root.
+    Environment for agent shell commands, without service state or package root.
+
+    Service variables stay in the helper for authentication and configuration,
+    but must not reach commands that can run project tests.
 
     The helper prepends its project root to ``PYTHONPATH`` at spawn (see
     ``_HelperProcessClient._start_locked``) purely so ``python -m

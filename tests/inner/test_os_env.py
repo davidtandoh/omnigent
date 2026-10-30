@@ -521,8 +521,7 @@ def test_shell_command_strips_runner_service_environment(
 
     names = [*service_env, "CLAUDE_CONFIG_DIR"]
     script = (
-        "import json, os; "
-        f"print(json.dumps({{name: os.environ.get(name) for name in {names!r}}}))"
+        f"import json, os; print(json.dumps({{name: os.environ.get(name) for name in {names!r}}}))"
     )
     os_env = create_os_environment(
         OSEnvSpec(

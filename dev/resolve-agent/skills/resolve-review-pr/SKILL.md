@@ -47,11 +47,10 @@ of the test. A passing repro alone does not prove the PR fixes the bug.
    after and note the missing before. Only omit the after clip when it is
    genuinely unobtainable (recorder tooling missing, or the fixture can't come
    online after the SPA build **and** the leaked runner env is stripped) — say so
-   explicitly in your review comment and in `evidence`, naming the blocker. An
-   `online: false` seen while `OMNIGENT_RUNNER_ID` is still set is your own
-   un-stripped env, not a blocker: re-run with the `env -u` prefix from
-   `dev/recording-lanes.md` first. A missing upstream before-clip is never that
-   blocker. Never drop it silently.
+   explicitly in your review comment and in `evidence`, naming the blocker.
+   Follow `dev/recording-lanes.md` for environment cleanup and diagnosis before
+   reporting a runner startup blocker. A missing upstream before-clip is never
+   that blocker. Never drop it silently.
 4. **Review the diff** for quality, not just green. Decide whether this is the
    **best practical approach** for the repository, not merely an approach that
    makes the reproduction pass. Identify the plausible alternatives suggested by

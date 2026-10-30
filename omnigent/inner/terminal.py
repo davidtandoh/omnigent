@@ -746,7 +746,8 @@ def terminal_pane_environment(
     Clipboard and sandbox adjustments made later by :meth:`TerminalInstance.launch`
     are not included.
 
-    :param inherit_env: Whether the pane inherits the current process environment.
+    :param inherit_env: Whether to inherit the current process environment,
+        filtered by :func:`omnigent.runner.identity.strip_runner_service_env`.
     :param env: Per-terminal overrides, e.g. ``{"CLAUDE_CONFIG_DIR": "/srv/claude"}``.
     :param env_unset: Names removed after the overrides, e.g. ``["ANTHROPIC_API_KEY"]``.
     :param launch_environment: This launch's lifecycle identity variables, or
@@ -1075,8 +1076,8 @@ class TerminalInstance:
         if the same key also appears in ``env``, the strip wins.
         Intentional: ``env_unset`` is a leak-prevention boundary,
         not a soft default.
-    :param inherit_env: Whether to start from ``os.environ`` before applying
-        ``env`` / ``env_unset``.
+    :param inherit_env: Whether to start from the filtered environment from
+        :func:`terminal_pane_environment` before applying ``env`` / ``env_unset``.
     :param sandbox_policy: Optional sandbox wrapper policy.
     :param conversation_link: Optional web UI link for the owning
         conversation, e.g. ``"/c/conv_abc123"``.

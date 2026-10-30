@@ -217,7 +217,6 @@ fallback if rendering is blocked; keep any usable footage.
   missing or rejected; explain the gap and continue. Only report clips you
   actually produced.
 
-Build the SPA before starting the recorder. If you are inside a server-spawned
-runner (`OMNIGENT_RUNNER_ID` is set), strip the inherited runner/host variables
-as described in `dev/recording-lanes.md`. If the recorder reports `online: false`,
-retry with those variables removed before reporting an environment blocker.
+Build the SPA before starting the recorder. Follow `dev/recording-lanes.md`
+for environment cleanup and runner startup diagnosis before reporting an
+environment blocker.

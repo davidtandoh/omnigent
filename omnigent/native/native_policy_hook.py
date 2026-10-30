@@ -172,6 +172,9 @@ def policy_hook_wrapper_script(server_url: str, session_id: str, hook_script_pat
     the workspace. The token is a secret, so callers MUST write the returned
     wrapper ``0o700`` (owner-only) — it is never world-readable.
 
+    Restores :func:`omnigent.runner.identity.runner_helper_environment` so
+    token renewal uses the runner's auth store after pane environment filtering.
+
     :param server_url: Omnigent server base URL the hook posts to.
     :param session_id: Session / conversation id for policy evaluation.
     :param hook_script_path: Absolute path to the hook's Python entrypoint.

@@ -105,15 +105,15 @@ misses its online deadline and the fixture reports `online: false`, which looks
 like an environment failure but is really the build starving the boot. So
 **always build the SPA first as its own step**, then run the recorder.
 
-When you are yourself running inside a server-spawned runner (the `--server`
-path — check with `echo "$OMNIGENT_RUNNER_ID"`, which is set there), you **must
-strip the ambient runner/host env vars** so the fixture's own runner starts clean.
-This is not optional: those vars (`OMNIGENT_RUNNER_ZYGOTE*` FDs,
-`OMNIGENT_RUNNER_ID`, tunnel/host tokens) leak into the spawned child, make it take
-the zygote-fork path and block on control FDs it doesn't have, so it hangs with an
-empty `runner.log` and stays `online: false`. A bare `pytest`/`uv run pytest` with
-`OMNIGENT_RUNNER_ID` still set is the single most common way the after-clip
-silently fails to record. Strip them with `env -u`:
+Before starting a fixture's runner, remove any ambient runner/host variables
+from the test command's environment. Native panes and Omnigent tool shells
+filter service variables automatically; see the
+[native launch environment guidance](../README.md#2-start-your-first-agent).
+Other launch paths or explicit overrides can still supply runner/host values.
+Inherited zygote descriptors and runner identity can make the fixture take the
+zygote-fork path and wait for control file descriptors it does not have. The
+runner can then stay `online: false` with an empty `runner.log`. The following
+`env -u` prefix is safe when the variables are already absent:
 
 ```bash
 # Point npm/pnpm at the Databricks registry proxy first (see
