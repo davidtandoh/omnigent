@@ -1246,6 +1246,7 @@ async def _auto_create_claude_terminal_for_test(
     external_session_id: str | None = None,
     launch_config: ClaudeNativeUcodeConfig | None = None,
     agent_spec=None,
+    use_saved_inference: bool = False,
 ) -> None:
     """
     Run ``_auto_create_claude_terminal`` with host config and diagnostics stubbed.
@@ -1263,7 +1264,8 @@ async def _auto_create_claude_terminal_for_test(
     from omnigent.harnesses.claude_native import diagnostics
     from omnigent.runner.native import orchestration
 
-    monkeypatch.setattr("omnigent.inference_config.load_runtime_inference_config", dict)
+    if not use_saved_inference:
+        monkeypatch.setattr("omnigent.inference_config.load_runtime_inference_config", dict)
     monkeypatch.setattr("omnigent.config.load_effective_config", dict)
     monkeypatch.setattr(orchestration, "resolve_cli_binary", lambda _: None)
     monkeypatch.setattr(diagnostics, "ClaudeDebugLogFollower", lambda _: Mock())
@@ -1751,7 +1753,10 @@ async def test_recorded_account_probe_ignores_ambient_credentials(
 async def test_ambient_config_folder_does_not_bypass_default_gateway(
     bridge_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    import json
     from unittest.mock import Mock
+
+    from tests._helpers.providers import isolate_provider_resolution
 
     from omnigent.spec.types import AgentSpec, ExecutorSpec, ProviderAuth
 
@@ -1766,6 +1771,24 @@ async def test_ambient_config_folder_does_not_bypass_default_gateway(
         "omnigent.harnesses.claude_native.bridge.ensure_claude_workspace_trusted",
         lambda *a, **k: None,
     )
+    isolate_provider_resolution(monkeypatch, bridge_dir / "provider-config")
+    overlay = bridge_dir / "saved-inference.json"
+    overlay.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "claude-gateway": {
+                        "kind": "gateway",
+                        "anthropic": {
+                            "base_url": "https://gateway.example/anthropic",
+                            "api_key": "gateway-token",
+                        },
+                    }
+                }
+            }
+        )
+    )
+    monkeypatch.setenv("OMNIGENT_INFERENCE_CONFIG", str(overlay))
     gateway = ClaudeNativeUcodeConfig(
         env={"ANTHROPIC_BASE_URL": "https://gateway.example/anthropic"},
         api_key_helper="printf gateway-token",
@@ -1780,6 +1803,7 @@ async def test_ambient_config_folder_does_not_bypass_default_gateway(
             workspace=bridge_dir,
             registry=registry,
             launch_config=gateway,
+            use_saved_inference=True,
             agent_spec=AgentSpec(
                 spec_version=1,
                 executor=ExecutorSpec(
@@ -1792,3 +1816,118 @@ async def test_ambient_config_folder_does_not_bypass_default_gateway(
     registry.launch_required_terminal.assert_awaited_once()
     spec = registry.launch_required_terminal.call_args.kwargs["spec"]
     assert spec.env["ANTHROPIC_BASE_URL"] == "https://gateway.example/anthropic"
+
+
+@pytest.mark.parametrize("recorded_account", [None, "other"])
+async def test_resolved_provider_account_is_used_throughout_native_launch(
+    bridge_dir: Path, monkeypatch: pytest.MonkeyPatch, recorded_account: str | None
+) -> None:
+    import json
+    from unittest.mock import Mock
+
+    from omnigent.harnesses.claude_native import main
+    from omnigent.native.launch_environment import native_launch_environment
+    from omnigent.onboarding.claude_accounts import AccountUnavailableError
+    from omnigent.runner.resource_registry import SessionResourceRegistry
+    from omnigent.spec.types import AgentSpec, ExecutorSpec, ProviderAuth
+    from tests._helpers.providers import isolate_provider_resolution
+
+    isolate_provider_resolution(monkeypatch, bridge_dir / "provider-config")
+    selected = str(bridge_dir / "account-folder")
+    other = str(bridge_dir / "other-folder")
+    providers = {
+        "team-login": {"kind": "subscription", "cli": "claude", "config_dir": selected},
+        "claude-other": {"kind": "subscription", "cli": "claude", "config_dir": other},
+    }
+    overlay = bridge_dir / "saved-inference.json"
+    overlay.write_text(json.dumps({"providers": providers}))
+    monkeypatch.setenv("OMNIGENT_INFERENCE_CONFIG", str(overlay))
+    monkeypatch.setattr("omnigent.config.load_global_config", lambda: {"providers": providers})
+    runner_env = {"CLAUDE_CONFIG_DIR": other} if recorded_account else {}
+    monkeypatch.setattr(
+        "omnigent.native.launch_environment._installed_native_launch_environment", runner_env
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ambient-key")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "ambient-token")
+    monkeypatch.setattr(main, "managed_claude_gateway_signal", lambda: (None, None))
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge.ensure_claude_workspace_trusted",
+        lambda *a, **k: None,
+    )
+    stages = []
+
+    def probe(command, requested, *, env, cwd):
+        assert requested == selected and env["CLAUDE_CONFIG_DIR"] == selected
+        assert "ANTHROPIC_API_KEY" not in env and "CLAUDE_CODE_OAUTH_TOKEN" not in env
+        stages.append("sign-in")
+
+    async def transcript(*args, **kwargs):
+        assert main._claude_project_dir_for_cwd(bridge_dir).is_relative_to(Path(selected))
+        stages.append("transcript")
+        return None
+
+    async def catalog(config):
+        _, _, env = main._claude_model_probe_invocation(config, ())
+        assert env["CLAUDE_CONFIG_DIR"] == selected
+        assert "ANTHROPIC_API_KEY" not in env and "CLAUDE_CODE_OAUTH_TOKEN" not in env
+        stages.append("catalog")
+        return []
+
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.account.ensure_claude_account_signed_in", probe
+    )
+    monkeypatch.setattr(main, "_ensure_local_claude_resume_transcript", transcript)
+    monkeypatch.setattr(main, "claude_launch_catalog", catalog)
+    registry = Mock(spec=SessionResourceRegistry)
+    registry.launch_required_terminal.side_effect = RuntimeError("terminal reached")
+    error_type = AccountUnavailableError if recorded_account else RuntimeError
+    with pytest.raises(error_type, match="differs" if recorded_account else "terminal reached"):
+        await _auto_create_claude_terminal_for_test(
+            monkeypatch,
+            session_id="provider-account",
+            workspace=bridge_dir,
+            registry=registry,
+            account=recorded_account,
+            external_session_id="native-history",
+            use_saved_inference=True,
+            agent_spec=AgentSpec(
+                spec_version=1,
+                executor=ExecutorSpec(
+                    type="omnigent",
+                    auth=ProviderAuth(name="team-login"),
+                    config={"harness": "claude-native"},
+                ),
+            ),
+        )
+    assert native_launch_environment() == runner_env
+    if recorded_account:
+        assert stages == []
+        registry.launch_required_terminal.assert_not_called()
+    else:
+        assert stages == ["sign-in", "transcript", "catalog"]
+        spec = registry.launch_required_terminal.call_args.kwargs["spec"]
+        assert spec.env["CLAUDE_CONFIG_DIR"] == selected
+
+
+async def test_resolved_launch_environments_are_task_local(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from omnigent.native.launch_environment import (
+        native_launch_environment,
+        native_launch_environment_scope,
+    )
+
+    monkeypatch.setattr(
+        "omnigent.native.launch_environment._installed_native_launch_environment", {}
+    )
+
+    async def launch(folder):
+        with native_launch_environment_scope({"CLAUDE_CONFIG_DIR": folder}):
+            await asyncio.sleep(0)
+            assert native_launch_environment() == {"CLAUDE_CONFIG_DIR": folder}
+            assert await asyncio.to_thread(native_launch_environment) == {
+                "CLAUDE_CONFIG_DIR": folder
+            }
+        assert native_launch_environment() == {}
+
+    await asyncio.gather(launch("/first"), launch("/second"))

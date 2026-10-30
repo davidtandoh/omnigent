@@ -568,7 +568,10 @@ def validate_agent_account_sessions(
                 if conversation.sub_agent_name
                 else None
             )
-            validate_account_harness(conversation.account, _spec_harness(selected or spec))
+            validate_account_harness(
+                conversation.account,
+                conversation.harness_override or _spec_harness(selected or spec),
+            )
         if not page.has_more:
             return
         after = page.last_id

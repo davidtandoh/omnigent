@@ -9171,153 +9171,245 @@ async def _auto_create_claude_terminal(
     requested_account = resolved_launch_env.get("CLAUDE_CONFIG_DIR")
     from omnigent.harnesses.claude_native.account import ensure_session_account_selected
 
-    await asyncio.to_thread(
-        ensure_session_account_selected, launch_metadata.account, requested_account
-    )
-    from omnigent.config import load_effective_config
-    from omnigent.harness_startup_config import (
-        resolve_harness_args,
-        resolve_harness_command,
-    )
+    provider = None
+    if agent_spec is not None:
+        from omnigent.runtime.workflow import _resolve_provider_for_build
 
-    _harness_cfg = load_effective_config(workspace=workspace)
-    launch_command = resolve_harness_command("claude-native", default="claude", cfg=_harness_cfg)
-    if requested_account is not None:
-        from omnigent.harnesses.claude_native.account import ensure_claude_account_signed_in
-        from omnigent.host.harness_startup import env_wrapper_command
-
-        probe_spec = TerminalEnvSpec(
-            os_env=OSEnvSpec(type="caller_process", cwd=workspace),
-            command=launch_command,
-            args=resolve_harness_args("claude-native", (), cfg=_harness_cfg),
-            env=resolved_launch_env,
-            env_unset=_claude_terminal_env_unset(None),
+        provider = await asyncio.to_thread(
+            _resolve_provider_for_build,
+            _unwrap_resolved_spec(agent_spec),
+            harness_type="claude-sdk",
+            actual_harness="claude-native",
         )
-        probe_env = _claude_terminal_launch_env(probe_spec)
-        probe_command = launch_command
-        if Path(launch_command).name == "env":
-            probe_command = env_wrapper_command(
-                launch_command, list(probe_spec.args), _claude_terminal_pre_wrapper_env(probe_spec)
-            )
+    if launch_metadata.account is not None or provider is None or not provider.config_dir:
         await asyncio.to_thread(
-            ensure_claude_account_signed_in,
-            probe_command,
-            requested_account,
-            env=probe_env,
-            cwd=_claude_terminal_launch_cwd(probe_spec, agent_os_env),
+            ensure_session_account_selected, launch_metadata.account, requested_account
         )
-    session_effort = launch_metadata.reasoning_effort
-    session_model_override = launch_metadata.model_override
-    session_launch_args = launch_metadata.terminal_launch_args
-    session_external_id = launch_metadata.external_session_id
-    fork_source_external_id = launch_metadata.fork_source_external_id
-    fork_carry_history = launch_metadata.fork_carry_history
+    if provider is not None and provider.config_dir:
+        provider_config_dir = str(Path(provider.config_dir).expanduser())
+        if requested_account is not None and requested_account != provider_config_dir:
+            import socket
 
-    # The server GET may miss the external_session_id binding when the
-    # reconnect request arrives without a workspace-scoped context (the
-    # ContextVar defaults to 0 on fresh tasks). Fall back to the claude_session_id
-    # captured from the bridge state file before prepare_bridge_dir wiped it.
-    if session_external_id is None and _pre_wipe_claude_sid is not None:
-        session_external_id = _pre_wipe_claude_sid
-        _logger.info(
-            "cold-resume fallback: server snapshot missing external_session_id, "
-            "using local bridge hint: session=%s local_claude_sid=%s",
-            session_id,
-            _pre_wipe_claude_sid,
-            extra={"session_id": session_id},
-        )
+            from omnigent.onboarding.claude_accounts import AccountUnavailableError
 
-    # Cold resume: when this session wraps a prior Claude session,
-    # synthesize the local ``~/.claude/projects/<workspace>/<sid>.jsonl``
-    # transcript that Claude's ``--resume`` reads, then pass ``--resume``.
-    # The CLI does this client-side via ``_resolve_cold_resume_args``;
-    # doing it here lets a daemon / web-UI launch resume too. Best-effort:
-    # on any failure we launch fresh rather than point ``--resume`` at a
-    # transcript that doesn't exist. See
-    # designs/NATIVE_RUNNER_SERVER_LAUNCH.md.
-    resume_external_session_id: str | None = None
-    # Byte length of the resume transcript this launch synthesized, measured
-    # BEFORE Claude starts. The forwarder seeds its cursor from this rather than
-    # from a live end-offset: resolving the transcript path needs Claude's first
-    # hook, and the executor's prompt inject waits on the same boot, so a
-    # ``stat`` taken later routinely skips the freshly-injected message.
-    resume_prefix_bytes: int | None = None
-    if server_client is not None and session_external_id is not None:
-        from omnigent.harnesses.claude_native.main import (
-            _claude_resume_session_id,
-            _ensure_local_claude_resume_transcript,
-        )
-
-        try:
-            # If a background Claude job still holds this session, resume a copy under a fresh id.
-            resume_session_id = _claude_resume_session_id(
-                session_external_id, session_id=session_id
+            raise AccountUnavailableError(
+                f"Claude account provider {provider.name!r} on machine {socket.gethostname()!r} "
+                "differs from this runner's selected account. Select the same account "
+                "in the agent and session, then launch a new runner."
             )
-            _transcript = await _ensure_local_claude_resume_transcript(
-                server_client,
-                session_id=session_id,
-                external_session_id=resume_session_id,
-                workspace=Path(workspace).resolve(),
-                bridge_dir=bridge_dir,
-                resume_copy=resume_session_id != session_external_id,
+        resolved_launch_env["CLAUDE_CONFIG_DIR"] = provider_config_dir
+        requested_account = provider_config_dir
+    from omnigent.native.launch_environment import native_launch_environment_scope
+
+    with native_launch_environment_scope(resolved_launch_env):
+        from omnigent.config import load_effective_config
+        from omnigent.harness_startup_config import (
+            resolve_harness_args,
+            resolve_harness_command,
+        )
+
+        _harness_cfg = load_effective_config(workspace=workspace)
+        launch_command = resolve_harness_command(
+            "claude-native", default="claude", cfg=_harness_cfg
+        )
+        if requested_account is not None:
+            from omnigent.harnesses.claude_native.account import ensure_claude_account_signed_in
+            from omnigent.host.harness_startup import env_wrapper_command
+
+            probe_spec = TerminalEnvSpec(
+                os_env=OSEnvSpec(type="caller_process", cwd=workspace),
+                command=launch_command,
+                args=resolve_harness_args("claude-native", (), cfg=_harness_cfg),
+                env=resolved_launch_env,
+                env_unset=_claude_terminal_env_unset(None),
             )
-            if _transcript is not None:
-                resume_external_session_id = resume_session_id
-                resume_prefix_bytes = _measured_prefix_bytes(_transcript)
-        except Exception:  # best-effort; launch fresh on failure
-            _logger.warning(
-                "Could not synthesize Claude resume transcript for %s; launching without --resume",
+            probe_env = _claude_terminal_launch_env(probe_spec)
+            probe_command = launch_command
+            if Path(launch_command).name == "env":
+                probe_command = env_wrapper_command(
+                    launch_command,
+                    list(probe_spec.args),
+                    _claude_terminal_pre_wrapper_env(probe_spec),
+                )
+            await asyncio.to_thread(
+                ensure_claude_account_signed_in,
+                probe_command,
+                requested_account,
+                env=probe_env,
+                cwd=_claude_terminal_launch_cwd(probe_spec, agent_os_env),
+            )
+        session_effort = launch_metadata.reasoning_effort
+        session_model_override = launch_metadata.model_override
+        session_launch_args = launch_metadata.terminal_launch_args
+        session_external_id = launch_metadata.external_session_id
+        fork_source_external_id = launch_metadata.fork_source_external_id
+        fork_carry_history = launch_metadata.fork_carry_history
+
+        # The server GET may miss the external_session_id binding when the
+        # reconnect request arrives without a workspace-scoped context (the
+        # ContextVar defaults to 0 on fresh tasks). Fall back to the claude_session_id
+        # captured from the bridge state file before prepare_bridge_dir wiped it.
+        if session_external_id is None and _pre_wipe_claude_sid is not None:
+            session_external_id = _pre_wipe_claude_sid
+            _logger.info(
+                "cold-resume fallback: server snapshot missing external_session_id, "
+                "using local bridge hint: session=%s local_claude_sid=%s",
                 session_id,
-                exc_info=True,
+                _pre_wipe_claude_sid,
+                extra={"session_id": session_id},
             )
-    elif session_external_id is None and fork_source_external_id is not None:
-        # Forked clone with no native session yet: clone the SOURCE's
-        # local Claude transcript into the clone's OWN project dir under a
-        # uuid we assign — rewriting per-record sessionId/cwd — then launch
-        # plain ``--resume <our_uuid>``. Writing the file ourselves before
-        # launch means the forwarder's ``start_at_end`` seeks past the
-        # copied prefix (no double-render), and placing it in the clone's
-        # own project dir means cwd-scoped ``--resume`` finds it in any
-        # dir/worktree. Only viable when the source transcript exists on
-        # THIS host; otherwise the stored-item fallback below rebuilds it.
-        # See designs/FORK_SESSION_UX.md.
-        from omnigent.harnesses.claude_native.main import _clone_claude_transcript
 
-        our_uuid = str(uuid.uuid4())
-        _clone_workspace = Path(workspace).resolve()
-        try:
-            _cloned = _clone_claude_transcript(
-                source_external_session_id=fork_source_external_id,
-                target_external_session_id=our_uuid,
-                clone_workspace=_clone_workspace,
+        # Cold resume: when this session wraps a prior Claude session,
+        # synthesize the local ``~/.claude/projects/<workspace>/<sid>.jsonl``
+        # transcript that Claude's ``--resume`` reads, then pass ``--resume``.
+        # The CLI does this client-side via ``_resolve_cold_resume_args``;
+        # doing it here lets a daemon / web-UI launch resume too. Best-effort:
+        # on any failure we launch fresh rather than point ``--resume`` at a
+        # transcript that doesn't exist. See
+        # designs/NATIVE_RUNNER_SERVER_LAUNCH.md.
+        resume_external_session_id: str | None = None
+        # Byte length of the resume transcript this launch synthesized, measured
+        # BEFORE Claude starts. The forwarder seeds its cursor from this rather than
+        # from a live end-offset: resolving the transcript path needs Claude's first
+        # hook, and the executor's prompt inject waits on the same boot, so a
+        # ``stat`` taken later routinely skips the freshly-injected message.
+        resume_prefix_bytes: int | None = None
+        if server_client is not None and session_external_id is not None:
+            from omnigent.harnesses.claude_native.main import (
+                _claude_resume_session_id,
+                _ensure_local_claude_resume_transcript,
             )
-        except Exception:  # best-effort; fall back to stored items
-            _cloned = None
-            _logger.warning(
-                "Could not clone source transcript for forked clone %s; "
-                "trying item-history fallback",
+
+            try:
+                # If a background Claude job still holds this session, resume a copy under a fresh id.
+                resume_session_id = _claude_resume_session_id(
+                    session_external_id, session_id=session_id
+                )
+                _transcript = await _ensure_local_claude_resume_transcript(
+                    server_client,
+                    session_id=session_id,
+                    external_session_id=resume_session_id,
+                    workspace=Path(workspace).resolve(),
+                    bridge_dir=bridge_dir,
+                    resume_copy=resume_session_id != session_external_id,
+                )
+                if _transcript is not None:
+                    resume_external_session_id = resume_session_id
+                    resume_prefix_bytes = _measured_prefix_bytes(_transcript)
+            except Exception:  # best-effort; launch fresh on failure
+                _logger.warning(
+                    "Could not synthesize Claude resume transcript for %s; launching without --resume",
+                    session_id,
+                    exc_info=True,
+                )
+        elif session_external_id is None and fork_source_external_id is not None:
+            # Forked clone with no native session yet: clone the SOURCE's
+            # local Claude transcript into the clone's OWN project dir under a
+            # uuid we assign — rewriting per-record sessionId/cwd — then launch
+            # plain ``--resume <our_uuid>``. Writing the file ourselves before
+            # launch means the forwarder's ``start_at_end`` seeks past the
+            # copied prefix (no double-render), and placing it in the clone's
+            # own project dir means cwd-scoped ``--resume`` finds it in any
+            # dir/worktree. Only viable when the source transcript exists on
+            # THIS host; otherwise the stored-item fallback below rebuilds it.
+            # See designs/FORK_SESSION_UX.md.
+            from omnigent.harnesses.claude_native.main import _clone_claude_transcript
+
+            our_uuid = str(uuid.uuid4())
+            _clone_workspace = Path(workspace).resolve()
+            try:
+                _cloned = _clone_claude_transcript(
+                    source_external_session_id=fork_source_external_id,
+                    target_external_session_id=our_uuid,
+                    clone_workspace=_clone_workspace,
+                )
+            except Exception:  # best-effort; fall back to stored items
+                _cloned = None
+                _logger.warning(
+                    "Could not clone source transcript for forked clone %s; "
+                    "trying item-history fallback",
+                    session_id,
+                    exc_info=True,
+                )
+            _logger.info(
+                "Claude terminal fork-resume decision: session=%s source_ext=%s "
+                "our_uuid=%s clone_workspace=%s cloned_transcript=%s",
                 session_id,
-                exc_info=True,
+                fork_source_external_id,
+                our_uuid,
+                _clone_workspace,
+                str(_cloned) if _cloned is not None else None,
+                extra={"session_id": session_id},
             )
-        _logger.info(
-            "Claude terminal fork-resume decision: session=%s source_ext=%s "
-            "our_uuid=%s clone_workspace=%s cloned_transcript=%s",
-            session_id,
-            fork_source_external_id,
-            our_uuid,
-            _clone_workspace,
-            str(_cloned) if _cloned is not None else None,
-            extra={"session_id": session_id},
-        )
-        if _cloned is not None:
-            # Resume our OWN clone (plain --resume, no --fork-session).
-            resume_external_session_id = our_uuid
-            resume_prefix_bytes = _measured_prefix_bytes(_cloned)
-            # Record the assigned id now so Omnigent reflects the clone's own
-            # Claude session immediately, and a later relaunch resumes it
-            # via the normal cold-resume path (this branch is gated on
-            # external_session_id being unset). Best-effort.
-            if server_client is not None:
+            if _cloned is not None:
+                # Resume our OWN clone (plain --resume, no --fork-session).
+                resume_external_session_id = our_uuid
+                resume_prefix_bytes = _measured_prefix_bytes(_cloned)
+                # Record the assigned id now so Omnigent reflects the clone's own
+                # Claude session immediately, and a later relaunch resumes it
+                # via the normal cold-resume path (this branch is gated on
+                # external_session_id being unset). Best-effort.
+                if server_client is not None:
+                    try:
+                        await server_client.patch(
+                            f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}",
+                            json={"external_session_id": our_uuid},
+                            params={"include_usage": "false"},
+                            timeout=10.0,
+                        )
+                    except httpx.HTTPError:
+                        _logger.warning(
+                            "Could not pre-set external_session_id for forked clone %s; "
+                            "relying on hook capture",
+                            session_id,
+                            exc_info=True,
+                        )
+        if (
+            server_client is not None
+            and fork_carry_history
+            and session_external_id is None
+            and resume_external_session_id is None
+        ):
+            # A missing local transcript or cross-family source needs the fork's
+            # copied Omnigent items rebuilt into a resumable Claude transcript.
+            # The chosen workspace supplies its project directory and cwd fields.
+            from omnigent.harnesses.claude_native.main import (
+                _ensure_local_claude_resume_transcript,
+            )
+
+            our_uuid = str(uuid.uuid4())
+            _clone_workspace = Path(workspace).resolve()
+            try:
+                _built = await _ensure_local_claude_resume_transcript(
+                    server_client,
+                    session_id=session_id,
+                    external_session_id=our_uuid,
+                    workspace=_clone_workspace,
+                    bridge_dir=bridge_dir,
+                )
+            except Exception:  # best-effort; launch fresh on failure
+                _built = None
+                _logger.warning(
+                    "Could not build native transcript from items for forked clone %s; "
+                    "launching fresh",
+                    session_id,
+                    exc_info=True,
+                )
+            _logger.info(
+                "Claude terminal fork-rebuild decision: session=%s our_uuid=%s "
+                "clone_workspace=%s built_transcript=%s",
+                session_id,
+                our_uuid,
+                _clone_workspace,
+                str(_built) if _built is not None else None,
+                extra={"session_id": session_id},
+            )
+            if _built is not None:
+                resume_external_session_id = our_uuid
+                resume_prefix_bytes = _measured_prefix_bytes(_built)
+                # Record the assigned id so Omnigent reflects the clone's own Claude
+                # session and a later relaunch resumes it via the cold-resume
+                # path above. Best-effort, mirroring the clone branch.
                 try:
                     await server_client.patch(
                         f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}",
@@ -9332,684 +9424,635 @@ async def _auto_create_claude_terminal(
                         session_id,
                         exc_info=True,
                     )
-    if (
-        server_client is not None
-        and fork_carry_history
-        and session_external_id is None
-        and resume_external_session_id is None
-    ):
-        # A missing local transcript or cross-family source needs the fork's
-        # copied Omnigent items rebuilt into a resumable Claude transcript.
-        # The chosen workspace supplies its project directory and cwd fields.
-        from omnigent.harnesses.claude_native.main import _ensure_local_claude_resume_transcript
-
-        our_uuid = str(uuid.uuid4())
-        _clone_workspace = Path(workspace).resolve()
-        try:
-            _built = await _ensure_local_claude_resume_transcript(
-                server_client,
-                session_id=session_id,
-                external_session_id=our_uuid,
-                workspace=_clone_workspace,
-                bridge_dir=bridge_dir,
-            )
-        except Exception:  # best-effort; launch fresh on failure
-            _built = None
-            _logger.warning(
-                "Could not build native transcript from items for forked clone %s; "
-                "launching fresh",
-                session_id,
-                exc_info=True,
-            )
         _logger.info(
-            "Claude terminal fork-rebuild decision: session=%s our_uuid=%s "
-            "clone_workspace=%s built_transcript=%s",
+            "Claude terminal cold-resume decision: session=%s external_session_id_set=%s "
+            "fork_source_set=%s resume_enabled=%s",
             session_id,
-            our_uuid,
-            _clone_workspace,
-            str(_built) if _built is not None else None,
+            session_external_id is not None,
+            fork_source_external_id is not None,
+            resume_external_session_id is not None,
             extra={"session_id": session_id},
         )
-        if _built is not None:
-            resume_external_session_id = our_uuid
-            resume_prefix_bytes = _measured_prefix_bytes(_built)
-            # Record the assigned id so Omnigent reflects the clone's own Claude
-            # session and a later relaunch resumes it via the cold-resume
-            # path above. Best-effort, mirroring the clone branch.
+
+        # Derive the ucode (Databricks gateway) launch config from the
+        # runner's own profile so a daemon / web-UI-launched Claude
+        # authenticates to the gateway exactly like a CLI-launched one —
+        # the CLI injects this in ``_claude_terminal_request``; on this path
+        # the runner must, since it (not the CLI) launches the terminal.
+        # Best-effort: no profile / no ucode state / malformed state falls
+        # back to Claude's own native config (empty env).
+        # See designs/NATIVE_RUNNER_SERVER_LAUNCH.md.
+        # Resolve the launch config across all offerings — a configured provider
+        # (omnigent setup), a Databricks ucode profile from provider config, or
+        # Claude's own login — so a host-spawned native-claude session honors the
+        # provider selection just like the in-process claude-sdk harness and the
+        # CLI path.
+        claude_config: ClaudeNativeUcodeConfig | None = None
+        _launch_config_resolution_failed = False
+        from omnigent.inference_config import (
+            binding_for_harness,
+            load_runtime_inference_config,
+            resolve_bound_model,
+        )
+
+        inference_config = None
+        claude_binding = None
+        if "CLAUDE_CONFIG_DIR" not in resolved_launch_env:
+            inference_config = load_runtime_inference_config()
+            claude_binding = binding_for_harness(inference_config, "claude-native")
             try:
-                await server_client.patch(
-                    f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}",
-                    json={"external_session_id": our_uuid},
-                    params={"include_usage": "false"},
-                    timeout=10.0,
-                )
-            except httpx.HTTPError:
-                _logger.warning(
-                    "Could not pre-set external_session_id for forked clone %s; "
-                    "relying on hook capture",
-                    session_id,
-                    exc_info=True,
-                )
-    _logger.info(
-        "Claude terminal cold-resume decision: session=%s external_session_id_set=%s "
-        "fork_source_set=%s resume_enabled=%s",
-        session_id,
-        session_external_id is not None,
-        fork_source_external_id is not None,
-        resume_external_session_id is not None,
-        extra={"session_id": session_id},
-    )
-
-    # Derive the ucode (Databricks gateway) launch config from the
-    # runner's own profile so a daemon / web-UI-launched Claude
-    # authenticates to the gateway exactly like a CLI-launched one —
-    # the CLI injects this in ``_claude_terminal_request``; on this path
-    # the runner must, since it (not the CLI) launches the terminal.
-    # Best-effort: no profile / no ucode state / malformed state falls
-    # back to Claude's own native config (empty env).
-    # See designs/NATIVE_RUNNER_SERVER_LAUNCH.md.
-    # Resolve the launch config across all offerings — a configured provider
-    # (omnigent setup), a Databricks ucode profile from provider config, or
-    # Claude's own login — so a host-spawned native-claude session honors the
-    # provider selection just like the in-process claude-sdk harness and the
-    # CLI path.
-    claude_config: ClaudeNativeUcodeConfig | None = None
-    _launch_config_resolution_failed = False
-    from omnigent.inference_config import (
-        binding_for_harness,
-        load_runtime_inference_config,
-        resolve_bound_model,
-    )
-
-    inference_config = None
-    claude_binding = None
-    if "CLAUDE_CONFIG_DIR" not in resolved_launch_env:
-        inference_config = load_runtime_inference_config()
-        claude_binding = binding_for_harness(inference_config, "claude-native")
-        try:
-            if resolve_launch_config is not None:
-                claude_config = await resolve_launch_config()
-            else:
-                claude_config = await asyncio.to_thread(resolve_native_claude_config, spec=None)
-        except click.ClickException:
-            # An authoritative Databricks response with no Claude models is a
-            # configuration failure, not permission to bypass the gateway.
-            raise
-        except Exception:
-            if claude_binding is not None:
-                raise
-            _logger.warning(
-                "native-claude: could not derive a provider/ucode launch config "
-                "— FALLING BACK to Claude Code's own login; "
-                "your configured provider will NOT be used. Check "
-                "`omnigent setup --no-internal-beta` "
-                "and that the secret resolves in this process.",
-                exc_info=True,
-                extra={"session_id": session_id},
-            )
-            _launch_config_resolution_failed = True
-    else:
-        from omnigent.harnesses.claude_native.main import managed_claude_gateway_signal
-
-        managed_base_url, managed_credential = managed_claude_gateway_signal()
-        if managed_base_url or managed_credential:
-            raise RuntimeError(
-                "native-claude: managed settings override the selected account. "
-                "A subscription account cannot be selected while managed Claude settings "
-                "configure a gateway or apiKeyHelper."
-            )
-    # A transient resolver failure must not be cached as "no provider configured".
-    # A routed session's turn-1 ``/model`` can only reach ids this launch env
-    # spells, so point the family aliases at the router's frozen arms before the
-    # launch model is derived from them.
-    if launch_metadata.routing_enabled:
-        from omnigent.server.smart_routing import task_v1_claude_arms
-
-        claude_config = claude_config_with_routed_arms_pinned(claude_config, task_v1_claude_arms())
-    # The launch model without the session's pick: the agent-spec pin, else
-    # the provider's own default. Also what a pick the provider cannot serve
-    # falls back to.
-    unpinned_launch_model = resolve_claude_native_model_selection(
-        _claude_native_model_from_spec(agent_spec)
-        or (claude_config.model if claude_config is not None else None),
-        claude_config,
-    )
-    launch_model = (
-        resolve_claude_native_model_selection(session_model_override, claude_config)
-        if session_model_override
-        else unpinned_launch_model
-    )
-    if claude_binding is not None and inference_config is not None:
-        unpinned_launch_model = resolve_bound_model(
-            inference_config, "claude-native", _claude_native_model_from_spec(agent_spec)
-        )
-        launch_model = resolve_bound_model(
-            inference_config, "claude-native", session_model_override or unpinned_launch_model
-        )
-    # A pick the provider cannot serve is dropped only once the fallback
-    # terminal is actually up, so a failed launch never loses it.
-    reset_pick_after_launch = False
-    # Explicit launches (model-flows design §4): consult the shared catalog
-    # only when it can change the outcome — to validate an explicit request,
-    # or to resolve a Default launch that would otherwise pass no ``--model``
-    # and leave the model to invisible CLI-private state.
-    # Bound here so the vocabulary record below reads the same rows the
-    # launch validated against, whether or not that validation ran.
-    launch_catalog: list[dict[str, object]] | None = None
-    if claude_binding is None and (session_model_override or launch_model is None):
-        from omnigent.harnesses.claude_native.main import (
-            claude_catalog_launch_spelling,
-            claude_catalog_serves_model,
-            claude_launch_catalog,
-            claude_launch_catalog_is_stale,
-            claude_launch_endpoint_label,
-            claude_reprobed_launch_catalog,
-        )
-        from omnigent.models.model_catalog_store import default_row
-
-        launch_catalog_was_stale = False
-        try:
-            # Read staleness BEFORE the fetch: the fetch itself kicks the
-            # background re-probe, which could land between the two reads and
-            # make a same-launch check call yesterday's rows fresh.
-            launch_catalog_was_stale = claude_launch_catalog_is_stale(claude_config)
-            launch_catalog = await claude_launch_catalog(claude_config)
-        except Exception:  # no catalog means no validation/default
-            _logger.warning(
-                "claude launch catalog unavailable for session=%s",
-                session_id,
-                exc_info=True,
-                extra={"session_id": session_id},
-            )
-        if session_model_override and launch_catalog:
-            pick = session_model_override
-            resolved_request = resolve_claude_native_model_selection(pick, claude_config) or pick
-
-            def _serves_pick(rows: list[dict[str, object]]) -> bool:
-                """
-                Whether *rows* serve the pick by its persisted or resolved spelling.
-                """
-                # A pane's ``/model`` persists the exact id it runs; the catalog
-                # may spell that model only by its family alias.
-                return claude_catalog_serves_model(
-                    rows, pick, claude_config
-                ) or claude_catalog_serves_model(rows, resolved_request, claude_config)
-
-            # A spec pin or routing pick can spell a served model in the
-            # gateway/catalog namespace ("system.ai.claude-opus-4-8[1m]")
-            # while the launch catalog lists the same model bare; folding the
-            # mechanical prefix away keeps the pick launchable on the
-            # catalog's own spelling instead of falling back to the default.
-            def _fold_pick(rows: list[dict[str, object]]) -> str | None:
-                """
-                The rows' launch spelling for the pick's persisted or resolved id.
-                """
-                # The custom picker slot resolves to a provider-configured id
-                # (e.g. "system.ai.claude-sonnet-5"), so like _serves_pick the
-                # fold must consult both spellings.
-                return claude_catalog_launch_spelling(
-                    rows, pick
-                ) or claude_catalog_launch_spelling(rows, resolved_request)
-
-            folded_spelling = _fold_pick(launch_catalog)
-            # Only rows that are fresh may retire the pick: a stale entry may
-            # predate a provider change, so it is re-probed first, and a
-            # failed probe leaves no fresh rows at all. A foldable pin counts
-            # as an exact serve for staleness: it launches on the stale rows'
-            # spelling without a re-probe, like the exact-serve stale path.
-            fresh_rows: list[dict[str, object]] | None = launch_catalog
-            if (
-                launch_catalog_was_stale
-                and not _serves_pick(launch_catalog)
-                and folded_spelling is None
-            ):
-                fresh_rows = await claude_reprobed_launch_catalog(claude_config)
-                if fresh_rows:
-                    launch_catalog = fresh_rows
-                    launch_catalog_was_stale = False
-                    folded_spelling = _fold_pick(launch_catalog)
-            if not _serves_pick(launch_catalog):
-                if folded_spelling is not None:
-                    _logger.info(
-                        "claude launch gate folded the pinned model %r onto the catalog "
-                        "spelling %r for session=%s",
-                        pick,
-                        folded_spelling,
-                        session_id,
-                        extra={"session_id": session_id},
-                    )
-                    launch_model = folded_spelling
+                if resolve_launch_config is not None:
+                    claude_config = await resolve_launch_config()
                 else:
-                    # The pick outlives the provider it was made under (a later
-                    # ``omnigent setup`` can re-point the default). Launch on what
-                    # this provider serves; reset the pick to Default only on fresh
-                    # evidence, so the picker shows what the session now runs.
-                    offered = ", ".join(
-                        str(row.get("id") or row.get("model") or "") for row in launch_catalog
+                    claude_config = await asyncio.to_thread(
+                        resolve_native_claude_config, spec=None
                     )
-                    if fresh_rows:
-                        reset_pick_after_launch = True
-                        outcome = (
-                            "launching on the provider default and resetting the pick to Default"
-                        )
-                    else:
-                        outcome = (
-                            "the re-probe failed, so launching on the provider default and "
-                            "keeping the pick for the next relaunch"
-                        )
-                    _logger.warning(
-                        "claude-native: model pick %r for session %s is not served by %s "
-                        "(it offers: %s); %s",
-                        pick,
-                        session_id,
-                        claude_launch_endpoint_label(claude_config),
-                        offered,
-                        outcome,
-                        extra={"session_id": session_id},
-                    )
-                    launch_model = unpinned_launch_model
-        if launch_model is None and launch_catalog:
-            # A stale entry's default is yesterday's answer: pinning it as
-            # ``--model`` turns a provider-side retirement or entitlement
-            # change into a hard launch failure. Launch bare instead — the
-            # CLI's own default is servable by construction, and the
-            # harness's ``reported_model`` records what it actually ran —
-            # while the store's background re-probe converges the catalog.
-            if launch_catalog_was_stale:
-                _logger.info(
-                    "claude catalog for session=%s is stale; deferring the Default "
-                    "launch to the CLI's own default model",
-                    session_id,
-                )
-            else:
-                catalog_default = default_row(launch_catalog)
-                if catalog_default is not None:
-                    launch_model = (
-                        str(catalog_default.get("model") or catalog_default.get("id") or "")
-                        or None
-                    )
-    # Give an exact launch model (a Smart Routing pick is resolved before the
-    # terminal exists) a spelling of its own in the picker, so a later
-    # ``/model`` can return to it instead of stepping onto whatever the family
-    # alias points at. Recorded below, so the picker and the launch agree.
-    # Routed launches only: the pin writes ``ANTHROPIC_CUSTOM_MODEL_OPTION``,
-    # and on a plain session that displaces the workspace's own picker row for
-    # no gain — nothing later re-picks the launch model there.
-    if launch_metadata.routing_enabled:
-        claude_config = claude_config_with_launch_model_pinned(claude_config, launch_model)
-    if record_launch_config is not None and not _launch_config_resolution_failed:
-        record_launch_config(session_id, claude_config)
-    # Persist the vocabulary + launch model onto the bridge so mid-session
-    # ``/model`` conversion reads THIS session's pins, not the runner's
-    # ambient env (the CLI path records these at prepare time; the runner
-    # resolves its config only after the bridge exists).
-    from omnigent.harnesses.claude_native.bridge import record_model_vocabulary
-    from omnigent.harnesses.claude_native.main import stored_claude_picker_values
-
-    await asyncio.to_thread(
-        record_model_vocabulary,
-        bridge_dir,
-        launch_env=claude_config.env if claude_config is not None else None,
-        launch_model=launch_model,
-        # The catalog rows are the CLI's own picker, so their ids are the
-        # spellings a later ``/model`` can type — a managed picker names
-        # rows no pin covers.
-        picker_values=stored_claude_picker_values(claude_config, launch_catalog),
-    )
-    _logger.info(
-        "Claude terminal provider config resolved: session=%s configured=%s "
-        "env_keys=%s api_key_helper_set=%s model_set=%s launch_model=%s",
-        session_id,
-        claude_config is not None,
-        sorted(claude_config.env) if claude_config is not None else [],
-        bool(claude_config.api_key_helper) if claude_config is not None else False,
-        bool(claude_config.model) if claude_config is not None else False,
-        launch_model,
-        extra={"session_id": session_id},
-    )
-    base_claude_args = _build_claude_native_base_args(
-        reasoning_effort=session_effort,
-        # Precedence: per-session ``/model`` override > agent-spec pin
-        # (``executor.model``) > provider/ucode default. All three yield to an
-        # explicit ``--model`` in the user's pass-through args (handled in the
-        # helper).
-        model_override=launch_model,
-        terminal_launch_args=session_launch_args,
-        resume_external_session_id=resume_external_session_id,
-        skip_initial_prompt=await _claude_legacy_prompt_consumed(
-            server_client=server_client,
-            session_id=session_id,
-            terminal_launch_args=session_launch_args,
-            has_prior_history=(
-                session_external_id is not None
-                or fork_source_external_id is not None
-                or fork_carry_history
-            ),
-        ),
-    )
-
-    # Pass ``ap_server_url`` so ``build_hook_settings`` registers the
-    # claude-native ``PermissionRequest`` command hook and writes
-    # permission_hook.json. Without it, the hook is silently omitted and
-    # approval prompts never reach the web UI on this host-spawned path.
-    # ``bundle_dir`` / ``skills_filter`` (resolved by the caller, which
-    # has the spec resolver) expose a bundle's ``skills/`` to Claude Code
-    # via ``--plugin-dir`` — the CLI mirror of the SDK plugin wiring.
-    # ``api_key_helper`` (ucode) registers Claude's gateway token command.
-    # Gate natively spawned subagents (the Task/Agent tool): start the loopback
-    # endpoint in the bridge dir the PreToolUse hook already discovers. Smart
-    # Routing sessions only — a plain session would otherwise carry a loopback
-    # server, a bearer token on disk and a hook subprocess on every spawn for a
-    # verdict the server never routes. Claude routes spawns whether or not the
-    # harness is auto-picked, so ``auto_harness`` is not required here.
-    subagent_router_dir, _subagent_router = _start_subagent_router_for_native_session(
-        session_id,
-        bridge_dir=bridge_dir,
-        harness="claude-native",
-        server_client=server_client,
-        routing_enabled=launch_metadata.routing_enabled,
-        auto_harness=launch_metadata.auto_harness,
-    )
-    # First-message model routing. Advertised in the same bridge dir the
-    # ``UserPromptSubmit`` hook is pointed at (so the hook needs no env of its
-    # own), and live before the terminal launches because the hook can fire on
-    # the very first prompt the user types.
-    _claude_turn_router = _start_turn_router_for_native_session(
-        session_id,
-        bridge_dir=bridge_dir,
-        harness="claude-native",
-        server_client=server_client,
-        turn_routing=launch_metadata.turn_routing,
-    )
-    # Crash recovery for a blocked-but-never-replayed prompt is not wired here:
-    # the pending record on disk is the seam if it ever is, and the recovery's
-    # default readiness probe waits on a codex bridge thread.
-    # Only an auto-harness session's spawns can be re-routed across harness
-    # families, so only it needs the routed-spawn note and the pre-approval for
-    # the three Omnigent tools that carry out the re-route. A pinned session's
-    # argv must stay byte-identical.
-    routed_spawn_note, routed_spawn_tools = _routed_spawn_launch_args(
-        launch_metadata.auto_harness,
-        router_started=subagent_router_dir is not None,
-    )
-    claude_args = augment_claude_args(
-        base_claude_args,
-        bridge_dir=bridge_dir,
-        workspace=Path(workspace),
-        ap_server_url=server_url,
-        ap_auth_headers=_runner_headers,
-        bundle_dir=bundle_dir,
-        agent_name=agent_name,
-        skills_filter=skills_filter,
-        api_key_helper=claude_config.api_key_helper if claude_config is not None else None,
-        model_overrides=claude_config.model_overrides if claude_config is not None else None,
-        subagent_router_dir=subagent_router_dir,
-        append_system_prompt="\n\n".join(
-            x
-            for x in [_native_startup_raw_instructions_from_spec(agent_spec), routed_spawn_note]
-            if x
-        )
-        or None,
-        allowed_tools=routed_spawn_tools,
-        # The route-turn hook is registered only when this session can
-        # actually route; otherwise every submit would pay its round trip.
-        turn_routing=_claude_turn_router is not None,
-    )
-
-    # Apply the per-harness startup command/args override from config
-    # (``harness.claude-native.{command,args}`` in ~/.omnigent/config.yaml) so a
-    # downstream integration can wrap this managed-host launch — e.g. Databricks'
-    # ``isaac`` sets ``command: isaac`` + ``args: ["--"]`` to run
-    # ``isaac -- <augmented args>`` (the config args prepend, and augmentation
-    # appended above, so the ``--`` stays first). Identity by default. This is
-    # the same resolver the local-CLI native launch uses (see cli_native.py), so
-    # both terminal-creation paths honour one config surface.
-    launch_args = resolve_harness_args("claude-native", tuple(claude_args), cfg=_harness_cfg)
-    # Validate the binary this terminal will actually spawn: ``launch_command``
-    # already reflects the OMNIGENT_CLAUDE_PATH / config overrides, and a bare
-    # name resolves against this process's inherited PATH (same lookup tmux's
-    # pane shell and omnigent.inner.terminal perform). Mirrors
-    # ``_preflight_local_tools`` on the local-CLI path.
-    resolved_claude = resolve_cli_binary(launch_command)
-    if resolved_claude is not None:
-        validate_claude_hook_interpreter_compatibility(resolved_claude)
-
-    claude_terminal_env_unset = _claude_terminal_env_unset(claude_config)
-
-    # Inherit the agent's os_env so its sandbox (e.g. ``type: none``),
-    # egress_rules and env_passthrough are honoured. Without ``sandbox`` here
-    # and ``parent_os_env`` below, launch_terminal falls back to
-    # _default_sandbox_for_platform (linux_bwrap), overriding the YAML config.
-    # ``agent_os_env`` was already resolved above for ``prepare_bridge_dir``,
-    # so the terminal process and the bridge's sys_os_* tools agree.
-    env_spec = TerminalEnvSpec(
-        os_env=OSEnvSpec(
-            type="caller_process",
-            cwd=workspace,
-            sandbox=(agent_os_env.sandbox if agent_os_env is not None else None),
-        ),
-        command=launch_command,
-        args=launch_args,
-        # Tool Search env plus ucode gateway env (ANTHROPIC_BASE_URL
-        # etc.) when derived. Empty provider config still forces
-        # ENABLE_TOOL_SEARCH=true so MCP schemas are loaded on demand.
-        env={
-            **build_native_claude_terminal_env(claude_config),
-            **resolved_launch_env,
-        },
-        # Names to strip (see ``_claude_terminal_env_unset``). Dropping
-        # ``DATABRICKS_CONFIG_PROFILE`` matters because Claude's MCP servers
-        # inherit this env and several build ``WorkspaceClient`` without pinning
-        # ``auth_type``: a set profile makes the SDK prefer that profile's cached
-        # OAuth token over the MCP's explicit token, 400ing against the wrong
-        # workspace. Claude itself ignores the var (routing is
-        # ``ANTHROPIC_BASE_URL`` / ``apiKeyHelper``), so this affects only MCPs;
-        # ones needing a specific profile must set it in their own per-MCP env.
-        env_unset=claude_terminal_env_unset,
-        scrollback=50000,
-        # Keep the private tmux server alive if the `claude` CLI exits (e.g. a
-        # sub-agent worker whose CLI exits right after rendering its prompt on
-        # some hosts — #540). Without this, that exit reaps the server and every
-        # later control command (send-keys / model / effort / interrupt / stop)
-        # fails with "no server running", and the delegated message is silently
-        # lost. With it, the dead pane persists (capturable for diagnostics) and
-        # the watcher reports the exit deterministically via `#{pane_dead}`.
-        keep_alive_after_exit=True,
-    )
-    # Seed trust and onboarding in the config selected by the terminal's launch environment.
-    try:
-        launch_env = _claude_terminal_launch_env(env_spec)
-        launch_cwd = _claude_terminal_launch_cwd(env_spec, agent_os_env)
-        if (
-            requested_account is not None
-            and launch_env.get("CLAUDE_CONFIG_DIR") != requested_account
-        ):
-            from omnigent.harnesses.claude_native.account import _account_label
-            from omnigent.onboarding.claude_accounts import AccountUnavailableError
-
-            raise AccountUnavailableError(
-                f"{_account_label(launch_metadata.account)} would receive a different "
-                "CLAUDE_CONFIG_DIR. Check the harness launch command."
-            )
-        ensure_claude_workspace_trusted(
-            launch_cwd,
-            env=launch_env,
-        )
-    except BaseException as seed_error:
-        # No forwarder owns the routers yet, so release the ones this launch started.
-        # A ``None`` handle would shut down whichever router is registered now.
-        cleanups: list[Coroutine[Any, Any, None]] = []
-        if _subagent_router is not None:
-            cleanups.append(_shutdown_session_router_async(session_id, _subagent_router))
-        if _claude_turn_router is not None:
-            cleanups.append(_shutdown_session_turn_router_async(session_id, _claude_turn_router))
-        cancelled: asyncio.CancelledError | None = None
-        for cleanup in cleanups:
-            try:
-                await cleanup
-            except asyncio.CancelledError as exc:
-                # Release the other router before honoring the cancellation.
-                cancelled = exc
-            except Exception:  # keep the seeding failure as the error.
+            except click.ClickException:
+                # An authoritative Databricks response with no Claude models is a
+                # configuration failure, not permission to bypass the gateway.
+                raise
+            except Exception:
+                if claude_binding is not None:
+                    raise
                 _logger.warning(
-                    "Router cleanup failed after Claude trust seeding failed: session=%s",
+                    "native-claude: could not derive a provider/ucode launch config "
+                    "— FALLING BACK to Claude Code's own login; "
+                    "your configured provider will NOT be used. Check "
+                    "`omnigent setup --no-internal-beta` "
+                    "and that the secret resolves in this process.",
+                    exc_info=True,
+                    extra={"session_id": session_id},
+                )
+                _launch_config_resolution_failed = True
+        else:
+            from omnigent.harnesses.claude_native.main import managed_claude_gateway_signal
+
+            managed_base_url, managed_credential = managed_claude_gateway_signal()
+            if managed_base_url or managed_credential:
+                raise RuntimeError(
+                    "native-claude: managed settings override the selected account. "
+                    "A subscription account cannot be selected while managed Claude settings "
+                    "configure a gateway or apiKeyHelper."
+                )
+        # A transient resolver failure must not be cached as "no provider configured".
+        # A routed session's turn-1 ``/model`` can only reach ids this launch env
+        # spells, so point the family aliases at the router's frozen arms before the
+        # launch model is derived from them.
+        if launch_metadata.routing_enabled:
+            from omnigent.server.smart_routing import task_v1_claude_arms
+
+            claude_config = claude_config_with_routed_arms_pinned(
+                claude_config, task_v1_claude_arms()
+            )
+        # The launch model without the session's pick: the agent-spec pin, else
+        # the provider's own default. Also what a pick the provider cannot serve
+        # falls back to.
+        unpinned_launch_model = resolve_claude_native_model_selection(
+            _claude_native_model_from_spec(agent_spec)
+            or (claude_config.model if claude_config is not None else None),
+            claude_config,
+        )
+        launch_model = (
+            resolve_claude_native_model_selection(session_model_override, claude_config)
+            if session_model_override
+            else unpinned_launch_model
+        )
+        if claude_binding is not None and inference_config is not None:
+            unpinned_launch_model = resolve_bound_model(
+                inference_config, "claude-native", _claude_native_model_from_spec(agent_spec)
+            )
+            launch_model = resolve_bound_model(
+                inference_config, "claude-native", session_model_override or unpinned_launch_model
+            )
+        # A pick the provider cannot serve is dropped only once the fallback
+        # terminal is actually up, so a failed launch never loses it.
+        reset_pick_after_launch = False
+        # Explicit launches (model-flows design §4): consult the shared catalog
+        # only when it can change the outcome — to validate an explicit request,
+        # or to resolve a Default launch that would otherwise pass no ``--model``
+        # and leave the model to invisible CLI-private state.
+        # Bound here so the vocabulary record below reads the same rows the
+        # launch validated against, whether or not that validation ran.
+        launch_catalog: list[dict[str, object]] | None = None
+        if claude_binding is None and (session_model_override or launch_model is None):
+            from omnigent.harnesses.claude_native.main import (
+                claude_catalog_launch_spelling,
+                claude_catalog_serves_model,
+                claude_launch_catalog,
+                claude_launch_catalog_is_stale,
+                claude_launch_endpoint_label,
+                claude_reprobed_launch_catalog,
+            )
+            from omnigent.models.model_catalog_store import default_row
+
+            launch_catalog_was_stale = False
+            try:
+                # Read staleness BEFORE the fetch: the fetch itself kicks the
+                # background re-probe, which could land between the two reads and
+                # make a same-launch check call yesterday's rows fresh.
+                launch_catalog_was_stale = claude_launch_catalog_is_stale(claude_config)
+                launch_catalog = await claude_launch_catalog(claude_config)
+            except Exception:  # no catalog means no validation/default
+                _logger.warning(
+                    "claude launch catalog unavailable for session=%s",
                     session_id,
                     exc_info=True,
                     extra={"session_id": session_id},
                 )
-        if cancelled is not None:
-            raise cancelled from seed_error
-        raise
-    _logger.info(
-        "Claude terminal tmux launch requested: session=%s command=%s args_count=%d "
-        "env_keys=%s cwd=%s scrollback=%d",
-        session_id,
-        env_spec.command,
-        len(env_spec.args),
-        sorted(env_spec.env),
-        workspace,
-        env_spec.scrollback,
-        extra={"session_id": session_id},
-    )
-    try:
-        terminal_view = await resource_registry.launch_required_terminal(
+            if session_model_override and launch_catalog:
+                pick = session_model_override
+                resolved_request = (
+                    resolve_claude_native_model_selection(pick, claude_config) or pick
+                )
+
+                def _serves_pick(rows: list[dict[str, object]]) -> bool:
+                    """
+                    Whether *rows* serve the pick by its persisted or resolved spelling.
+                    """
+                    # A pane's ``/model`` persists the exact id it runs; the catalog
+                    # may spell that model only by its family alias.
+                    return claude_catalog_serves_model(
+                        rows, pick, claude_config
+                    ) or claude_catalog_serves_model(rows, resolved_request, claude_config)
+
+                # A spec pin or routing pick can spell a served model in the
+                # gateway/catalog namespace ("system.ai.claude-opus-4-8[1m]")
+                # while the launch catalog lists the same model bare; folding the
+                # mechanical prefix away keeps the pick launchable on the
+                # catalog's own spelling instead of falling back to the default.
+                def _fold_pick(rows: list[dict[str, object]]) -> str | None:
+                    """
+                    The rows' launch spelling for the pick's persisted or resolved id.
+                    """
+                    # The custom picker slot resolves to a provider-configured id
+                    # (e.g. "system.ai.claude-sonnet-5"), so like _serves_pick the
+                    # fold must consult both spellings.
+                    return claude_catalog_launch_spelling(
+                        rows, pick
+                    ) or claude_catalog_launch_spelling(rows, resolved_request)
+
+                folded_spelling = _fold_pick(launch_catalog)
+                # Only rows that are fresh may retire the pick: a stale entry may
+                # predate a provider change, so it is re-probed first, and a
+                # failed probe leaves no fresh rows at all. A foldable pin counts
+                # as an exact serve for staleness: it launches on the stale rows'
+                # spelling without a re-probe, like the exact-serve stale path.
+                fresh_rows: list[dict[str, object]] | None = launch_catalog
+                if (
+                    launch_catalog_was_stale
+                    and not _serves_pick(launch_catalog)
+                    and folded_spelling is None
+                ):
+                    fresh_rows = await claude_reprobed_launch_catalog(claude_config)
+                    if fresh_rows:
+                        launch_catalog = fresh_rows
+                        launch_catalog_was_stale = False
+                        folded_spelling = _fold_pick(launch_catalog)
+                if not _serves_pick(launch_catalog):
+                    if folded_spelling is not None:
+                        _logger.info(
+                            "claude launch gate folded the pinned model %r onto the catalog "
+                            "spelling %r for session=%s",
+                            pick,
+                            folded_spelling,
+                            session_id,
+                            extra={"session_id": session_id},
+                        )
+                        launch_model = folded_spelling
+                    else:
+                        # The pick outlives the provider it was made under (a later
+                        # ``omnigent setup`` can re-point the default). Launch on what
+                        # this provider serves; reset the pick to Default only on fresh
+                        # evidence, so the picker shows what the session now runs.
+                        offered = ", ".join(
+                            str(row.get("id") or row.get("model") or "") for row in launch_catalog
+                        )
+                        if fresh_rows:
+                            reset_pick_after_launch = True
+                            outcome = "launching on the provider default and resetting the pick to Default"
+                        else:
+                            outcome = (
+                                "the re-probe failed, so launching on the provider default and "
+                                "keeping the pick for the next relaunch"
+                            )
+                        _logger.warning(
+                            "claude-native: model pick %r for session %s is not served by %s "
+                            "(it offers: %s); %s",
+                            pick,
+                            session_id,
+                            claude_launch_endpoint_label(claude_config),
+                            offered,
+                            outcome,
+                            extra={"session_id": session_id},
+                        )
+                        launch_model = unpinned_launch_model
+            if launch_model is None and launch_catalog:
+                # A stale entry's default is yesterday's answer: pinning it as
+                # ``--model`` turns a provider-side retirement or entitlement
+                # change into a hard launch failure. Launch bare instead — the
+                # CLI's own default is servable by construction, and the
+                # harness's ``reported_model`` records what it actually ran —
+                # while the store's background re-probe converges the catalog.
+                if launch_catalog_was_stale:
+                    _logger.info(
+                        "claude catalog for session=%s is stale; deferring the Default "
+                        "launch to the CLI's own default model",
+                        session_id,
+                    )
+                else:
+                    catalog_default = default_row(launch_catalog)
+                    if catalog_default is not None:
+                        launch_model = (
+                            str(catalog_default.get("model") or catalog_default.get("id") or "")
+                            or None
+                        )
+        # Give an exact launch model (a Smart Routing pick is resolved before the
+        # terminal exists) a spelling of its own in the picker, so a later
+        # ``/model`` can return to it instead of stepping onto whatever the family
+        # alias points at. Recorded below, so the picker and the launch agree.
+        # Routed launches only: the pin writes ``ANTHROPIC_CUSTOM_MODEL_OPTION``,
+        # and on a plain session that displaces the workspace's own picker row for
+        # no gain — nothing later re-picks the launch model there.
+        if launch_metadata.routing_enabled:
+            claude_config = claude_config_with_launch_model_pinned(claude_config, launch_model)
+        if record_launch_config is not None and not _launch_config_resolution_failed:
+            record_launch_config(session_id, claude_config)
+        # Persist the vocabulary + launch model onto the bridge so mid-session
+        # ``/model`` conversion reads THIS session's pins, not the runner's
+        # ambient env (the CLI path records these at prepare time; the runner
+        # resolves its config only after the bridge exists).
+        from omnigent.harnesses.claude_native.bridge import record_model_vocabulary
+        from omnigent.harnesses.claude_native.main import stored_claude_picker_values
+
+        await asyncio.to_thread(
+            record_model_vocabulary,
+            bridge_dir,
+            launch_env=claude_config.env if claude_config is not None else None,
+            launch_model=launch_model,
+            # The catalog rows are the CLI's own picker, so their ids are the
+            # spellings a later ``/model`` can type — a managed picker names
+            # rows no pin covers.
+            picker_values=stored_claude_picker_values(claude_config, launch_catalog),
+        )
+        _logger.info(
+            "Claude terminal provider config resolved: session=%s configured=%s "
+            "env_keys=%s api_key_helper_set=%s model_set=%s launch_model=%s",
+            session_id,
+            claude_config is not None,
+            sorted(claude_config.env) if claude_config is not None else [],
+            bool(claude_config.api_key_helper) if claude_config is not None else False,
+            bool(claude_config.model) if claude_config is not None else False,
+            launch_model,
+            extra={"session_id": session_id},
+        )
+        base_claude_args = _build_claude_native_base_args(
+            reasoning_effort=session_effort,
+            # Precedence: per-session ``/model`` override > agent-spec pin
+            # (``executor.model``) > provider/ucode default. All three yield to an
+            # explicit ``--model`` in the user's pass-through args (handled in the
+            # helper).
+            model_override=launch_model,
+            terminal_launch_args=session_launch_args,
+            resume_external_session_id=resume_external_session_id,
+            skip_initial_prompt=await _claude_legacy_prompt_consumed(
+                server_client=server_client,
+                session_id=session_id,
+                terminal_launch_args=session_launch_args,
+                has_prior_history=(
+                    session_external_id is not None
+                    or fork_source_external_id is not None
+                    or fork_carry_history
+                ),
+            ),
+        )
+
+        # Pass ``ap_server_url`` so ``build_hook_settings`` registers the
+        # claude-native ``PermissionRequest`` command hook and writes
+        # permission_hook.json. Without it, the hook is silently omitted and
+        # approval prompts never reach the web UI on this host-spawned path.
+        # ``bundle_dir`` / ``skills_filter`` (resolved by the caller, which
+        # has the spec resolver) expose a bundle's ``skills/`` to Claude Code
+        # via ``--plugin-dir`` — the CLI mirror of the SDK plugin wiring.
+        # ``api_key_helper`` (ucode) registers Claude's gateway token command.
+        # Gate natively spawned subagents (the Task/Agent tool): start the loopback
+        # endpoint in the bridge dir the PreToolUse hook already discovers. Smart
+        # Routing sessions only — a plain session would otherwise carry a loopback
+        # server, a bearer token on disk and a hook subprocess on every spawn for a
+        # verdict the server never routes. Claude routes spawns whether or not the
+        # harness is auto-picked, so ``auto_harness`` is not required here.
+        subagent_router_dir, _subagent_router = _start_subagent_router_for_native_session(
+            session_id,
+            bridge_dir=bridge_dir,
+            harness="claude-native",
+            server_client=server_client,
+            routing_enabled=launch_metadata.routing_enabled,
+            auto_harness=launch_metadata.auto_harness,
+        )
+        # First-message model routing. Advertised in the same bridge dir the
+        # ``UserPromptSubmit`` hook is pointed at (so the hook needs no env of its
+        # own), and live before the terminal launches because the hook can fire on
+        # the very first prompt the user types.
+        _claude_turn_router = _start_turn_router_for_native_session(
+            session_id,
+            bridge_dir=bridge_dir,
+            harness="claude-native",
+            server_client=server_client,
+            turn_routing=launch_metadata.turn_routing,
+        )
+        # Crash recovery for a blocked-but-never-replayed prompt is not wired here:
+        # the pending record on disk is the seam if it ever is, and the recovery's
+        # default readiness probe waits on a codex bridge thread.
+        # Only an auto-harness session's spawns can be re-routed across harness
+        # families, so only it needs the routed-spawn note and the pre-approval for
+        # the three Omnigent tools that carry out the re-route. A pinned session's
+        # argv must stay byte-identical.
+        routed_spawn_note, routed_spawn_tools = _routed_spawn_launch_args(
+            launch_metadata.auto_harness,
+            router_started=subagent_router_dir is not None,
+        )
+        claude_args = augment_claude_args(
+            base_claude_args,
+            bridge_dir=bridge_dir,
+            workspace=Path(workspace),
+            ap_server_url=server_url,
+            ap_auth_headers=_runner_headers,
+            bundle_dir=bundle_dir,
+            agent_name=agent_name,
+            skills_filter=skills_filter,
+            api_key_helper=claude_config.api_key_helper if claude_config is not None else None,
+            model_overrides=claude_config.model_overrides if claude_config is not None else None,
+            subagent_router_dir=subagent_router_dir,
+            append_system_prompt="\n\n".join(
+                x
+                for x in [
+                    _native_startup_raw_instructions_from_spec(agent_spec),
+                    routed_spawn_note,
+                ]
+                if x
+            )
+            or None,
+            allowed_tools=routed_spawn_tools,
+            # The route-turn hook is registered only when this session can
+            # actually route; otherwise every submit would pay its round trip.
+            turn_routing=_claude_turn_router is not None,
+        )
+
+        # Apply the per-harness startup command/args override from config
+        # (``harness.claude-native.{command,args}`` in ~/.omnigent/config.yaml) so a
+        # downstream integration can wrap this managed-host launch — e.g. Databricks'
+        # ``isaac`` sets ``command: isaac`` + ``args: ["--"]`` to run
+        # ``isaac -- <augmented args>`` (the config args prepend, and augmentation
+        # appended above, so the ``--`` stays first). Identity by default. This is
+        # the same resolver the local-CLI native launch uses (see cli_native.py), so
+        # both terminal-creation paths honour one config surface.
+        launch_args = resolve_harness_args("claude-native", tuple(claude_args), cfg=_harness_cfg)
+        # Validate the binary this terminal will actually spawn: ``launch_command``
+        # already reflects the OMNIGENT_CLAUDE_PATH / config overrides, and a bare
+        # name resolves against this process's inherited PATH (same lookup tmux's
+        # pane shell and omnigent.inner.terminal perform). Mirrors
+        # ``_preflight_local_tools`` on the local-CLI path.
+        resolved_claude = resolve_cli_binary(launch_command)
+        if resolved_claude is not None:
+            validate_claude_hook_interpreter_compatibility(resolved_claude)
+
+        claude_terminal_env_unset = _claude_terminal_env_unset(claude_config)
+
+        # Inherit the agent's os_env so its sandbox (e.g. ``type: none``),
+        # egress_rules and env_passthrough are honoured. Without ``sandbox`` here
+        # and ``parent_os_env`` below, launch_terminal falls back to
+        # _default_sandbox_for_platform (linux_bwrap), overriding the YAML config.
+        # ``agent_os_env`` was already resolved above for ``prepare_bridge_dir``,
+        # so the terminal process and the bridge's sys_os_* tools agree.
+        env_spec = TerminalEnvSpec(
+            os_env=OSEnvSpec(
+                type="caller_process",
+                cwd=workspace,
+                sandbox=(agent_os_env.sandbox if agent_os_env is not None else None),
+            ),
+            command=launch_command,
+            args=launch_args,
+            # Tool Search env plus ucode gateway env (ANTHROPIC_BASE_URL
+            # etc.) when derived. Empty provider config still forces
+            # ENABLE_TOOL_SEARCH=true so MCP schemas are loaded on demand.
+            env={
+                **build_native_claude_terminal_env(claude_config),
+                **resolved_launch_env,
+            },
+            # Names to strip (see ``_claude_terminal_env_unset``). Dropping
+            # ``DATABRICKS_CONFIG_PROFILE`` matters because Claude's MCP servers
+            # inherit this env and several build ``WorkspaceClient`` without pinning
+            # ``auth_type``: a set profile makes the SDK prefer that profile's cached
+            # OAuth token over the MCP's explicit token, 400ing against the wrong
+            # workspace. Claude itself ignores the var (routing is
+            # ``ANTHROPIC_BASE_URL`` / ``apiKeyHelper``), so this affects only MCPs;
+            # ones needing a specific profile must set it in their own per-MCP env.
+            env_unset=claude_terminal_env_unset,
+            scrollback=50000,
+            # Keep the private tmux server alive if the `claude` CLI exits (e.g. a
+            # sub-agent worker whose CLI exits right after rendering its prompt on
+            # some hosts — #540). Without this, that exit reaps the server and every
+            # later control command (send-keys / model / effort / interrupt / stop)
+            # fails with "no server running", and the delegated message is silently
+            # lost. With it, the dead pane persists (capturable for diagnostics) and
+            # the watcher reports the exit deterministically via `#{pane_dead}`.
+            keep_alive_after_exit=True,
+        )
+        # Seed trust and onboarding in the config selected by the terminal's launch environment.
+        try:
+            launch_env = _claude_terminal_launch_env(env_spec)
+            launch_cwd = _claude_terminal_launch_cwd(env_spec, agent_os_env)
+            if (
+                requested_account is not None
+                and launch_env.get("CLAUDE_CONFIG_DIR") != requested_account
+            ):
+                from omnigent.harnesses.claude_native.account import _account_label
+                from omnigent.onboarding.claude_accounts import AccountUnavailableError
+
+                raise AccountUnavailableError(
+                    f"{_account_label(launch_metadata.account)} would receive a different "
+                    "CLAUDE_CONFIG_DIR. Check the harness launch command."
+                )
+            ensure_claude_workspace_trusted(
+                launch_cwd,
+                env=launch_env,
+            )
+        except BaseException as seed_error:
+            # No forwarder owns the routers yet, so release the ones this launch started.
+            # A ``None`` handle would shut down whichever router is registered now.
+            cleanups: list[Coroutine[Any, Any, None]] = []
+            if _subagent_router is not None:
+                cleanups.append(_shutdown_session_router_async(session_id, _subagent_router))
+            if _claude_turn_router is not None:
+                cleanups.append(
+                    _shutdown_session_turn_router_async(session_id, _claude_turn_router)
+                )
+            cancelled: asyncio.CancelledError | None = None
+            for cleanup in cleanups:
+                try:
+                    await cleanup
+                except asyncio.CancelledError as exc:
+                    # Release the other router before honoring the cancellation.
+                    cancelled = exc
+                except Exception:  # keep the seeding failure as the error.
+                    _logger.warning(
+                        "Router cleanup failed after Claude trust seeding failed: session=%s",
+                        session_id,
+                        exc_info=True,
+                        extra={"session_id": session_id},
+                    )
+            if cancelled is not None:
+                raise cancelled from seed_error
+            raise
+        _logger.info(
+            "Claude terminal tmux launch requested: session=%s command=%s args_count=%d "
+            "env_keys=%s cwd=%s scrollback=%d",
+            session_id,
+            env_spec.command,
+            len(env_spec.args),
+            sorted(env_spec.env),
+            workspace,
+            env_spec.scrollback,
+            extra={"session_id": session_id},
+        )
+        try:
+            terminal_view = await resource_registry.launch_required_terminal(
+                session_id=session_id,
+                terminal_name="claude",
+                session_key="main",
+                spec=env_spec,
+                parent_os_env=agent_os_env,
+                # Mark this as the claude-native agent terminal so its pane
+                # activity drives the session's PTY-derived working status.
+                resource_role=CLAUDE_NATIVE_TERMINAL_ROLE,
+            )
+        except (Exception, asyncio.CancelledError) as launch_error:
+            # Preserve the original failure even if diagnostic cleanup is cancelled.
+            if not isinstance(launch_error, asyncio.CancelledError):
+                _logger.exception(
+                    "Claude terminal tmux launch failed: session=%s elapsed_ms=%.0f",
+                    session_id,
+                    (time.monotonic() - started_at) * 1000,
+                    extra={"session_id": session_id},
+                )
+            from omnigent.harnesses.claude_native.diagnostics import ClaudeDebugLogFollower
+
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(ClaudeDebugLogFollower(bridge_dir).close, session_id)
+            raise
+        if reset_pick_after_launch:
+            await _clear_session_model_override(session_id, server_client)
+        # Surface the terminal on the live SSE stream so an already-connected
+        # web UI enables the Terminal toggle immediately. The required-terminal
+        # launch helper registers the resource and starts the activity watcher but
+        # does not publish; the tool / REST launch paths emit this same event via
+        # _emit_terminal_resource_event. Without it, this auto-created terminal
+        # is only discovered on reconnect (snapshot-on-connect), so the toggle
+        # stays gray until the user refreshes.
+        from omnigent.entities.session_resources import session_resource_view_to_dict
+
+        terminal_payload = session_resource_view_to_dict(terminal_view)
+        terminal_metadata = terminal_payload.get("metadata")
+        if not isinstance(terminal_metadata, dict):
+            terminal_metadata = {}
+        _logger.info(
+            "Claude terminal tmux launch returned: session=%s terminal_id=%s running=%s "
+            "tmux_socket=%s tmux_target=%s elapsed_ms=%.0f",
+            session_id,
+            terminal_payload.get("id"),
+            terminal_metadata.get("running"),
+            terminal_metadata.get("tmux_socket"),
+            terminal_metadata.get("tmux_target"),
+            (time.monotonic() - started_at) * 1000,
+            extra={"session_id": session_id},
+        )
+
+        publish_event(
+            session_id,
+            {
+                "type": "session.resource.created",
+                "resource": terminal_payload,
+            },
+        )
+        _publish_tmux_target_for_bridge(
+            resource_registry=resource_registry,
             session_id=session_id,
+            # Use the SAME bridge id the dir was prepared under (``bridge_id``,
+            # which is the "-cleared" fork for a /clear-superseded resume, else
+            # session_id). Hardcoding session_id here would write tmux.json into
+            # D(session_id) while the executor + forwarder read D(bridge_id) — the
+            # "tmux target not advertised yet" mismatch on a resumed old session.
+            bridge_id=bridge_id,
             terminal_name="claude",
             session_key="main",
-            spec=env_spec,
-            parent_os_env=agent_os_env,
-            # Mark this as the claude-native agent terminal so its pane
-            # activity drives the session's PTY-derived working status.
-            resource_role=CLAUDE_NATIVE_TERMINAL_ROLE,
         )
-    except (Exception, asyncio.CancelledError) as launch_error:
-        # Preserve the original failure even if diagnostic cleanup is cancelled.
-        if not isinstance(launch_error, asyncio.CancelledError):
-            _logger.exception(
-                "Claude terminal tmux launch failed: session=%s elapsed_ms=%.0f",
-                session_id,
-                (time.monotonic() - started_at) * 1000,
-                extra={"session_id": session_id},
-            )
-        from omnigent.harnesses.claude_native.diagnostics import ClaudeDebugLogFollower
+        from omnigent.harnesses.claude_native.bridge import _claude_prompt_rendered
 
-        with contextlib.suppress(Exception):
-            await asyncio.to_thread(ClaudeDebugLogFollower(bridge_dir).close, session_id)
-        raise
-    if reset_pick_after_launch:
-        await _clear_session_model_override(session_id, server_client)
-    # Surface the terminal on the live SSE stream so an already-connected
-    # web UI enables the Terminal toggle immediately. The required-terminal
-    # launch helper registers the resource and starts the activity watcher but
-    # does not publish; the tool / REST launch paths emit this same event via
-    # _emit_terminal_resource_event. Without it, this auto-created terminal
-    # is only discovered on reconnect (snapshot-on-connect), so the toggle
-    # stays gray until the user refreshes.
-    from omnigent.entities.session_resources import session_resource_view_to_dict
+        _schedule_terminal_interactive_observer(
+            session_id=session_id,
+            resource_registry=resource_registry,
+            terminal_name="claude",
+            session_key="main",
+            harness="claude-native",
+            readiness_signal="claude_composer",
+            is_interactive=_claude_prompt_rendered,
+        )
+        _logger.info(
+            "Claude terminal tmux target published: session=%s bridge_id=%s",
+            session_id,
+            bridge_id,
+            extra={"session_id": session_id},
+        )
 
-    terminal_payload = session_resource_view_to_dict(terminal_view)
-    terminal_metadata = terminal_payload.get("metadata")
-    if not isinstance(terminal_metadata, dict):
-        terminal_metadata = {}
-    _logger.info(
-        "Claude terminal tmux launch returned: session=%s terminal_id=%s running=%s "
-        "tmux_socket=%s tmux_target=%s elapsed_ms=%.0f",
-        session_id,
-        terminal_payload.get("id"),
-        terminal_metadata.get("running"),
-        terminal_metadata.get("tmux_socket"),
-        terminal_metadata.get("tmux_target"),
-        (time.monotonic() - started_at) * 1000,
-        extra={"session_id": session_id},
-    )
+        # Start the transcript forwarder so Claude's responses flow
+        # back to the Omnigent server. Normally the CLI client runs this,
+        # but for host-spawned sessions there is no CLI. Reuses the
+        # ``server_url`` + auth computed above; ``auth`` refreshes the
+        # bearer token per request so forwarding outlives token expiry.
+        #
+        # ``start_at_end`` must be ``True`` on resume: when
+        # ``resume_external_session_id`` is set we launched Claude with
+        # ``--resume`` over a transcript synthesized from AP's committed
+        # history (see ``_ensure_local_claude_resume_transcript`` above), so
+        # offset 0 already holds every item Omnigent has. Starting the forwarder at
+        # offset 0 would re-post the whole transcript as new external
+        # conversation items — there is no server-side dedup — duplicating the
+        # visible history on every resume. A genuinely fresh
+        # session (no ``--resume``) starts with an empty transcript, so
+        # ``False`` correctly forwards everything from the beginning. This
+        # mirrors the CLI client's ``prepared.cold_resumed`` handling in
+        # ``claude_native.py``.
+        from omnigent.harnesses.claude_native.forwarder import supervise_forwarder
 
-    publish_event(
-        session_id,
-        {
-            "type": "session.resource.created",
-            "resource": terminal_payload,
-        },
-    )
-    _publish_tmux_target_for_bridge(
-        resource_registry=resource_registry,
-        session_id=session_id,
-        # Use the SAME bridge id the dir was prepared under (``bridge_id``,
-        # which is the "-cleared" fork for a /clear-superseded resume, else
-        # session_id). Hardcoding session_id here would write tmux.json into
-        # D(session_id) while the executor + forwarder read D(bridge_id) — the
-        # "tmux target not advertised yet" mismatch on a resumed old session.
-        bridge_id=bridge_id,
-        terminal_name="claude",
-        session_key="main",
-    )
-    from omnigent.harnesses.claude_native.bridge import _claude_prompt_rendered
+        async def _supervise_bridge() -> None:
+            try:
+                await supervise_forwarder(
+                    base_url=server_url,
+                    headers=_runner_headers,
+                    session_id=session_id,
+                    bridge_dir=bridge_dir,
+                    agent_name="claude-native-ui",
+                    start_at_end=resume_external_session_id is not None,
+                    start_at_offset=resume_prefix_bytes,
+                    auth=_runner_auth,
+                    event_dispatcher=event_dispatcher,
+                )
+            finally:
+                await _shutdown_session_router_async(session_id, _subagent_router)
+                await _shutdown_session_turn_router_async(session_id, _claude_turn_router)
 
-    _schedule_terminal_interactive_observer(
-        session_id=session_id,
-        resource_registry=resource_registry,
-        terminal_name="claude",
-        session_key="main",
-        harness="claude-native",
-        readiness_signal="claude_composer",
-        is_interactive=_claude_prompt_rendered,
-    )
-    _logger.info(
-        "Claude terminal tmux target published: session=%s bridge_id=%s",
-        session_id,
-        bridge_id,
-        extra={"session_id": session_id},
-    )
-
-    # Start the transcript forwarder so Claude's responses flow
-    # back to the Omnigent server. Normally the CLI client runs this,
-    # but for host-spawned sessions there is no CLI. Reuses the
-    # ``server_url`` + auth computed above; ``auth`` refreshes the
-    # bearer token per request so forwarding outlives token expiry.
-    #
-    # ``start_at_end`` must be ``True`` on resume: when
-    # ``resume_external_session_id`` is set we launched Claude with
-    # ``--resume`` over a transcript synthesized from AP's committed
-    # history (see ``_ensure_local_claude_resume_transcript`` above), so
-    # offset 0 already holds every item Omnigent has. Starting the forwarder at
-    # offset 0 would re-post the whole transcript as new external
-    # conversation items — there is no server-side dedup — duplicating the
-    # visible history on every resume. A genuinely fresh
-    # session (no ``--resume``) starts with an empty transcript, so
-    # ``False`` correctly forwards everything from the beginning. This
-    # mirrors the CLI client's ``prepared.cold_resumed`` handling in
-    # ``claude_native.py``.
-    from omnigent.harnesses.claude_native.forwarder import supervise_forwarder
-
-    async def _supervise_bridge() -> None:
-        try:
-            await supervise_forwarder(
-                base_url=server_url,
-                headers=_runner_headers,
-                session_id=session_id,
-                bridge_dir=bridge_dir,
-                agent_name="claude-native-ui",
-                start_at_end=resume_external_session_id is not None,
-                start_at_offset=resume_prefix_bytes,
-                auth=_runner_auth,
-                event_dispatcher=event_dispatcher,
-            )
-        finally:
-            await _shutdown_session_router_async(session_id, _subagent_router)
-            await _shutdown_session_turn_router_async(session_id, _claude_turn_router)
-
-    _forwarder_task = asyncio.create_task(
-        _supervise_bridge(),
-        name=f"claude-forwarder-{session_id}",
-    )
-    _register_auto_forwarder_task(session_id, _forwarder_task)
-    _logger.info(
-        "Auto-created claude terminal + forwarder for session %s; "
-        "forwarder_task=%s elapsed_ms=%.0f",
-        session_id,
-        _forwarder_task.get_name(),
-        (time.monotonic() - started_at) * 1000,
-    )
-    return terminal_view
+        _forwarder_task = asyncio.create_task(
+            _supervise_bridge(),
+            name=f"claude-forwarder-{session_id}",
+        )
+        _register_auto_forwarder_task(session_id, _forwarder_task)
+        _logger.info(
+            "Auto-created claude terminal + forwarder for session %s; "
+            "forwarder_task=%s elapsed_ms=%.0f",
+            session_id,
+            _forwarder_task.get_name(),
+            (time.monotonic() - started_at) * 1000,
+        )
+        return terminal_view
 
 
 async def _auto_create_repl_terminal(

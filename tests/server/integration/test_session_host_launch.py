@@ -4806,3 +4806,50 @@ async def test_invalid_account_is_refused_before_creating_a_worktree(
     assert "requires the claude-native harness" in response.text
     create_worktree.assert_not_called()
     await comm.send_input({"type": "websocket.disconnect", "code": 1000})
+
+
+async def test_account_agent_replacement_preserves_native_harness_override(
+    client: httpx.AsyncClient, db_uri: str
+) -> None:
+    from tests._helpers.session import bundle_files, post_session_bundle
+
+    config = b"""spec_version: 1
+name: overridden-agent
+executor:
+  type: omnigent
+  config:
+    harness: claude-sdk
+"""
+    original = bundle_files({"config.yaml": config, "AGENTS.md": b"Original instructions"})
+    uploaded = await post_session_bundle(client.post, "/v1/sessions", original)
+    assert uploaded.status_code == 201, uploaded.text
+    created = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": uploaded.json()["agent_id"],
+            "account": "work",
+            "harness_override": "claude-native",
+        },
+    )
+    assert created.status_code == 201, created.text
+    session_id = created.json()["id"]
+    for instructions in (b"Original instructions", b"Updated instructions"):
+        replacement = (
+            original
+            if instructions == b"Original instructions"
+            else bundle_files(
+                {
+                    "config.yaml": config,
+                    "AGENTS.md": instructions,
+                }
+            )
+        )
+        updated = await client.put(
+            f"/v1/sessions/{session_id}/agent",
+            files={"bundle": ("agent.tar.gz", replacement, "application/gzip")},
+        )
+        assert updated.status_code == 200, updated.text
+        conversation = SqlAlchemyConversationStore(db_uri).get_conversation(session_id)
+        assert conversation is not None
+        assert conversation.account == "work"
+        assert conversation.harness_override == "claude-native"
