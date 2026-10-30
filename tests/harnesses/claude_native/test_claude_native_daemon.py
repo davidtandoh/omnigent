@@ -256,13 +256,31 @@ async def test_create_claude_session_persists_terminal_launch_args() -> None:
     assert BRIDGE_ID_LABEL_KEY.encode() not in body
 
 
-async def test_create_claude_session_stamps_passed_effort_over_settings(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("account_effort", "claude_args", "expected"),
+    [
+        ("low", (), "low"),
+        ("low", ("--effort", "xhigh"), "xhigh"),
+        (None, (), None),
+        ("invalid", (), None),
+    ],
+)
+async def test_create_claude_session_uses_selected_account_effort(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    account_effort: str | None,
+    claude_args: tuple[str, ...],
+    expected: str | None,
 ) -> None:
-    """A pass-through ``--effort`` is the effort Claude runs at, so it is stamped."""
+    """Session effort follows the selected account unless explicitly overridden."""
     settings = tmp_path / "settings.json"
     settings.write_text(json.dumps({"effortLevel": "high"}), encoding="utf-8")
     monkeypatch.setattr(claude_native_bridge, "_USER_CLAUDE_SETTINGS_PATH", settings)
+    account = tmp_path / "work-account"
+    account.mkdir()
+    if account_effort is not None:
+        (account / "settings.json").write_text(json.dumps({"effortLevel": account_effort}))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "other-account"))
     captured: dict[str, bytes] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -277,10 +295,14 @@ async def test_create_claude_session_stamps_passed_effort_over_settings(
             client,
             b"bundle",
             bridge_id=None,
-            claude_args=("--model", "opus", "--effort", "xhigh"),
+            claude_args=claude_args,
+            launch_env={"CLAUDE_CONFIG_DIR": str(account)},
         )
 
-    assert b'"reasoning_effort": "xhigh"' in captured["body"]
+    if expected is None:
+        assert b'"reasoning_effort"' not in captured["body"]
+    else:
+        assert f'"reasoning_effort": "{expected}"'.encode() in captured["body"]
 
 
 def _install_daemon_seam_mocks(

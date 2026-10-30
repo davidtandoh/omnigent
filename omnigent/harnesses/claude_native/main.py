@@ -4742,6 +4742,7 @@ async def _prepare_claude_terminal_via_daemon(
                     bridge_id=None,
                     claude_args=tuple(persist_args),
                     terminal_launch_args=persist_args or None,
+                    launch_env=launch_env,
                 ),
                 wait_for_host_online(client, host_id, timeout_s=_DAEMON_HOST_ONLINE_TIMEOUT_S),
             )
@@ -6394,6 +6395,7 @@ async def _create_claude_session(
     bridge_id: str | None,
     claude_args: tuple[str, ...] = (),
     terminal_launch_args: list[str] | None = None,
+    launch_env: Mapping[str, str] | None = None,
 ) -> str:
     """
     Create a bundled terminal-first Claude session.
@@ -6422,6 +6424,7 @@ async def _create_claude_session(
         and applies them when it auto-launches the terminal. ``None``
         (the CLI-direct path, which passes args via the live terminal
         POST instead) persists nothing.
+    :param launch_env: Explicit launch values used to select the account settings.
     :returns: New session id, e.g. ``"conv_abc123"``.
     :raises click.ClickException: If creation fails.
     """
@@ -6432,7 +6435,9 @@ async def _create_claude_session(
     if terminal_launch_args:
         metadata["terminal_launch_args"] = terminal_launch_args
     # Stamp the wrapped claude's real effort so the pill isn't a guess.
-    effort = resolve_launch_effort_level(claude_args)
+    effort = resolve_launch_effort_level(
+        claude_args, config_dir=selected_claude_config_dir(launch_env)
+    )
     if effort is not None:
         metadata["reasoning_effort"] = effort
     resp = await client.post(
