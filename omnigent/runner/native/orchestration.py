@@ -8329,6 +8329,8 @@ def _native_terminal_start_error_payload(
         e.g. ``ImportError("Native Codex requires the 'codex' CLI on PATH.")``.
     :param runtime_name: Human-readable runtime name, e.g. ``"Codex"``.
     :param session_id: Session whose terminal failed, which may be a runner's child.
+    :param include_account_details: Include the account refusal details for a
+        permission-filtered response; shared status events use the public message.
     :returns: ``{"code": ..., "message": ...}`` payload for SSE and
         JSON error responses. Known actionable configuration errors surface
         their safe message directly; other causes point to the runner log.

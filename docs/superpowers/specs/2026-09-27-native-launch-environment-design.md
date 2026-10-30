@@ -26,24 +26,29 @@ The Claude account check uses the terminal environment builder and shared
 the ambient readiness cache. See the [native launch usage](../../../README.md#2-start-your-first-agent)
 for the account selection contract and probe failure policy.
 
-For `--account`, the CLI reads the named `kind: subscription, cli: claude`
-provider from the user config and adds its `config_dir` as `CLAUDE_CONFIG_DIR`.
-Entries without `config_dir` are not extra accounts. The runner skips provider
-resolution and credential injection when the explicit launch map selects
-`CLAUDE_CONFIG_DIR`.
+For named Claude accounts, the CLI sends the account name with session creation.
+The host resolves the recorded name from its own config and adds
+`CLAUDE_CONFIG_DIR` to the runner's
+launch environment before runner reuse and custody checks. The CLI also resolves
+the folder locally for settings and transcript reads; that folder stays local.
+The runner checks the session account and the resolved agent provider against
+its launch environment before sign-in probing or transcript preparation. When
+`CLAUDE_CONFIG_DIR` is selected, the runner skips provider credential injection.
 Before model probing or terminal creation, the runner uses
 `managed_claude_gateway_signal` to reject managed gateway or `apiKeyHelper`
 settings that override the selected account.
 The shared auth-unset helper removes inherited credentials and routing variables
 from the terminal and model probes. Model probes use the selected account, and
 the launch-catalog fingerprint includes its config folder.
-Client-side resume lookup and relocation use the same explicit map.
+Client-side resume lookup and relocation use the recorded account's locally
+resolved folder, or the explicit map when no account is recorded.
 Client-side effort resolution uses `selected_claude_config_dir` to read the
 account's settings through the existing effort reader before session creation.
 The runner reads the explicit value, not its own process environment, when it
 locates Claude's `projects` and `sessions` folders for resume and status.
 
-The map is not stored in session metadata or the database. A request with
+The environment map is not stored in session metadata or the database; the
+account name is stored separately in `session_overrides.account`. A request with
 `--env` fails if the session already has a live runner because changing a
 running process's environment is not possible. A cold resume that launches a
 new runner uses the new map.

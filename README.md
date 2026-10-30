@@ -349,8 +349,8 @@ providers:
 
 Start a session on that account with `omnigent claude --account work`. The
 session records the account's name, never its folder. On every start,
-relaunch, resume, fork, and child session, the machine that launches the
-session looks the name up in its own `config.yaml`, passes that account's
+relaunch, and resume, the machine that launches the session looks the name
+up in its own `config.yaml`, passes that account's
 `CLAUDE_CONFIG_DIR` to the launch check above, and uses Claude's own
 subscription routing, bypassing Omnigent gateway, key, and Bedrock providers.
 If the account is missing, renamed, removed, or signed out on that machine, the

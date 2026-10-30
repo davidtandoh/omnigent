@@ -171,9 +171,10 @@ class Conversation:
         which stays owner-only. See ``designs/SESSIONS_AUTH.md``.
     :param account: Short name of the extra Claude account this
         claude-native session runs on, e.g. ``"work"``. ``None`` means
-        the host's default Claude login. Set at create, copied to
-        children and forks, and sent on every launch; the host resolves
-        it from its own config and refuses the launch when it cannot.
+        the host's default Claude login. Set at create and sent on every
+        launch; the host resolves it from its own config and refuses the
+        launch when it cannot. See the session-create API for child inheritance
+        and ``ConversationStore.fork_conversation`` for account copying.
     :param sub_agent_name: For sub-agent sessions (``kind="sub_agent"``),
         the sub-agent type name within the parent's spec tree,
         e.g. ``"summarizer"``. The runner uses this to resolve the
