@@ -241,12 +241,21 @@ def account_launch_environment(
             from omnigent.config import load_global_config
 
             config = load_global_config()
+        provider = load_providers(config).get(account_provider_name(account))
         entry = find_account(config, account)
     except (OSError, ValueError, yaml.YAMLError, OmnigentError) as exc:
         raise AccountUnavailableError(
             f"Claude account {account!r} cannot be checked on host {host_name!r}: "
             f"its Omnigent config could not be read ({exc})."
         ) from None
+    if entry is None and provider is not None:
+        requested = dict(native_env or {})
+        if "CLAUDE_CONFIG_DIR" in requested:
+            raise AccountUnavailableError(
+                f"Claude provider {account!r} and --env CLAUDE_CONFIG_DIR conflict. "
+                "Pass only one of them."
+            )
+        return requested
     if entry is None or entry.config_dir is None:
         raise AccountUnavailableError(
             f"Claude account {account!r} is not set up on host {host_name!r}. "

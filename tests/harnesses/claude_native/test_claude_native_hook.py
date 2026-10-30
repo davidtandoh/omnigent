@@ -316,6 +316,7 @@ def test_clear_session_start_hook_rotates_before_printing_conversation_url(
                 json={
                     "id": "conv_old",
                     "agent_id": "ag_claude",
+                    "account": "work",
                     "runner_id": "runner_one",
                     "labels": {"omnigent.claude_native.bridge_id": "bridge_shared"},
                 },
@@ -397,6 +398,7 @@ def test_clear_session_start_hook_rotates_before_printing_conversation_url(
             "http://127.0.0.1:8787/v1/sessions",
             {
                 "agent_id": "ag_claude",
+                "account": "work",
                 "labels": {"omnigent.claude_native.bridge_id": "bridge_shared"},
             },
         ),

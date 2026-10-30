@@ -187,8 +187,7 @@ class _ConversationStore:
         override_reasoning_effort_set: bool = False,
         override_terminal_launch_args: list[str] | None = None,
         override_terminal_launch_args_set: bool = False,
-        override_account: str | None = None,
-        override_account_set: bool = False,
+        copy_account: bool = True,
         dropped_label_keys: frozenset[str] = frozenset(),
         extra_labels: dict[str, str] | None = None,
         carry_history_into_native: bool = False,
@@ -255,8 +254,7 @@ class _ConversationStore:
                 "override_reasoning_effort_set": override_reasoning_effort_set,
                 "override_terminal_launch_args": override_terminal_launch_args,
                 "override_terminal_launch_args_set": override_terminal_launch_args_set,
-                "override_account": override_account,
-                "override_account_set": override_account_set,
+                "copy_account": copy_account,
                 "dropped_label_keys": dropped_label_keys,
                 "extra_labels": extra_labels,
                 "carry_history_into_native": carry_history_into_native,
@@ -314,6 +312,7 @@ class _ConversationStore:
             root_conversation_id=fork_id,
             title=title or f"Fork of {src.title}",
             agent_id=effective_agent_id,
+            account=src.account if copy_account else None,
             labels=fork_labels,
         )
         self._convs[fork_id] = fork
@@ -2809,32 +2808,36 @@ def test_fork_counts_files_recorded_for_filesystem_delivery(
 
 
 @pytest.mark.parametrize(
-    ("body", "target_harness", "expect_account", "expect_resume_source"),
+    ("body", "target_harness", "source_level", "expect_account", "expect_resume_source"),
     [
-        # Same account: the fork keeps it and may clone the source transcript.
-        ({}, "claude-native", "work", True),
-        ({"account": "work"}, "claude-native", "work", True),
-        # Another account: the source transcript lives in the source account's
-        # folder, so the runner must rebuild instead of cloning a stale copy.
-        ({"account": "client-a"}, "claude-native", "client-a", False),
-        ({"account": None}, "claude-native", None, False),
-        # A non-Claude fork carries no account.
-        ({"agent_id": "280d725b404d2915f9e9d6cccce91303"}, "codex-native", None, False),
+        ({}, "claude-native", None, "work", True),
+        ({}, "claude-native", 3, "work", True),
+        ({}, "claude-native", 1, None, True),
+        ({"agent_id": "280d725b404d2915f9e9d6cccce91303"}, "codex-native", None, None, False),
     ],
 )
 @pytest.mark.asyncio
-async def test_fork_keeps_the_account_and_rebuilds_when_it_changes(
+async def test_fork_inherits_account_only_for_claude_and_source_managers(
     monkeypatch: pytest.MonkeyPatch,
     body: dict[str, object],
     target_harness: str,
+    source_level: int | None,
     expect_account: str | None,
     expect_resume_source: bool,
 ) -> None:
+    from omnigent.server.routes._auth_helpers import SessionAccess
+
     source_id = "e9f8f58523cec9a57d3bdf93be543e8c"
+    source = _make_conversation(account="work")
     conv_store = _ConversationStore(
-        conversations={source_id: _make_conversation(account="work")},
+        conversations={source_id: source},
         items_by_conv={source_id: [_make_item("9980c8a9248139f14f4165e5d53088aa", "Hi")]},
     )
+
+    async def source_access(*args: Any) -> SessionAccess:
+        return SessionAccess(level=source_level, conversation=source)
+
+    monkeypatch.setattr(routes_core, "_require_access_and_level", source_access)
     monkeypatch.setattr(
         "omnigent.server.routes.sessions.get_agent_cache",
         lambda: _StubAgentCache(
@@ -2845,32 +2848,21 @@ async def test_fork_keeps_the_account_and_rebuilds_when_it_changes(
         ),
     )
     client = TestClient(_build_app(conv_store, agent_store=_switch_agent_store()))
-
     resp = client.post(f"/v1/sessions/{source_id}/fork", json=body)
-
     assert resp.status_code == 201, resp.text
     [fork_call] = conv_store.fork_calls
-    assert fork_call["override_account_set"] is True
-    assert fork_call["override_account"] == expect_account
+    assert fork_call["copy_account"] is (expect_account is not None)
     assert fork_call["resume_source_native_session"] is expect_resume_source
+    fork = conv_store.get_conversation(resp.json()["id"])
+    assert fork is not None and fork.account == expect_account
+    assert resp.json()["account"] == expect_account
 
 
-@pytest.mark.asyncio
-async def test_fork_rejects_an_account_for_a_non_claude_target(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source_id = "e9f8f58523cec9a57d3bdf93be543e8c"
-    conv_store = _ConversationStore(
-        conversations={source_id: _make_conversation()},
-        items_by_conv={source_id: [_make_item("9980c8a9248139f14f4165e5d53088aa", "Hi")]},
-    )
-    monkeypatch.setattr(
-        "omnigent.server.routes.sessions.get_agent_cache",
-        lambda: _StubAgentCache({"087b7cb7ac30abf4debfaa578d052ec6": "codex-native"}),
-    )
-    client = TestClient(_build_app(conv_store, agent_store=_switch_agent_store()))
+@pytest.mark.parametrize("account", ["work", None])
+def test_fork_rejects_account_switching(account: str | None) -> None:
+    from pydantic import ValidationError
 
-    resp = client.post(f"/v1/sessions/{source_id}/fork", json={"account": "work"})
+    from omnigent.server.schemas import SessionForkRequest
 
-    assert resp.status_code == 400, resp.text
-    assert conv_store.fork_calls == []
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        SessionForkRequest.model_validate({"account": account})

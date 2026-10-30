@@ -2459,8 +2459,8 @@ def _resumed_session_account(
         current = f"Claude account {recorded!r}" if recorded else "the default Claude login"
         raise click.ClickException(
             f"Session {session_id} runs on {current}, not account {requested!r}. "
-            "A session keeps the account it started on; switching accounts is a fork "
-            "of the session onto the other account. Resume without --account to "
+            "A session keeps the account it started on. Start a new session to use "
+            "another account. Resume without --account to "
             "continue it on its own account."
         )
     return recorded

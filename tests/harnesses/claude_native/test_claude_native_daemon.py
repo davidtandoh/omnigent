@@ -361,7 +361,7 @@ def test_resume_keeps_the_recorded_account(
 
 
 @pytest.mark.parametrize(("recorded", "current"), [("work", "'work'"), (None, "default")])
-def test_resume_on_another_account_is_refused_and_points_at_fork(
+def test_resume_on_another_account_is_refused_and_points_at_new_session(
     monkeypatch: pytest.MonkeyPatch, recorded: str | None, current: str
 ) -> None:
     """Resuming with a different --account never re-homes the session silently."""
@@ -371,7 +371,7 @@ def test_resume_on_another_account_is_refused_and_points_at_fork(
             base_url="https://e.com", headers={}, session_id="conv_a", requested="client-a"
         )
     assert current in caught.value.message
-    assert "fork" in caught.value.message
+    assert "Start a new session" in caught.value.message
 
 
 def test_unreadable_session_refuses_only_an_explicit_account(

@@ -4807,8 +4807,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         override_reasoning_effort_set: bool = False,
         override_terminal_launch_args: list[str] | None = None,
         override_terminal_launch_args_set: bool = False,
-        override_account: str | None = None,
-        override_account_set: bool = False,
+        copy_account: bool = True,
         dropped_label_keys: frozenset[str] = frozenset(),
         extra_labels: dict[str, str] | None = None,
         carry_history_into_native: bool = False,
@@ -4892,11 +4891,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         :param override_terminal_launch_args_set: Whether the caller chose
             explicit launch args. ``False`` (default) inherits per
             ``copy_terminal_launch_args``.
-        :param override_account: The fork's Claude account name, e.g.
-            ``"work"``, or ``None`` for the default login. Applied only
-            when *override_account_set*.
-        :param override_account_set: Whether the caller chose the fork's
-            account. ``False`` (default) keeps the source's account.
+        :param copy_account: Whether to inherit the source Claude account.
         :param dropped_label_keys: Source labels to NOT copy onto the fork,
             beyond the always-dropped instance-scoped set. The fork route
             passes the permission-mode / codex-bypass label keys here when
@@ -4973,8 +4968,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             override_reasoning_effort_set=override_reasoning_effort_set,
             override_terminal_launch_args=override_terminal_launch_args,
             override_terminal_launch_args_set=override_terminal_launch_args_set,
-            override_account=override_account,
-            override_account_set=override_account_set,
+            copy_account=copy_account,
             dropped_label_keys=dropped_label_keys,
             extra_labels=extra_labels,
             carry_history_into_native=carry_history_into_native,
@@ -5004,8 +4998,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         override_reasoning_effort_set: bool = False,
         override_terminal_launch_args: list[str] | None = None,
         override_terminal_launch_args_set: bool = False,
-        override_account: str | None = None,
-        override_account_set: bool = False,
+        copy_account: bool = True,
         dropped_label_keys: frozenset[str] = frozenset(),
         extra_labels: dict[str, str] | None = None,
         carry_history_into_native: bool = False,
@@ -5076,9 +5069,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                     "harness_override": (
                         source_overrides["harness_override"] if copy_model_settings else None
                     ),
-                    "account": (
-                        override_account if override_account_set else source_overrides["account"]
-                    ),
+                    "account": source_overrides["account"] if copy_account else None,
                 }
             )
             new_conv_values: dict[str, Any] = {

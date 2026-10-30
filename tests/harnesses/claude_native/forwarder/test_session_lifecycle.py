@@ -69,6 +69,7 @@ async def test_clear_hook_rotates_active_session_without_reprocessing(
                 json={
                     "id": "conv_old",
                     "agent_id": "ag_claude",
+                    "account": "work",
                     "runner_id": "runner_one",
                     "labels": {
                         "omnigent.ui": "terminal",
@@ -79,6 +80,7 @@ async def test_clear_hook_rotates_active_session_without_reprocessing(
         if request.method == "POST" and request.url.path == "/v1/sessions":
             assert body == {
                 "agent_id": "ag_claude",
+                "account": "work",
                 "labels": {
                     "omnigent.ui": "terminal",
                     BRIDGE_ID_LABEL_KEY: "bridge_shared",
@@ -140,6 +142,7 @@ async def test_clear_hook_rotates_active_session_without_reprocessing(
             "/v1/sessions",
             {
                 "agent_id": "ag_claude",
+                "account": "work",
                 "labels": {
                     "omnigent.ui": "terminal",
                     BRIDGE_ID_LABEL_KEY: "bridge_shared",

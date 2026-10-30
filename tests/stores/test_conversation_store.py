@@ -241,13 +241,7 @@ def test_session_account_survives_children_and_forks(
     fork = conversation_store.fork_conversation(parent.id, copy_model_settings=False)
     assert fork.account == "work"
     assert fork.model_override is None
-    moved = conversation_store.fork_conversation(
-        parent.id, override_account="client-a", override_account_set=True
-    )
-    assert moved.account == "client-a"
-    cleared = conversation_store.fork_conversation(
-        parent.id, override_account=None, override_account_set=True
-    )
+    cleared = conversation_store.fork_conversation(parent.id, copy_account=False)
     assert cleared.account is None
 
 

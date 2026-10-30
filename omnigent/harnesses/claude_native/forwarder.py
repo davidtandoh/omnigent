@@ -3515,6 +3515,7 @@ async def _create_clear_replacement_session(
         "/v1/sessions",
         json={
             "agent_id": agent_id,
+            "account": old.get("account"),
             "labels": labels,
         },
     )

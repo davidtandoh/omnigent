@@ -2851,10 +2851,6 @@ class SessionForkRequest(BaseModel):
         explicit value overrides it and an explicit ``null`` gives the
         fork an empty sandbox. Only valid with ``host_type: "managed"`` —
         an external fork's directory is chosen when it binds a host.
-    :param account: Claude account short name for the fork, e.g.
-        ``"work"``. **Omitting** the field keeps the source's account; a
-        different account makes the runner rebuild the transcript in that
-        account instead of cloning the source's native session.
     """
 
     title: str | None = Field(default=None, max_length=USER_SESSION_TITLE_MAX_CHARS)
@@ -2872,14 +2868,8 @@ class SessionForkRequest(BaseModel):
     # it is hidden from the left sidebar (it surfaces only as a Workspace-rail
     # side-chat tab). It may share its parent's runner.
     side_chat: bool = False
-    account: str | None = None
 
     model_config = ConfigDict(extra="forbid")
-
-    @field_validator("account")
-    @classmethod
-    def _check_account(cls, value: str | None) -> str | None:
-        return _validated_account_name(value)
 
     @model_validator(mode="after")
     def _check_managed_fork_fields(self) -> Self:

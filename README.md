@@ -365,9 +365,8 @@ account name; provider names are not aliases. Sessions started without
 supported. Adding an account always runs `claude auth login --claudeai`, even
 if its retained folder already reports signed in. Resume needs no `--account`:
 the session keeps its account. Resuming with a different `--account` is
-refused, because switching accounts is a fork onto the other account; the
-fork API (`POST /v1/sessions/{id}/fork`) takes an `account`, and a fork onto a
-different account rebuilds the Claude transcript in that account's folder.
+refused. Start a new session to use another account. Claude forks keep the
+source account only when the caller can manage the source session.
 Resume lookup and transcript relocation use the session's account folder,
 including when the original workspace is gone. New sessions read reasoning
 effort from that account's `settings.json`; an explicit `--effort` takes

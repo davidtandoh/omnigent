@@ -211,3 +211,24 @@ def test_host_reads_accounts_from_the_user_config_home(
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
     env = account_launch_environment("work", None, host_name="mac-mini")
     assert env == {"CLAUDE_CONFIG_DIR": "/accounts/work"}
+
+
+@pytest.mark.parametrize("native_env", [None, {"FOO": "1"}])
+def test_host_preserves_environment_for_a_gateway_provider(
+    native_env: dict[str, str] | None,
+) -> None:
+    config = {
+        "providers": {
+            "claude-gateway": {
+                "kind": "gateway",
+                "anthropic": {"base_url": "https://gw.example/anthropic", "api_key": "$GW"},
+            }
+        }
+    }
+    assert account_launch_environment(
+        "gateway", native_env, host_name="mac-mini", config=config
+    ) == dict(native_env or {})
+    with pytest.raises(AccountUnavailableError, match="--env CLAUDE_CONFIG_DIR conflict"):
+        account_launch_environment(
+            "gateway", {"CLAUDE_CONFIG_DIR": "/other"}, host_name="mac-mini", config=config
+        )
