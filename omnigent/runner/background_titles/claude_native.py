@@ -40,11 +40,11 @@ async def generate_background_title(context: BackgroundTitleContext) -> str | No
             claude_config = await asyncio.to_thread(resolve_native_claude_config, spec=None)
         except Exception:
             _logger.warning(
-                "background Claude Code title skipped: provider config could not be resolved",
+                "background Claude Code title could not resolve provider config; "
+                "falling back to Claude Code's native login",
                 exc_info=True,
                 extra={"session_id": runner_primary_session_id()},
             )
-            return None
     effective_model = (
         context.title_model
         or context.spawn_env.get("HARNESS_CLAUDE_SDK_MODEL")

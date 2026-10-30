@@ -8,6 +8,7 @@ default login (no ``config_dir``) is the CLI's own ``~/.claude``.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -18,6 +19,8 @@ from pathlib import Path
 
 from omnigent.errors import ErrorCode
 from omnigent.onboarding.provider_config import SUBSCRIPTION_KIND, ProviderEntry, load_providers
+
+_logger = logging.getLogger(__name__)
 
 ACCOUNTS_DIRNAME = "claude-accounts"
 _ACCOUNT_NAME_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
@@ -246,10 +249,11 @@ def account_launch_environment(
 
             config = load_global_config()
         entry = find_account(config, account)
-    except (OSError, ValueError, yaml.YAMLError, OmnigentError) as exc:
+    except (OSError, ValueError, yaml.YAMLError, OmnigentError):
+        _logger.warning("Claude account configuration could not be read", exc_info=True)
         raise AccountUnavailableError(
             f"Claude account {account!r} cannot be checked on host {host_name!r}: "
-            f"its Omnigent config could not be read ({exc})."
+            "its Omnigent config could not be read."
         ) from None
     if entry is None or entry.config_dir is None:
         raise AccountUnavailableError(

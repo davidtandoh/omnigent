@@ -231,3 +231,28 @@ def test_recorded_account_requires_an_extra_account_entry(
             host_name="mac-mini",
             config={"providers": {"claude-work": provider}},
         )
+
+
+def test_unreadable_config_refusal_does_not_export_folder_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    private_folder = "/accounts/private-work"
+    (tmp_path / "config.yaml").write_text(
+        "providers:\n  claude-work:\n    kind: subscription\n    cli: claude\n"
+        f"    config_dir: {private_folder}: invalid\n"
+    )
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    with pytest.raises(AccountUnavailableError) as caught:
+        account_launch_environment("work", None, host_name="mac-mini")
+    assert str(caught.value) == (
+        "Claude account 'work' cannot be checked on host 'mac-mini': "
+        "its Omnigent config could not be read."
+    )
+    assert private_folder not in str(caught.value)
+    assert "config_dir" not in str(caught.value)
+    assert str(tmp_path) not in str(caught.value)
+    [diagnostic] = [
+        record for record in caplog.records if record.name == "omnigent.onboarding.claude_accounts"
+    ]
+    assert diagnostic.exc_info is not None
+    assert "config.yaml" in str(diagnostic.exc_info[1])

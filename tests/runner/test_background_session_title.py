@@ -1470,19 +1470,26 @@ async def test_background_title_timeout_releases_process(
     assert uuid.UUID(process_key).hex == process_key
 
 
-async def test_claude_title_uses_the_runners_selected_account(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
+@pytest.mark.parametrize("selected_account", [False, True])
+async def test_claude_title_preserves_account_selection_and_native_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, selected_account: bool
 ) -> None:
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
         "omnigent.native.launch_environment._installed_native_launch_environment",
-        {"CLAUDE_CONFIG_DIR": "/accounts/work"},
+        {"CLAUDE_CONFIG_DIR": "/accounts/work"} if selected_account else {},
     )
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "ambient-key")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example")
 
+    provider_lookups: list[dict[str, Any]] = []
+
     def forbidden_provider_lookup(**kwargs):
-        raise AssertionError("selected account must bypass gateway configuration")
+        provider_lookups.append(kwargs)
+        if selected_account:
+            raise AssertionError("selected account must bypass gateway configuration")
+        raise RuntimeError("default provider cannot be resolved")
 
     class FakeProcess:
         returncode = 0
@@ -1513,7 +1520,13 @@ async def test_claude_title_uses_the_runners_selected_account(
         )
     )
     assert title == "Account title"
-    assert captured["env"]["CLAUDE_CONFIG_DIR"] == "/accounts/work"
-    assert "ANTHROPIC_API_KEY" not in captured["env"]
-    assert "ANTHROPIC_BASE_URL" not in captured["env"]
+    assert provider_lookups == ([] if selected_account else [{"spec": None}])
+    if selected_account:
+        assert captured["env"]["CLAUDE_CONFIG_DIR"] == "/accounts/work"
+        assert "ANTHROPIC_API_KEY" not in captured["env"]
+        assert "ANTHROPIC_BASE_URL" not in captured["env"]
+    else:
+        assert "CLAUDE_CONFIG_DIR" not in captured["env"]
+        assert captured["env"]["ANTHROPIC_API_KEY"] == "ambient-key"
+        assert captured["env"]["ANTHROPIC_BASE_URL"] == "https://gateway.example"
     assert "--settings" not in captured["args"]
