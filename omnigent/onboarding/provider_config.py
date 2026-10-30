@@ -1718,7 +1718,13 @@ def set_default_provider(
     target_raw = providers[name]
     if not isinstance(target_raw, dict):
         raise OmnigentError(f"provider {name!r} must be a mapping.", code=ErrorCode.INVALID_INPUT)
-    target_served = provider_families(_parse_provider(name, target_raw))
+    target = _parse_provider(name, target_raw)
+    if target.config_dir is not None:
+        raise OmnigentError(
+            f"provider {name!r}: an extra Claude account cannot be a default.",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    target_served = provider_families(target)
     # The families to (re)assign to *name*: a single scoped family, or all
     # it serves when unscoped.
     if family is None:

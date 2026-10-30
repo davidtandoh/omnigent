@@ -8374,3 +8374,37 @@ def test_runner_online_map_keys_status_by_runner_host(
 
     assert result == {"runner_a": True, "runner_b": True, "runner_c": True}
     assert seen == {"runner_a": "host_1", "runner_b": "host_2", "runner_c": None}
+
+
+@pytest.mark.parametrize("other_credential", [False, True])
+def test_bundled_agent_never_promotes_an_extra_account(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, other_credential: bool
+) -> None:
+    from omnigent.cli import _ensure_bundled_agent_brain_credential
+    from omnigent.onboarding.provider_config import load_providers
+
+    isolate_provider_resolution(monkeypatch, tmp_path)
+    providers = {
+        "claude-work": {
+            "kind": "subscription",
+            "cli": "claude",
+            "config_dir": str(tmp_path / "work"),
+        }
+    }
+    if other_credential:
+        providers["anthropic-key"] = {
+            "kind": "key",
+            "anthropic": {
+                "base_url": "https://api.anthropic.invalid",
+                "api_key_ref": "env:TEST_API_KEY",
+            },
+        }
+    config_path = _write_isolated_provider_config(tmp_path, providers)
+    _ensure_bundled_agent_brain_credential("polly")
+    saved = yaml.safe_load(config_path.read_text())
+    entries = load_providers(saved)
+    assert entries["claude-work"].default_families == frozenset()
+    if other_credential:
+        assert "anthropic" in entries["anthropic-key"].default_families
+    else:
+        assert saved["providers"] == providers

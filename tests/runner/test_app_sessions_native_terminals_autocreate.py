@@ -1950,6 +1950,26 @@ async def test_auto_create_claude_terminal_enforces_requested_account(
         "omnigent.runner.native.orchestration.native_launch_environment",
         lambda: {"CLAUDE_CONFIG_DIR": selected} if account else {},
     )
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.main.native_launch_environment",
+        lambda: {"CLAUDE_CONFIG_DIR": selected} if account else {},
+    )
+    conflicting_env_vars = (
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "ANTHROPIC_BEDROCK_BASE_URL",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_GATEWAY",
+        "ANTHROPIC_CUSTOM_HEADERS",
+        "ANTHROPIC_MODEL",
+    )
+    if account:
+        for name in conflicting_env_vars:
+            monkeypatch.setenv(name, "other-account")
     observation = tmp_path / "probe.json"
     command = tmp_path / "claude"
     logged_in = None if account == "inconclusive" else account != "signed-out"
@@ -2020,6 +2040,8 @@ async def test_auto_create_claude_terminal_enforces_requested_account(
             expected_account = selected if account else str(tmp_path / "daemon-account")
             assert env["CLAUDE_CONFIG_DIR"] == expected_account
             assert env["USER"] == env["LOGNAME"] == "alice"
+            if account:
+                assert not set(conflicting_env_vars).intersection(env)
             assert "ANTHROPIC_BASE_URL" not in captured["spec"].env
             assert "ANTHROPIC_AUTH_TOKEN" not in captured["spec"].env
     if account:

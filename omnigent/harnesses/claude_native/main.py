@@ -137,6 +137,7 @@ from omnigent.models.claude_model_vocabulary import (
     claude_model_alias,
     served_canonical_overrides,
 )
+from omnigent.native.launch_environment import native_launch_environment
 from omnigent.native._native_resume_hint import echo_native_resume_hint
 from omnigent.native.native_coding_agents import native_shell_terminal_spec
 from omnigent.native.native_terminal import (
@@ -478,7 +479,11 @@ def _ambient_env_is_non_anthropic_gateway() -> bool:
     fingerprint must treat the env as a non-canonical endpoint.
     """
     managed_base_url, _ = managed_claude_gateway_signal()
-    base_url = managed_base_url or os.environ.get(_UCODE_CLAUDE_BASE_URL_ENV, "")
+    base_url = managed_base_url or (
+        os.environ.get(_UCODE_CLAUDE_BASE_URL_ENV, "")
+        if "CLAUDE_CONFIG_DIR" not in native_launch_environment()
+        else ""
+    )
     if not base_url:
         return False
     host = (urlparse(base_url).hostname or "").lower()
@@ -966,6 +971,7 @@ def _claude_model_probe_invocation(
     command, launch_args = resolve_claude_launch("claude", args)
     env = dict(os.environ)
     env.update(build_native_claude_terminal_env(claude_config))
+    env.update(native_launch_environment())
     env.update(
         {
             "DISABLE_TELEMETRY": "1",
@@ -1324,10 +1330,15 @@ def claude_catalog_fingerprint(claude_config: ClaudeNativeUcodeConfig | None) ->
     ambient_gateway = None
     if claude_config is None:
         managed_base_url, _ = managed_claude_gateway_signal()
-        ambient_gateway = managed_base_url or os.environ.get(_UCODE_CLAUDE_BASE_URL_ENV)
+        ambient_gateway = managed_base_url or (
+            os.environ.get(_UCODE_CLAUDE_BASE_URL_ENV)
+            if "CLAUDE_CONFIG_DIR" not in native_launch_environment()
+            else None
+        )
     return fingerprint_of(
         "claude-native",
         "control-picker-v3",
+        native_launch_environment().get("CLAUDE_CONFIG_DIR", os.environ.get("CLAUDE_CONFIG_DIR")),
         sorted(claude_config.env.items()) if claude_config is not None else None,
         claude_config.api_key_helper if claude_config is not None else None,
         claude_config.model if claude_config is not None else None,
@@ -1528,9 +1539,27 @@ def claude_launch_catalog_is_stale(claude_config: ClaudeNativeUcodeConfig | None
 def native_claude_auth_env_unset(
     claude_config: ClaudeNativeUcodeConfig | None,
 ) -> tuple[str, ...]:
-    """Credentials that would override the explicitly configured auth helper."""
+    """Credentials and routing variables that override explicit authentication."""
+    credentials = (_ANTHROPIC_API_KEY_ENV, "ANTHROPIC_AUTH_TOKEN")
+    if "CLAUDE_CONFIG_DIR" in native_launch_environment():
+        return tuple(
+            sorted(
+                {
+                    *credentials,
+                    *_CONNECT_BROKER_UCODE_ENV_ALLOWLIST,
+                    "CLAUDE_CODE_OAUTH_TOKEN",
+                    _ANTHROPIC_BEDROCK_BASE_URL_ENV,
+                    _AWS_BEARER_TOKEN_BEDROCK_ENV,
+                    _CLAUDE_CODE_USE_BEDROCK_ENV,
+                    "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+                    "CLAUDE_CODE_USE_VERTEX",
+                    "CLAUDE_CODE_SKIP_VERTEX_AUTH",
+                    "ANTHROPIC_VERTEX_BASE_URL",
+                }
+            )
+        )
     if claude_config is not None and claude_config.api_key_helper:
-        return (_ANTHROPIC_API_KEY_ENV, "ANTHROPIC_AUTH_TOKEN")
+        return credentials
     return ()
 
 

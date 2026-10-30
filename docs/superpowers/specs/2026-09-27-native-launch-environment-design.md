@@ -31,6 +31,9 @@ The CLI reads the named `kind: subscription, cli: claude` provider from the
 user config and adds its `config_dir` as `CLAUDE_CONFIG_DIR`. Entries without
 `config_dir` are not extra accounts. The daemon skips provider resolution and
 credential injection when the explicit launch map selects `CLAUDE_CONFIG_DIR`.
+The shared auth-unset helper removes inherited credentials and routing variables
+from the terminal and model probes. Model probes use the selected account, and
+the launch-catalog fingerprint includes its config folder.
 Client-side resume lookup and relocation use the same explicit map.
 The runner reads the explicit value, not its own process environment, when it locates Claude's
 `projects` and `sessions` folders for resume and status.
