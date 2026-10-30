@@ -9186,8 +9186,7 @@ async def _auto_create_claude_terminal(
             ensure_session_account_selected, launch_metadata.account, requested_account
         )
     if provider is not None and provider.config_dir:
-        provider_config_dir = str(Path(provider.config_dir).expanduser())
-        if requested_account != provider_config_dir:
+        if requested_account != provider.config_dir:
             import socket
 
             from omnigent.cli_invocation import cli_invocation

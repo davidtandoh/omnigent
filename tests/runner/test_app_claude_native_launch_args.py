@@ -1819,14 +1819,23 @@ async def test_ambient_config_folder_does_not_bypass_default_gateway(
 
 
 @pytest.mark.parametrize(
-    ("recorded_account", "runner_account"),
-    [(None, None), (None, "work"), ("work", "work"), ("other", "other"), (None, "other")],
+    ("recorded_account", "runner_account", "config_dir_suffix"),
+    [
+        (None, None, ""),
+        (None, "work", ""),
+        ("work", "work", ""),
+        ("other", "other", ""),
+        (None, "other", ""),
+        (None, "work", "/"),
+        ("work", "work", "/"),
+    ],
 )
 async def test_resolved_provider_account_requires_runner_selection(
     bridge_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     recorded_account: str | None,
     runner_account: str | None,
+    config_dir_suffix: str,
 ) -> None:
     import json
     from unittest.mock import Mock
@@ -1839,7 +1848,7 @@ async def test_resolved_provider_account_requires_runner_selection(
     from tests._helpers.providers import isolate_provider_resolution
 
     isolate_provider_resolution(monkeypatch, bridge_dir / "provider-config")
-    selected = str(bridge_dir / "account-folder")
+    selected = str(bridge_dir / "account-folder") + config_dir_suffix
     other = str(bridge_dir / "other-folder")
     providers = {
         "claude-work": {"kind": "subscription", "cli": "claude", "config_dir": selected},
