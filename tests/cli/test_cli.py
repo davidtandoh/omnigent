@@ -575,6 +575,74 @@ def test_native_wrapper_env_rejects_duplicates_before_backend_start(
     assert "repeats variable 'FM_TASK_ID'" in result.output
 
 
+@pytest.mark.parametrize(
+    ("args", "expected_env"),
+    [
+        (["--account", "work"], {"CLAUDE_CONFIG_DIR": "/home/u/.omnigent/claude-accounts/work"}),
+        (
+            ["--account", "claude-work", "--env", "FM_TASK_ID=7"],
+            {"FM_TASK_ID": "7", "CLAUDE_CONFIG_DIR": "/home/u/.omnigent/claude-accounts/work"},
+        ),
+        (["--account", "claude-subscription"], {}),
+    ],
+)
+def test_claude_account_option_selects_the_account_config_dir(
+    args: list[str], expected_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--account`` resolves a user-config Claude account into the launch env."""
+    providers = {
+        "claude-subscription": {"kind": "subscription", "cli": "claude", "default": True},
+        "claude-work": {
+            "kind": "subscription",
+            "cli": "claude",
+            "config_dir": "/home/u/.omnigent/claude-accounts/work",
+        },
+    }
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("omnigent.cli._load_global_config", lambda: {"providers": providers})
+    monkeypatch.setattr("omnigent.cli._load_effective_config", dict)
+    monkeypatch.setattr("omnigent.cli._ensure_backend", lambda *_: "http://localhost:0")
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.main.run_claude_native",
+        lambda **kwargs: captured.update(kwargs),
+    )
+
+    result = CliRunner().invoke(cli, ["claude", *args])
+
+    assert result.exit_code == 0, result.output
+    assert captured["launch_env"] == expected_env
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["--account", "missing"], "No Claude account named 'missing'"),
+        (
+            ["--account", "work", "--env", "CLAUDE_CONFIG_DIR=/elsewhere"],
+            "mutually exclusive",
+        ),
+    ],
+)
+def test_claude_account_option_rejects_before_backend_start(
+    args: list[str], message: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing or conflicting account fails before any daemon side effect."""
+    providers = {
+        "claude-work": {"kind": "subscription", "cli": "claude", "config_dir": "/accounts/work"}
+    }
+    monkeypatch.setattr("omnigent.cli._load_global_config", lambda: {"providers": providers})
+    monkeypatch.setattr("omnigent.cli._load_effective_config", dict)
+    monkeypatch.setattr(
+        "omnigent.cli._ensure_backend",
+        lambda *_: pytest.fail("an invalid --account must not start the backend"),
+    )
+
+    result = CliRunner().invoke(cli, ["claude", *args])
+
+    assert result.exit_code != 0
+    assert message in result.output
+
+
 def test_claude_command_resume_binds_session_and_passes_unknown_args(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

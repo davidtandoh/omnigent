@@ -1249,7 +1249,11 @@ def _resolve_provider_for_build(
         and claude_managed_gateway()[1]
     ):
         for entry in load_providers(effective).values():
-            if entry.kind == SUBSCRIPTION_KIND and entry.cli == "claude":
+            if (
+                entry.kind == SUBSCRIPTION_KIND
+                and entry.cli == "claude"
+                and entry.config_dir is None
+            ):
                 return entry
     # Launch-only last resort: no default anywhere, but a credential that serves
     # this family is configured (e.g. a Databricks workspace the user added but

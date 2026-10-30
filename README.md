@@ -331,6 +331,35 @@ explicit `CLAUDE_CONFIG_DIR` keep their existing behavior.
 **Capabilities** when the installed build enforces the selected account. A
 launcher can check for that line instead of pinning an Omnigent version.
 
+To keep extra Claude subscriptions next to your default login, run
+`omnigent setup`, choose **Claude**, then **Claude — another subscription
+account**. Setup asks for a short name such as `work`, creates
+`claude-accounts/work` in the Omnigent config folder (`~/.omnigent` unless
+`OMNIGENT_CONFIG_HOME` is set), and runs `claude auth login` there. It saves
+the account to `config.yaml` as `claude-work` only after `claude auth status`
+confirms the sign-in:
+
+```yaml
+providers:
+  claude-work:
+    kind: subscription
+    cli: claude
+    config_dir: /Users/me/.omnigent/claude-accounts/work
+```
+
+Start a session on that account with `omnigent claude --account work`, which
+passes the account's `CLAUDE_CONFIG_DIR` to the launch check above. Pass
+`--account` again when you resume the session, because Omnigent does not store
+the account with the session. The web UI and agent specs still use the default
+login. An extra account cannot be a default. Setup lists each account as
+**Subscription (claude-work)**. Removing an account signs out only that
+account and keeps its folder, so adding the same name again restores its
+sessions.
+
+On macOS, Claude stores each sign-in in the login keychain, which an SSH
+session cannot open. Over SSH, setup refuses the login step and exits with an
+error. Add the account from the Mac's own screen or through Screen Sharing.
+
 For Codex, Omnigent applies these variables to both the app-server that runs
 tools and the attached terminal UI. The agent's tool shell therefore receives
 the explicit launch environment.

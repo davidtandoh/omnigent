@@ -677,6 +677,8 @@ def _configure_harness_add(family: str | None = None) -> str | None:
     if choice < 0:  # Esc — abort the add
         return None
     chosen = options[choice]
+    if chosen.account:
+        return _configure_claude_account_add()
     kind = chosen.kind
 
     name: str
@@ -831,7 +833,7 @@ def _configure_harness_add(family: str | None = None) -> str | None:
         existing_subs = [
             n
             for n, e in load_providers(_load_global_config()).items()
-            if e.kind == SUBSCRIPTION_KIND and e.cli == cli_name
+            if e.kind == SUBSCRIPTION_KIND and e.cli == cli_name and e.config_dir is None
         ]
         if existing_subs:
             replace = select(
@@ -1434,6 +1436,8 @@ def _credential_label(name: str, entry: ProviderEntry) -> str:
     # the generic "Subscription", so the credential the user recognizes is named
     # — the Claude analogue of the "Codex-Databricks" row. Display only; the
     # persisted entry stays a plain subscription (no new shape on disk).
+    if entry.config_dir is not None:
+        return f"Subscription ({name})"
     if entry.kind == SUBSCRIPTION_KIND and entry.cli == "claude":
         gateway = _claude_managed_gateway_label()
         if gateway is not None:
@@ -3196,7 +3200,8 @@ def _manage_credential(provider: str, family: str) -> str | None:
     # for pi that covers the fallback-driven default too, where offering
     # "make default" would be a confusing no-op.
     default = surface_default_provider(config, family)
-    if default is None or default.name != provider:
+    # An extra Claude account is chosen per session; a default would run the CLI's own login.
+    if entry.config_dir is None and (default is None or default.name != provider):
         rows.append(
             _HarnessMenuRow(
                 f"Make default for {family_label(family)}", action="set_default", provider=provider
@@ -3216,6 +3221,8 @@ def _manage_credential(provider: str, family: str) -> str | None:
     # A subscription's credential lives in the harness CLI's own auth file, not
     # our config — so removing it means signing out of that CLI (otherwise the
     # login persists and ambient detection re-adopts it on the next open).
+    if entry.config_dir is not None:
+        return _remove_claude_account(provider, entry.config_dir)
     if entry.kind == SUBSCRIPTION_KIND:
         return _remove_subscription(provider, family)
     # A databricks provider was wired by `ucode configure`, which edits
@@ -3280,6 +3287,95 @@ def _remove_subscription(provider: str, family: str) -> str | None:
     return (
         f"✓ Removed {disp} subscription — note: `{logout_cmd}` did not complete, "
         f"so you may still be signed in to the {disp} CLI"
+    )
+
+
+def _configure_claude_account_add() -> str | None:
+    """Sign in to an extra Claude account in its own folder and record it.
+
+    Asks for a short name, creates ``<config home>/claude-accounts/<name>``,
+    runs ``claude auth login`` with that ``CLAUDE_CONFIG_DIR``, and writes a
+    non-default ``kind: subscription, cli: claude`` provider only once
+    ``claude auth status`` confirms the sign-in.
+
+    :returns: A status line for the credential menu, or ``None`` on Esc.
+    :raises click.ClickException: On macOS over SSH, where the keychain-backed
+        login cannot be stored.
+    """
+    import omnigent.cli as _cli
+    from omnigent.onboarding.claude_accounts import (
+        account_config_dir,
+        account_name_error,
+        account_provider_name,
+        claude_command,
+        sign_in_account,
+        ssh_login_refusal,
+    )
+    from omnigent.onboarding.interactive import console, prompt_text
+
+    refusal = ssh_login_refusal()
+    if refusal is not None:
+        raise click.ClickException(f"{refusal} No account was added.")
+    command = claude_command()
+    if command is None:
+        return "✗ Claude CLI not found on PATH — account not added"
+    providers = _load_global_config().get("providers")
+    existing = providers if isinstance(providers, dict) else {}
+    while True:
+        account_name = prompt_text(
+            "Short name for this Claude account (e.g. work; empty to go back)", default=""
+        ).strip()
+        if not account_name:
+            return None
+        error = account_name_error(account_name, existing)
+        if error is None:
+            break
+        console.print(f"  [red]{error}[/red]")
+    config_dir = account_config_dir(_cli._effective_global_config_path().parent, account_name)
+    os.makedirs(config_dir, mode=0o700, exist_ok=True)
+    console.print(f"  [dim]Signing in to Claude for {account_name} (its login will open)…[/dim]")
+    if not sign_in_account(command, config_dir):
+        return f"✗ Claude login for {account_name} not confirmed — account not added"
+    name = account_provider_name(account_name)
+    _save_global_config(
+        {"providers": {name: {"kind": "subscription", "cli": "claude", "config_dir": config_dir}}},
+        deep_merge_keys=("providers",),
+    )
+    return f"✓ Added {name} — start it with `{cli_invocation()} claude --account {account_name}`"
+
+
+def _remove_claude_account(provider: str, config_dir: str) -> str | None:
+    """Sign out of one extra Claude account and remove its provider entry.
+
+    The account folder is kept because it holds that account's session
+    transcripts; adding the same name again reuses it.
+
+    :returns: A status line for the credential menu, or ``None`` when declined.
+    """
+    from omnigent.onboarding.claude_accounts import claude_command, sign_out_account
+    from omnigent.onboarding.interactive import select
+
+    choice = select(
+        f"Remove Claude account {provider}?",
+        [f"Yes — sign out of {provider} and remove", "No — keep it"],
+        descriptions=[
+            "Runs `claude auth logout` for this account only. Your default Claude "
+            f"login is not touched. The folder {config_dir} is kept.",
+            "Leave the account and its login untouched.",
+        ],
+        default=1,
+        clear_on_exit=True,
+    )
+    if choice != 0:
+        return None
+    command = claude_command()
+    signed_out = command is not None and sign_out_account(command, config_dir)
+    _remove_credential(provider)
+    if signed_out:
+        return f"✓ Signed out of {provider} and removed (folder kept: {config_dir})"
+    return (
+        f"✓ Removed {provider} — note: sign-out did not complete, so its login may "
+        f"remain in {config_dir}"
     )
 
 

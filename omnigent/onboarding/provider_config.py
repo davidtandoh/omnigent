@@ -413,6 +413,10 @@ class ProviderEntry:
         human display name (the table's ``name`` field, snapshotted at
         adoption), e.g. ``"Databricks Unity Gateway"``. ``None`` otherwise and
         when the table named none.
+    :param config_dir: For an extra ``kind="subscription", cli="claude"``
+        account only: the absolute ``CLAUDE_CONFIG_DIR`` that holds its login,
+        e.g. ``"/home/u/.omnigent/claude-accounts/work"``. ``None`` for the
+        CLI's own default login and every other kind.
     :param default_families: The set of model families this provider is
         the **default** for. Sourced from the entry's ``default:`` flag:
         ``true`` → every family it serves (:func:`provider_families`); a
@@ -433,6 +437,7 @@ class ProviderEntry:
     connection: str | None = None
     model_provider: str | None = None
     display_name: str | None = None
+    config_dir: str | None = None
     default_families: frozenset[str] = frozenset()
     # Databricks Gemini routing is opt-in and has a separate default scope.
     native_gemini: bool = False
@@ -908,6 +913,30 @@ def _default_raw_value(default_families: frozenset[str], served: set[str]) -> ob
     return sorted(default_families)
 
 
+def _parse_account_config_dir(name: str, cli: str, raw: object) -> str | None:
+    """Validate an extra Claude account's ``config_dir`` and return it unchanged.
+
+    The value is kept byte-for-byte because Claude keys its stored login on the
+    exact ``CLAUDE_CONFIG_DIR`` string.
+
+    :raises OmnigentError: If the value is set for a non-Claude CLI, or is not
+        an absolute path.
+    """
+    if raw is None:
+        return None
+    if cli != "claude":
+        raise OmnigentError(
+            f"provider {name!r}: 'config_dir' is only supported for cli: claude.",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    if not isinstance(raw, str) or not os.path.isabs(raw):
+        raise OmnigentError(
+            f"provider {name!r}: 'config_dir' must be an absolute path.",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    return raw
+
+
 def _parse_provider(name: str, raw: dict[str, object]) -> ProviderEntry:
     """Parse one entry under ``providers:`` into a :class:`ProviderEntry`.
 
@@ -962,13 +991,25 @@ def _parse_provider(name: str, raw: dict[str, object]) -> ProviderEntry:
         # claude/codex subscriptions are locked to their own CLIs and cannot
         # drive pi. A pi subscription explicitly opts into Pi's own native auth
         # and may default the pi surface (pi_capable=True, served={}).
+        default_families = _parse_default_families(
+            name, default_raw, served, pi_capable=(cli_raw == "pi")
+        )
+        config_dir = _parse_account_config_dir(name, cli_raw, raw.get("config_dir"))
+        if config_dir is not None and default_families:
+            # Routing a default to a subscription uses the CLI's own login, so an
+            # extra account as default would silently run on the default account.
+            raise OmnigentError(
+                f"provider {name!r}: an extra Claude account cannot be a default. "
+                f"Remove 'default' and select it per session with "
+                f"`omnigent claude --account {name}`.",
+                code=ErrorCode.INVALID_INPUT,
+            )
         return ProviderEntry(
             name=name,
             kind=kind,
             cli=cli_raw,
-            default_families=_parse_default_families(
-                name, default_raw, served, pi_capable=(cli_raw == "pi")
-            ),
+            config_dir=config_dir,
+            default_families=default_families,
         )
 
     if kind == CLI_CONFIG_KIND:
@@ -1363,7 +1404,8 @@ def first_available_provider(config: dict[str, object], family: str) -> Provider
         order, or ``None`` when none serves it.
     """
     for entry in load_providers(config).values():
-        if family in provider_families(entry):
+        # An extra Claude account is selected per session, never as a fallback.
+        if family in provider_families(entry) and entry.config_dir is None:
             return entry
     return None
 

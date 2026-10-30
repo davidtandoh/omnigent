@@ -405,6 +405,8 @@ class AddOption:
         (``"claude"`` / ``"codex"``); ``None`` otherwise.
     :param other: ``True`` for the catch-all ``key`` option that prompts
         for a provider from the remaining catalog (Groq, DeepSeek, …).
+    :param account: ``True`` for the option that adds an extra Claude
+        subscription account in its own config folder.
     """
 
     label: str
@@ -413,6 +415,7 @@ class AddOption:
     provider: str | None = None
     cli: str | None = None
     other: bool = False
+    account: bool = False
 
 
 # Catalog providers surfaced as their own top-level add option; the rest
@@ -534,6 +537,15 @@ def add_menu_options() -> list[AddOption]:
             "AWS Bedrock or a Bedrock-compatible gateway for the native Claude "
             "terminal (omnigent claude). Claude only.",
             BEDROCK_KIND,
+        ),
+        # Listed after Bedrock so the established option numbers do not shift.
+        _opt(
+            "Claude — another subscription account",
+            "Sign in to another Claude Pro/Max account in its own folder. "
+            "Pick it per session with omnigent claude --account.",
+            SUBSCRIPTION_KIND,
+            cli="claude",
+            account=True,
         ),
     ]
 

@@ -288,7 +288,8 @@ def _configured_subscription_clis(explicit: dict[str, object]) -> set[str]:
     """
     clis: set[str] = set()
     for entry in load_providers({"providers": explicit}).values():
-        if entry.kind == SUBSCRIPTION_KIND and entry.cli:
+        # An extra Claude account has its own login, so it does not cover the CLI's default one.
+        if entry.kind == SUBSCRIPTION_KIND and entry.cli and entry.config_dir is None:
             clis.add(entry.cli)
     return clis
 

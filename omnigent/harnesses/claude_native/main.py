@@ -90,6 +90,7 @@ from omnigent.databricks_ai_gateway import (
     with_gateway_attribution_lines,
 )
 from omnigent.entities.session_resources import terminal_resource_id
+from omnigent.harnesses.claude_native.account import selected_claude_config_dir
 from omnigent.harnesses.claude_native.bridge import (
     BRIDGE_ID_LABEL_KEY,
     RESUME_COPY_MARKER_SUFFIX,
@@ -2727,12 +2728,13 @@ def _claude_projects_dir() -> Path:
     Return the directory Claude Code keeps its project transcripts in.
 
     Mirrors Claude's own resolution: ``$CLAUDE_CONFIG_DIR/projects`` when set,
-    otherwise ``~/.claude/projects``.
+    otherwise ``~/.claude/projects``. A runner's explicit launch value wins
+    (see :func:`selected_claude_config_dir`).
 
     :returns: The projects directory (not guaranteed to exist).
     """
-    configured = os.environ.get("CLAUDE_CONFIG_DIR")
-    return Path(configured).expanduser() / "projects" if configured else _CLAUDE_PROJECTS_DIR
+    configured = selected_claude_config_dir()
+    return configured / "projects" if configured is not None else _CLAUDE_PROJECTS_DIR
 
 
 def _claude_project_dir_for_cwd(cwd: Path) -> Path:
