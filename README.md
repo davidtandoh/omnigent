@@ -327,6 +327,10 @@ Omnigent warns with the account directory and continues without exposing
 status output. The status check waits up to 30 seconds. Launches without an
 explicit `CLAUDE_CONFIG_DIR` keep their existing behavior.
 
+`omnigent claude --help` lists `claude-account-enforcement` under
+**Capabilities** when the installed build enforces the selected account. A
+launcher can check for that line instead of pinning an Omnigent version.
+
 For Codex, Omnigent applies these variables to both the app-server that runs
 tools and the attached terminal UI. The agent's tool shell therefore receives
 the explicit launch environment.

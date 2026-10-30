@@ -251,6 +251,11 @@ def register_native_commands(cli: click.Group) -> None:
           omnigent claude --resume                  # interactive picker
           omnigent claude --server https://<app>.databricksapps.com
           omnigent claude --smart-routing           # first message picks the model
+
+        \b
+        Capabilities:
+          claude-account-enforcement  --env CLAUDE_CONFIG_DIR=<dir> selects the
+                                      account; a signed-out account fails launch.
         """
         _reject_native_on_windows("claude")
         launch_env = _parse_native_env_option(launch_env_entries)
