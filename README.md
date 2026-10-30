@@ -348,7 +348,13 @@ providers:
 ```
 
 Start a session on that account with `omnigent claude --account work`, which
-passes the account's `CLAUDE_CONFIG_DIR` to the launch check above. Pass
+passes the account's `CLAUDE_CONFIG_DIR` to the launch check above and uses
+Claude's own subscription routing, bypassing Omnigent gateway, key, and Bedrock
+providers for this launch. `NAME` is always the exact short account name;
+provider names are not aliases. Omit `--account` to use the default login
+when subscription routing is configured. No explicit default-login alias is
+supported. Adding an account always runs `claude auth login --claudeai`, even
+if its retained folder already reports signed in. Pass
 `--account` again when you resume the session, because Omnigent does not store
 the account with the session. The web UI and agent specs still use the default
 login. An extra account cannot be a default. Setup lists each account as

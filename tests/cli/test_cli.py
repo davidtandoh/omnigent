@@ -581,13 +581,14 @@ def test_native_wrapper_env_rejects_duplicates_before_backend_start(
         (["--account", "work"], {"CLAUDE_CONFIG_DIR": "/home/u/.omnigent/claude-accounts/work"}),
         (
             ["--account", "claude-work", "--env", "FM_TASK_ID=7"],
-            {"FM_TASK_ID": "7", "CLAUDE_CONFIG_DIR": "/home/u/.omnigent/claude-accounts/work"},
+            {"FM_TASK_ID": "7", "CLAUDE_CONFIG_DIR": "/accounts/claude-work"},
         ),
-        (["--account", "claude-subscription"], {}),
+
     ],
 )
+@pytest.mark.parametrize("default_kind", ["subscription", "key", "gateway", "bedrock"])
 def test_claude_account_option_selects_the_account_config_dir(
-    args: list[str], expected_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+    args: list[str], expected_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, default_kind: str
 ) -> None:
     """``--account`` resolves a user-config Claude account into the launch env."""
     providers = {
@@ -598,6 +599,21 @@ def test_claude_account_option_selects_the_account_config_dir(
             "config_dir": "/home/u/.omnigent/claude-accounts/work",
         },
     }
+    providers["claude-claude-work"] = {
+        "kind": "subscription",
+        "cli": "claude",
+        "config_dir": "/accounts/claude-work",
+    }
+    if default_kind != "subscription":
+        providers.pop("claude-subscription")
+        providers["other-default"] = {
+            "kind": default_kind,
+            "default": True,
+            "anthropic": {
+                "base_url": "https://api.anthropic.invalid",
+                "api_key_ref": "env:TEST_CLAUDE_KEY",
+            },
+        }
     captured: dict[str, object] = {}
     monkeypatch.setattr("omnigent.cli._load_global_config", lambda: {"providers": providers})
     monkeypatch.setattr("omnigent.cli._load_effective_config", dict)
@@ -611,12 +627,14 @@ def test_claude_account_option_selects_the_account_config_dir(
 
     assert result.exit_code == 0, result.output
     assert captured["launch_env"] == expected_env
+    assert captured["use_claude_config"] is True
 
 
 @pytest.mark.parametrize(
     ("args", "message"),
     [
         (["--account", "missing"], "No Claude account named 'missing'"),
+        (["--account", "claude-work"], "No Claude account named 'claude-work'"),
         (
             ["--account", "work", "--env", "CLAUDE_CONFIG_DIR=/elsewhere"],
             "mutually exclusive",

@@ -1289,8 +1289,8 @@ def run_interactive_login(argv: list[str], *, env: Mapping[str, str] | None = No
 
     :param argv: The login command, e.g. ``["claude", "auth", "login", "--claudeai"]``.
     :param env: The child's full environment, or ``None`` to inherit this process's.
-    :returns: ``False`` when the process could not start or timed out; ``True``
-        otherwise. The caller confirms the login with the CLI's status command.
+    :returns: ``True`` only when the process exits successfully. The caller
+        confirms the login with the CLI's status command.
     """
     try:
         # Open /dev/tty explicitly so the child process sees a real TTY even
@@ -1307,7 +1307,7 @@ def run_interactive_login(argv: list[str], *, env: Mapping[str, str] | None = No
                 tty_fd = None
         try:
             if tty_fd is not None:
-                subprocess.run(
+                result = subprocess.run(
                     argv,
                     check=False,
                     timeout=600,
@@ -1317,13 +1317,13 @@ def run_interactive_login(argv: list[str], *, env: Mapping[str, str] | None = No
                     stderr=tty_fd,
                 )
             else:
-                subprocess.run(argv, check=False, timeout=600, env=env)
+                result = subprocess.run(argv, check=False, timeout=600, env=env)
         finally:
             if tty_fd is not None:
                 os.close(tty_fd)
     except (OSError, subprocess.TimeoutExpired):
         return False
-    return True
+    return result.returncode == 0
 
 
 def harness_login(key: str) -> bool:

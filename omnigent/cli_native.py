@@ -281,7 +281,7 @@ def register_native_commands(cli: click.Group) -> None:
         # :param prompt: Optional initial TUI prompt.
         # :param smart_routing: When True, arm Smart Routing for the session so
         #     the first typed message picks the model.
-        # :param account: Optional Claude subscription provider or short account name.
+        # :param account: Optional short Claude account name.
         # :param claude_args: Pass-through args for ``claude``.
         """Launch Claude Code with Omnigent.
 
@@ -317,6 +317,7 @@ def register_native_commands(cli: click.Group) -> None:
         if account is not None:
             # Accounts are user-owned, so a project config cannot redirect one.
             launch_env = _claude_account_launch_env(_load_global_config(), account, launch_env)
+            use_claude_config = True
         if server is None:
             server = cfg.get("server")
         auto_open_conversation = _resolve_auto_open_conversation_from_config(cfg)

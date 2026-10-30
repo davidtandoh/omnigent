@@ -3985,10 +3985,14 @@ printf '%s|%s\\n' "$*" "${CLAUDE_CONFIG_DIR-unset}" >> "$FAKE_CLAUDE_LOG"
 marker="${CLAUDE_CONFIG_DIR:-/nonexistent}/signed-in"
 case "$*" in
   "auth status")
+    [ -n "$FAKE_CLAUDE_STATUS_INVALID" ] && echo 'invalid' && exit 1
     [ -f "$marker" ] && echo '{"loggedIn": true}' && exit 0
     echo '{"loggedIn": false}'; exit 1 ;;
-  "auth login --claudeai") [ -n "$FAKE_CLAUDE_LOGIN_FAILS" ] || : > "$marker" ;;
-  "auth logout") rm -f "$marker" ;;
+  "auth login --claudeai")
+    [ -n "$FAKE_CLAUDE_LOGIN_FAILS" ] && exit 1
+    : > "$marker" ;;
+  "auth logout") [ -n "$FAKE_CLAUDE_LOGOUT_FAILS" ] && exit 1; rm -f "$marker" ;;
+
 esac
 """
 
@@ -4027,7 +4031,6 @@ def test_add_claude_account_signs_in_its_own_folder(isolated_config, fake_claude
     assert "Use lowercase letters" in result.output  # "Work" was re-prompted
     calls = fake_claude.read_text().splitlines()
     assert calls == [
-        f"auth status|{config_dir}",
         f"auth login --claudeai|{config_dir}",
         f"auth status|{config_dir}",
     ]
@@ -4040,8 +4043,7 @@ def test_add_claude_account_writes_nothing_when_login_fails(
     stdin = "\n".join([*_ADD_ACCOUNT_KEYS, "work", "q", "q"]) + "\n"
     result = CliRunner().invoke(cli, ["setup", "--no-internal-beta"], input=stdin)
     assert result.exit_code == 0, result.output
-    # The login ran, the confirming status said signed out, and nothing was saved.
-    assert fake_claude.read_text().splitlines()[-1].startswith("auth status|")
+    assert fake_claude.read_text().splitlines()[-1].startswith("auth login --claudeai|")
     assert "providers" not in _config_yaml(isolated_config)
 
 
@@ -4174,7 +4176,6 @@ def test_sign_in_again_reports_whether_the_login_was_confirmed(
     from omnigent.cli_config import _sign_in_claude_account_again
 
     config_dir = _seed_default_and_work_accounts(isolated_config)
-    (config_dir / "signed-in").unlink()
     monkeypatch.setenv("FAKE_CLAUDE_LOGIN_FAILS", "1")
     assert _sign_in_claude_account_again("claude-work", str(config_dir)) == (
         "✗ Claude login for claude-work not confirmed"
@@ -4220,3 +4221,36 @@ def test_sign_in_again_is_not_offered_for_the_default_login(isolated_config, fak
     assert result.exit_code == 0, result.output
     assert "Remove" in result.output
     assert "Sign in again" not in result.output
+
+
+@pytest.mark.parametrize("status_invalid", [False, True])
+def test_remove_account_requires_definitive_signed_out_status(
+    isolated_config, fake_claude, monkeypatch, status_invalid
+) -> None:
+    from omnigent.cli_config import _remove_claude_account
+
+    config_dir = _seed_default_and_work_accounts(isolated_config)
+    monkeypatch.setenv("FAKE_CLAUDE_LOGOUT_FAILS", "1")
+    if status_invalid:
+        monkeypatch.setenv("FAKE_CLAUDE_STATUS_INVALID", "1")
+    monkeypatch.setattr("omnigent.onboarding.interactive.select", lambda *a, **kw: 0)
+    result = _remove_claude_account("claude-work", str(config_dir))
+    assert "sign-out could not be confirmed" in result
+    assert (config_dir / "signed-in").exists()
+    assert "claude-work" not in _config_yaml(isolated_config)["providers"]
+
+
+@pytest.mark.parametrize("login_fails", [False, True])
+def test_add_retained_account_always_runs_login(
+    isolated_config, fake_claude, monkeypatch, login_fails
+) -> None:
+    config_dir = isolated_config / "claude-accounts" / "work"
+    config_dir.mkdir(parents=True)
+    (config_dir / "signed-in").touch()
+    if login_fails:
+        monkeypatch.setenv("FAKE_CLAUDE_LOGIN_FAILS", "1")
+    stdin = "\n".join([*_ADD_ACCOUNT_KEYS, "work", "q", "q"]) + "\n"
+    result = CliRunner().invoke(cli, ["setup", "--no-internal-beta"], input=stdin)
+    assert result.exit_code == 0, result.output
+    assert fake_claude.read_text().splitlines()[0] == f"auth login --claudeai|{config_dir}"
+    assert ("claude-work" in _config_yaml(isolated_config).get("providers", {})) is not login_fails

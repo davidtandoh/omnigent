@@ -56,12 +56,16 @@ def test_ssh_login_is_refused_only_on_macos(ssh_var: str) -> None:
     assert ssh_login_refusal(platform="darwin", env={ssh_var: ""}) is None
 
 
-def test_find_account_accepts_provider_or_short_name() -> None:
+def test_find_account_resolves_short_names_exactly() -> None:
     config = {"providers": {"claude-work": _WORK, "anthropic": {"kind": "key"}}}
     assert (
         find_account({"providers": {"claude-work": _WORK}}, "work").config_dir == "/accounts/work"
     )
-    assert find_account({"providers": {"claude-work": _WORK}}, "claude-work") is not None
+    assert find_account({"providers": {"claude-work": _WORK}}, "claude-work") is None
+    other = {**_WORK, "config_dir": "/accounts/claude-work"}
+    assert find_account(
+        {"providers": {"claude-work": _WORK, "claude-claude-work": other}}, "claude-work"
+    ).config_dir == "/accounts/claude-work"
     assert find_account({"providers": {"claude-work": _WORK}}, "personal") is None
     with pytest.raises(OmnigentError):
         find_account(config, "work")  # a malformed sibling is still a config error

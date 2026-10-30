@@ -3312,7 +3312,7 @@ def _configure_claude_account_add() -> str | None:
         account_name_error,
         account_provider_name,
         claude_command,
-        sign_in_account,
+        log_in_account,
         ssh_login_refusal,
     )
     from omnigent.onboarding.interactive import console, prompt_text
@@ -3338,7 +3338,7 @@ def _configure_claude_account_add() -> str | None:
     config_dir = account_config_dir(_cli._effective_global_config_path().parent, account_name)
     os.makedirs(config_dir, mode=0o700, exist_ok=True)
     console.print(f"  [dim]Signing in to Claude for {account_name} (its login will open)…[/dim]")
-    if not sign_in_account(command, config_dir):
+    if not log_in_account(command, config_dir):
         return f"✗ Claude login for {account_name} not confirmed — account not added"
     name = account_provider_name(account_name)
     _save_global_config(
@@ -3409,7 +3409,7 @@ def _remove_claude_account(provider: str, config_dir: str) -> str | None:
     if signed_out:
         return f"✓ Signed out of {provider} and removed (folder kept: {config_dir})"
     return (
-        f"✓ Removed {provider} — note: sign-out did not complete, so its login may "
+        f"✓ Removed {provider} — note: sign-out could not be confirmed, so its login may "
         f"remain in {config_dir}"
     )
 

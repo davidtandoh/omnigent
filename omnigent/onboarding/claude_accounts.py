@@ -100,14 +100,6 @@ def account_signed_in(command: str, config_dir: str) -> bool:
     return claude_auth_status(command, env=_account_env(config_dir), cwd=Path(config_dir)) is True
 
 
-def sign_in_account(command: str, config_dir: str) -> bool:
-    """Run ``claude auth login`` for *config_dir* unless it is already signed in.
-
-    :returns: Whether ``claude auth status`` confirms the account afterward.
-    """
-    return account_signed_in(command, config_dir) or log_in_account(command, config_dir)
-
-
 def log_in_account(command: str, config_dir: str) -> bool:
     """Run ``claude auth login`` for *config_dir*, even when it reports signed in.
 
@@ -140,7 +132,9 @@ def sign_out_account(command: str, config_dir: str) -> bool:
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
-    return not account_signed_in(command, config_dir)
+    from omnigent.harnesses.claude_native.account import claude_auth_status
+
+    return claude_auth_status(command, env=_account_env(config_dir), cwd=Path(config_dir)) is False
 
 
 def claude_command() -> str | None:
@@ -151,12 +145,9 @@ def claude_command() -> str | None:
 def find_account(config: dict[str, object], selector: str) -> ProviderEntry | None:
     """Return the Claude subscription named *selector*, or ``None``.
 
-    :param selector: A provider name (``"claude-work"``) or the short account
-        name it was created from (``"work"``).
+    :param selector: The short account name it was created from (``"work"``).
     """
-    providers = load_providers(config)
-    for name in (selector, account_provider_name(selector)):
-        entry = providers.get(name)
-        if entry is not None and entry.kind == SUBSCRIPTION_KIND and entry.cli == "claude":
-            return entry
+    entry = load_providers(config).get(account_provider_name(selector))
+    if entry is not None and entry.kind == SUBSCRIPTION_KIND and entry.cli == "claude":
+        return entry
     return None

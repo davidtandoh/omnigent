@@ -26,9 +26,11 @@ The Claude account check uses the terminal environment builder and shared
 the ambient readiness cache. See the [native launch usage](../../../README.md#2-start-your-first-agent)
 for the account selection contract and probe failure policy.
 
-`omnigent claude --account NAME` is a client-side shorthand for the same map.
+`omnigent claude --account NAME` selects an exact short account name.
 The CLI reads the named `kind: subscription, cli: claude` provider from the
-user config and adds its `config_dir` as `CLAUDE_CONFIG_DIR`. The runner reads
+user config and adds its `config_dir` as `CLAUDE_CONFIG_DIR`. It also enables
+the native-config launch path so Omnigent provider routing cannot override the
+selected subscription. The runner reads
 the explicit value, not its own process environment, when it locates Claude's
 `projects` and `sessions` folders for resume and status.
 
