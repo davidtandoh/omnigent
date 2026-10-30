@@ -378,8 +378,9 @@ inherit accounts under the rules above. Account sessions must remain on
 `claude-native`; agent replacements that change that harness are refused.
 Provider names such as `claude-gateway` do not select session accounts and
 continue to use normal provider routing. A Claude-native agent whose resolved
-provider has an account folder uses that folder for launch preparation and the
-terminal. A different runner or recorded account is refused. Only Claude
+provider has an account folder requires that account to be selected for the
+runner. Start the session with `omnigent claude --account NAME`; an unselected
+or different account is refused. Only Claude
 Code (`claude-native`) sessions can use an extra account. The web UI does not
 expose this account selector yet. An extra account cannot be a default. Setup
 lists each account as **Subscription (claude-work)**. When an account's

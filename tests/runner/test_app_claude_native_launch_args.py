@@ -1818,9 +1818,15 @@ async def test_ambient_config_folder_does_not_bypass_default_gateway(
     assert spec.env["ANTHROPIC_BASE_URL"] == "https://gateway.example/anthropic"
 
 
-@pytest.mark.parametrize("recorded_account", [None, "other"])
-async def test_resolved_provider_account_is_used_throughout_native_launch(
-    bridge_dir: Path, monkeypatch: pytest.MonkeyPatch, recorded_account: str | None
+@pytest.mark.parametrize(
+    ("recorded_account", "runner_account"),
+    [(None, None), (None, "work"), ("work", "work"), ("other", "other"), (None, "other")],
+)
+async def test_resolved_provider_account_requires_runner_selection(
+    bridge_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recorded_account: str | None,
+    runner_account: str | None,
 ) -> None:
     import json
     from unittest.mock import Mock
@@ -1836,14 +1842,15 @@ async def test_resolved_provider_account_is_used_throughout_native_launch(
     selected = str(bridge_dir / "account-folder")
     other = str(bridge_dir / "other-folder")
     providers = {
-        "team-login": {"kind": "subscription", "cli": "claude", "config_dir": selected},
+        "claude-work": {"kind": "subscription", "cli": "claude", "config_dir": selected},
         "claude-other": {"kind": "subscription", "cli": "claude", "config_dir": other},
     }
     overlay = bridge_dir / "saved-inference.json"
     overlay.write_text(json.dumps({"providers": providers}))
     monkeypatch.setenv("OMNIGENT_INFERENCE_CONFIG", str(overlay))
     monkeypatch.setattr("omnigent.config.load_global_config", lambda: {"providers": providers})
-    runner_env = {"CLAUDE_CONFIG_DIR": other} if recorded_account else {}
+    matches = runner_account == "work"
+    runner_env = {"CLAUDE_CONFIG_DIR": selected if matches else other} if runner_account else {}
     monkeypatch.setattr(
         "omnigent.native.launch_environment._installed_native_launch_environment", runner_env
     )
@@ -1880,8 +1887,10 @@ async def test_resolved_provider_account_is_used_throughout_native_launch(
     monkeypatch.setattr(main, "claude_launch_catalog", catalog)
     registry = Mock(spec=SessionResourceRegistry)
     registry.launch_required_terminal.side_effect = RuntimeError("terminal reached")
-    error_type = AccountUnavailableError if recorded_account else RuntimeError
-    with pytest.raises(error_type, match="differs" if recorded_account else "terminal reached"):
+    error_type = RuntimeError if matches else AccountUnavailableError
+    with pytest.raises(
+        error_type, match="terminal reached" if matches else "Start the session with that account"
+    ) as caught:
         await _auto_create_claude_terminal_for_test(
             monkeypatch,
             session_id="provider-account",
@@ -1894,40 +1903,29 @@ async def test_resolved_provider_account_is_used_throughout_native_launch(
                 spec_version=1,
                 executor=ExecutorSpec(
                     type="omnigent",
-                    auth=ProviderAuth(name="team-login"),
+                    auth=ProviderAuth(name="claude-work"),
                     config={"harness": "claude-native"},
                 ),
             ),
         )
     assert native_launch_environment() == runner_env
-    if recorded_account:
+    if not matches:
+        assert "--account work" in str(caught.value)
+        assert selected not in str(caught.value)
+        from omnigent.runner.native.orchestration import _native_terminal_start_error_payload
+
+        shared = _native_terminal_start_error_payload(
+            caught.value, "Claude", session_id="provider-account"
+        )
+        owner = _native_terminal_start_error_payload(
+            caught.value, "Claude", session_id="provider-account", include_account_details=True
+        )
+        assert "--account work" in owner["message"]
+        assert "claude-work" not in str(shared)
+        assert "Claude account unavailable" in str(shared)
         assert stages == []
         registry.launch_required_terminal.assert_not_called()
     else:
         assert stages == ["sign-in", "transcript", "catalog"]
         spec = registry.launch_required_terminal.call_args.kwargs["spec"]
         assert spec.env["CLAUDE_CONFIG_DIR"] == selected
-
-
-async def test_resolved_launch_environments_are_task_local(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from omnigent.native.launch_environment import (
-        native_launch_environment,
-        native_launch_environment_scope,
-    )
-
-    monkeypatch.setattr(
-        "omnigent.native.launch_environment._installed_native_launch_environment", {}
-    )
-
-    async def launch(folder):
-        with native_launch_environment_scope({"CLAUDE_CONFIG_DIR": folder}):
-            await asyncio.sleep(0)
-            assert native_launch_environment() == {"CLAUDE_CONFIG_DIR": folder}
-            assert await asyncio.to_thread(native_launch_environment) == {
-                "CLAUDE_CONFIG_DIR": folder
-            }
-        assert native_launch_environment() == {}
-
-    await asyncio.gather(launch("/first"), launch("/second"))

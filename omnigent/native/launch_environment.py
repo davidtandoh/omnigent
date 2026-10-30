@@ -6,9 +6,7 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Iterable, Iterator, Mapping
-from contextlib import contextmanager
-from contextvars import ContextVar
+from collections.abc import Iterable, Mapping
 
 NATIVE_LAUNCH_ENV_VAR = "OMNIGENT_NATIVE_LAUNCH_ENV"
 
@@ -100,9 +98,6 @@ def native_launch_environment_digest(values: Mapping[str, object] | None) -> str
 
 
 _installed_native_launch_environment: dict[str, str] = {}
-_scoped_native_launch_environment: ContextVar[dict[str, str] | None] = ContextVar(
-    "native_launch_environment", default=None
-)
 
 
 def install_native_launch_environment_from_process() -> None:
@@ -127,15 +122,4 @@ def install_native_launch_environment_from_process() -> None:
 
 def native_launch_environment() -> dict[str, str]:
     """Return a copy of the explicit environment installed for this runner."""
-    scoped = _scoped_native_launch_environment.get()
-    return dict(_installed_native_launch_environment if scoped is None else scoped)
-
-
-@contextmanager
-def native_launch_environment_scope(values: Mapping[str, object]) -> Iterator[None]:
-    """Use a resolved environment for this launch and its child tasks only."""
-    token = _scoped_native_launch_environment.set(validate_native_launch_environment(values))
-    try:
-        yield
-    finally:
-        _scoped_native_launch_environment.reset(token)
+    return dict(_installed_native_launch_environment)
