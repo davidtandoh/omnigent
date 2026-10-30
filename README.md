@@ -350,7 +350,9 @@ providers:
 Start a session on that account with `omnigent claude --account work`, which
 passes the account's `CLAUDE_CONFIG_DIR` to the launch check above and uses
 Claude's own subscription routing, bypassing Omnigent gateway, key, and Bedrock
-providers for this launch. `NAME` is always the exact short account name;
+providers for this launch. If managed Claude settings configure a gateway or
+`apiKeyHelper`, the launch is refused because those settings override the
+selected account. `NAME` is always the exact short account name;
 provider names are not aliases. Omit `--account` to use the default login
 when subscription routing is configured. No explicit default-login alias is
 supported. Adding an account always runs `claude auth login --claudeai`, even

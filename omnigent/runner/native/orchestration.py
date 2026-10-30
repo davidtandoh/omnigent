@@ -9384,6 +9384,16 @@ async def _auto_create_claude_terminal(
                 extra={"session_id": session_id},
             )
             _launch_config_resolution_failed = True
+    else:
+        from omnigent.harnesses.claude_native.main import managed_claude_gateway_signal
+
+        managed_base_url, managed_credential = managed_claude_gateway_signal()
+        if managed_base_url or managed_credential:
+            raise RuntimeError(
+                "native-claude: managed settings override the selected account. "
+                "A subscription account cannot be selected while managed Claude settings "
+                "configure a gateway or apiKeyHelper."
+            )
     # A transient resolver failure must not be cached as "no provider configured".
     # A routed session's turn-1 ``/model`` can only reach ids this launch env
     # spells, so point the family aliases at the router's frozen arms before the

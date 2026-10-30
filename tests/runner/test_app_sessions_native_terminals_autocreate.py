@@ -1898,6 +1898,10 @@ async def test_native_launch_arms_resolve_agent_spec_for_terminal(
     [
         None,
         "signed-in",
+        "managed-url",
+        "managed-helper",
+        "managed-gateway",
+        "managed-neutral",
         "signed-out",
         "mismatch",
         "wrapped-signed-in",
@@ -1986,6 +1990,20 @@ async def test_auto_create_claude_terminal_enforces_requested_account(
     command.chmod(0o755)
     config_home = tmp_path / "config"
     config_home.mkdir()
+    managed_conflict = account in {"managed-url", "managed-helper", "managed-gateway"}
+    if account and account.startswith("managed-"):
+        managed_settings = config_home / "managed-settings.json"
+        settings = {
+            "managed-url": {"env": {"ANTHROPIC_BASE_URL": "https://managed.invalid"}},
+            "managed-helper": {"apiKeyHelper": "printf managed-token"},
+            "managed-gateway": {"env": {"CLAUDE_CODE_USE_GATEWAY": "1"}},
+            "managed-neutral": {},
+        }
+        managed_settings.write_text(json.dumps(settings[account]))
+        monkeypatch.setattr(
+            "omnigent.harnesses.claude_native.main._CLAUDE_CODE_MANAGED_SETTINGS_PATHS",
+            (managed_settings,),
+        )
     if account in {"mismatch", "wrapped-signed-in"}:
         wrapper_account = str(tmp_path / "different") if account == "mismatch" else selected
         launch_config = (
@@ -2027,7 +2045,14 @@ async def test_auto_create_claude_terminal_enforces_requested_account(
             server_client=client,
             resolve_launch_config=resolver,
         )
-        if account in {"signed-out", "mismatch"} or (account and "conflicting" in account):
+        if managed_conflict:
+            with pytest.raises(
+                RuntimeError, match="managed settings override the selected account"
+            ):
+                await launch
+            assert captured == {}
+            assert not (tmp_path / "selected-account").exists()
+        elif account in {"signed-out", "mismatch"} or (account and "conflicting" in account):
             with pytest.raises(RuntimeError, match=r"not signed in|different CLAUDE_CONFIG_DIR"):
                 await launch
             assert captured == {}
@@ -2050,6 +2075,7 @@ async def test_auto_create_claude_terminal_enforces_requested_account(
         resolver.assert_awaited_once()
     if account in {
         "signed-in",
+        "managed-neutral",
         "signed-out",
         "wrapped-signed-in",
         "inconclusive",
