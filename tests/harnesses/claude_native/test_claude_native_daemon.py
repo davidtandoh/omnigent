@@ -10,6 +10,7 @@ designs/NATIVE_RUNNER_SERVER_LAUNCH.md.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -586,3 +587,74 @@ def test_run_with_remote_server_unreachable_server_raises_clean_error(
     assert "Could not reach the omnigent server at https://unreachable.example" in str(
         exc_info.value
     )
+
+
+@pytest.mark.parametrize("background", [False, True])
+def test_remote_resume_relocates_the_selected_account_transcript(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, background: bool
+) -> None:
+    from omnigent.harnesses.claude_native.state import read_launch_state, write_launch_state
+
+    spec_path = tmp_path / "claude.yaml"
+    spec_path.write_text("name: claude-native-ui\nprompt: hi\n")
+    current = tmp_path / "current"
+    current.mkdir()
+    old = tmp_path / "removed"
+    account_dir = tmp_path / "work-account"
+    projects = account_dir / "projects"
+    source = projects / "old-project" / "claude-session-abc.jsonl"
+    source.parent.mkdir(parents=True)
+    original = json.dumps({"type": "user", "cwd": str(old), "sessionId": "claude-session-abc"})
+    source.write_text(original + "\n")
+    if background:
+        sessions = account_dir / "sessions"
+        sessions.mkdir()
+        (sessions / f"{os.getppid()}.json").write_text(
+            json.dumps({"sessionId": "claude-session-abc", "kind": "bg"})
+        )
+    monkeypatch.chdir(current)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "other-account"))
+    write_launch_state("conv_existing", str(old))
+    align = claude_native._align_working_directory_with_session
+    prepared = claude_native.PreparedClaudeTerminal(
+        session_id="conv_existing",
+        terminal_id=claude_native.claude_terminal_resource_id(),
+        bridge_dir=tmp_path / "bridge",
+        reattached=False,
+    )
+    captured: dict[str, Any] = {}
+    _install_daemon_seam_mocks(
+        monkeypatch,
+        prepared=prepared,
+        attach_outcome=claude_native._AttachOutcome.EXITED,
+        captured=captured,
+        ensured=[],
+    )
+    monkeypatch.setattr(claude_native, "_align_working_directory_with_session", align)
+    monkeypatch.setattr(
+        claude_native, "_fetch_external_session_id_for_redirect", lambda **kw: "claude-session-abc"
+    )
+    monkeypatch.setattr(claude_native, "_prompt_resume_workspace_action", lambda **kw: "move")
+    claude_native._run_with_remote_server(
+        "https://example.com",
+        spec_path,
+        session_id="conv_existing",
+        resume_picker=False,
+        claude_args=(),
+        launch_env={"CLAUDE_CONFIG_DIR": str(account_dir)},
+    )
+    assert captured["launch_env"] == {"CLAUDE_CONFIG_DIR": str(account_dir)}
+    assert captured["workspace"] == str(current.resolve())
+    assert read_launch_state("conv_existing").working_directory == str(current.resolve())
+    target = (
+        projects
+        / claude_native._sanitize_claude_project_name(str(current.resolve()))
+        / source.name
+    )
+    if background:
+        assert source.read_text() == original + "\n"
+        assert not target.exists()
+    else:
+        assert not source.exists()
+        assert json.loads(target.read_text())["cwd"] == str(current.resolve())
+    assert not (tmp_path / "other-account").exists()

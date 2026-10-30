@@ -81,7 +81,6 @@ def _claude_account_launch_env(
     """Add the named Claude account's ``CLAUDE_CONFIG_DIR`` to *launch_env*.
 
     The runner then checks that account before launch, as for ``--env``.
-    The default login (no ``config_dir``) leaves *launch_env* unchanged.
     """
     from omnigent.cli_invocation import cli_invocation
     from omnigent.errors import OmnigentError
@@ -98,8 +97,7 @@ def _claude_account_launch_env(
             f"No Claude account named {account!r}. "
             f"Add or list accounts with `{cli_invocation()} setup`."
         )
-    if entry.config_dir is None:
-        return launch_env
+    assert entry.config_dir is not None
     return {**launch_env, "CLAUDE_CONFIG_DIR": entry.config_dir}
 
 

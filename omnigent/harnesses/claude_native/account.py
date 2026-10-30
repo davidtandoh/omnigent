@@ -14,17 +14,19 @@ from omnigent.native.launch_environment import native_launch_environment
 _logger = logging.getLogger(__name__)
 
 
-def selected_claude_config_dir() -> Path | None:
+def selected_claude_config_dir(
+    launch_env: Mapping[str, str] | None = None,
+) -> Path | None:
     """Return the ``CLAUDE_CONFIG_DIR`` this process's Claude child uses, if any.
 
     A runner's explicit launch value reaches the child but not this process's
     env, so it wins; an empty value selects Claude's default ``~/.claude``.
 
+    :param launch_env: Client launch values, or ``None`` for the installed runner map.
     :returns: e.g. ``Path("/accounts/work")``, or ``None`` for the default.
     """
-    configured = native_launch_environment().get(
-        "CLAUDE_CONFIG_DIR", os.environ.get("CLAUDE_CONFIG_DIR")
-    )
+    launch_env = native_launch_environment() if launch_env is None else launch_env
+    configured = launch_env.get("CLAUDE_CONFIG_DIR", os.environ.get("CLAUDE_CONFIG_DIR"))
     return Path(configured).expanduser() if configured else None
 
 

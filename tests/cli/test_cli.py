@@ -583,12 +583,14 @@ def test_native_wrapper_env_rejects_duplicates_before_backend_start(
             ["--account", "claude-work", "--env", "FM_TASK_ID=7"],
             {"FM_TASK_ID": "7", "CLAUDE_CONFIG_DIR": "/accounts/claude-work"},
         ),
-
     ],
 )
 @pytest.mark.parametrize("default_kind", ["subscription", "key", "gateway", "bedrock"])
 def test_claude_account_option_selects_the_account_config_dir(
-    args: list[str], expected_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, default_kind: str
+    args: list[str],
+    expected_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    default_kind: str,
 ) -> None:
     """``--account`` resolves a user-config Claude account into the launch env."""
     providers = {
@@ -634,6 +636,7 @@ def test_claude_account_option_selects_the_account_config_dir(
     ("args", "message"),
     [
         (["--account", "missing"], "No Claude account named 'missing'"),
+        (["--account", "subscription"], "No Claude account named 'subscription'"),
         (["--account", "claude-work"], "No Claude account named 'claude-work'"),
         (
             ["--account", "work", "--env", "CLAUDE_CONFIG_DIR=/elsewhere"],
@@ -646,7 +649,8 @@ def test_claude_account_option_rejects_before_backend_start(
 ) -> None:
     """A missing or conflicting account fails before any daemon side effect."""
     providers = {
-        "claude-work": {"kind": "subscription", "cli": "claude", "config_dir": "/accounts/work"}
+        "claude-subscription": {"kind": "subscription", "cli": "claude", "default": True},
+        "claude-work": {"kind": "subscription", "cli": "claude", "config_dir": "/accounts/work"},
     }
     monkeypatch.setattr("omnigent.cli._load_global_config", lambda: {"providers": providers})
     monkeypatch.setattr("omnigent.cli._load_effective_config", dict)

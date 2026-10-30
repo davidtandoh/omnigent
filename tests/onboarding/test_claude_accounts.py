@@ -63,9 +63,12 @@ def test_find_account_resolves_short_names_exactly() -> None:
     )
     assert find_account({"providers": {"claude-work": _WORK}}, "claude-work") is None
     other = {**_WORK, "config_dir": "/accounts/claude-work"}
-    assert find_account(
-        {"providers": {"claude-work": _WORK, "claude-claude-work": other}}, "claude-work"
-    ).config_dir == "/accounts/claude-work"
+    assert (
+        find_account(
+            {"providers": {"claude-work": _WORK, "claude-claude-work": other}}, "claude-work"
+        ).config_dir
+        == "/accounts/claude-work"
+    )
     assert find_account({"providers": {"claude-work": _WORK}}, "personal") is None
     with pytest.raises(OmnigentError):
         find_account(config, "work")  # a malformed sibling is still a config error
@@ -108,3 +111,21 @@ def test_extra_account_does_not_hide_the_detected_default_login() -> None:
     providers = load_providers(merged)
     assert providers["claude"].config_dir is None
     assert ANTHROPIC_FAMILY in providers["claude"].default_families
+
+
+def test_default_login_is_not_an_extra_account() -> None:
+    assert (
+        find_account(
+            {
+                "providers": {
+                    "claude-subscription": {
+                        "kind": "subscription",
+                        "cli": "claude",
+                        "default": True,
+                    }
+                }
+            },
+            "subscription",
+        )
+        is None
+    )

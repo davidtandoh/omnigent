@@ -28,10 +28,11 @@ for the account selection contract and probe failure policy.
 
 `omnigent claude --account NAME` selects an exact short account name.
 The CLI reads the named `kind: subscription, cli: claude` provider from the
-user config and adds its `config_dir` as `CLAUDE_CONFIG_DIR`. It also enables
-the native-config launch path so Omnigent provider routing cannot override the
-selected subscription. The runner reads
-the explicit value, not its own process environment, when it locates Claude's
+user config and adds its `config_dir` as `CLAUDE_CONFIG_DIR`. Entries without
+`config_dir` are not extra accounts. The daemon skips provider resolution and
+credential injection when the explicit launch map selects `CLAUDE_CONFIG_DIR`.
+Client-side resume lookup and relocation use the same explicit map.
+The runner reads the explicit value, not its own process environment, when it locates Claude's
 `projects` and `sessions` folders for resume and status.
 
 The map is not stored in session metadata or the database. A request with

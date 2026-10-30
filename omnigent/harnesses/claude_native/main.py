@@ -1778,6 +1778,7 @@ def _align_working_directory_with_session(
     *,
     base_url: str | None = None,
     headers: dict[str, str] | None = None,
+    launch_env: Mapping[str, str] | None = None,
 ) -> None:
     """
     Resolve cwd mismatch before resuming a Claude-native session.
@@ -1846,7 +1847,7 @@ def _align_working_directory_with_session(
         headers=headers or {},
         session_id=session_id,
     )
-    redirect_available = _redirect_available(external_session_id)
+    redirect_available = _redirect_available(external_session_id, launch_env=launch_env)
     if not recorded_path.is_dir() and not redirect_available:
         raise click.ClickException(
             f"Session {session_id} was created in {recorded_path}, but that "
@@ -1871,6 +1872,7 @@ def _align_working_directory_with_session(
             session_id=session_id,
             external_session_id=external_session_id,
             current=current,
+            launch_env=launch_env,
         )
         return
     raise click.ClickException("Resume cancelled.")
@@ -2399,7 +2401,9 @@ def _fetch_external_session_id_for_redirect(
     return external_session_id
 
 
-def _redirect_available(external_session_id: str | None) -> bool:
+def _redirect_available(
+    external_session_id: str | None, *, launch_env: Mapping[str, str] | None = None
+) -> bool:
     """
     Return whether a Claude transcript can be redirected.
 
@@ -2408,7 +2412,7 @@ def _redirect_available(external_session_id: str | None) -> bool:
     """
     if external_session_id is None:
         return False
-    return _find_claude_transcript(external_session_id) is not None
+    return _find_claude_transcript(external_session_id, launch_env=launch_env) is not None
 
 
 def _redirect_claude_transcript_to_current_project(
@@ -2416,6 +2420,7 @@ def _redirect_claude_transcript_to_current_project(
     session_id: str,
     external_session_id: str,
     current: Path,
+    launch_env: Mapping[str, str] | None = None,
 ) -> Path:
     """
     Move a Claude transcript into the current cwd's Claude project.
@@ -2434,18 +2439,23 @@ def _redirect_claude_transcript_to_current_project(
     :raises click.ClickException: If the source transcript is missing
         or unsafe.
     """
-    target_dir = _claude_project_dir_for_cwd(current)
+    target_dir = _claude_project_dir_for_cwd(current, launch_env=launch_env)
     target = target_dir / f"{external_session_id}.jsonl"
-    source = _find_claude_transcript(external_session_id, exclude=target)
+    source = _find_claude_transcript(external_session_id, exclude=target, launch_env=launch_env)
     if source is None and target.is_file():
         redirect_launch_state(session_id, str(current))
         return target
     if source is None:
         raise click.ClickException(
             f"Claude transcript {external_session_id!r} was not found under "
-            f"{_claude_projects_dir()}."
+            f"{_claude_projects_dir(launch_env=launch_env)}."
         )
-    if find_background_holder(external_session_id) is not None:
+    if (
+        find_background_holder(
+            external_session_id, config_dir=selected_claude_config_dir(launch_env)
+        )
+        is not None
+    ):
         # Cold resume will rebuild a copy in the requested workspace.
         redirect_launch_state(session_id, str(current))
         click.echo("Keeping the background job's transcript; resuming a copy here.", err=True)
@@ -2692,7 +2702,10 @@ def _clone_claude_transcript(
 
 
 def _find_claude_transcript(
-    external_session_id: str, *, exclude: Path | None = None
+    external_session_id: str,
+    *,
+    exclude: Path | None = None,
+    launch_env: Mapping[str, str] | None = None,
 ) -> Path | None:
     """
     Find a local Claude transcript by session id.
@@ -2705,7 +2718,7 @@ def _find_claude_transcript(
     """
     if not _CLAUDE_SESSION_ID_RE.fullmatch(external_session_id):
         return None
-    projects_dir = _claude_projects_dir()
+    projects_dir = _claude_projects_dir(launch_env=launch_env)
     if not projects_dir.is_dir():
         return None
     matches: list[Path] = []
@@ -2723,7 +2736,7 @@ def _find_claude_transcript(
     return matches[0]
 
 
-def _claude_projects_dir() -> Path:
+def _claude_projects_dir(*, launch_env: Mapping[str, str] | None = None) -> Path:
     """
     Return the directory Claude Code keeps its project transcripts in.
 
@@ -2733,11 +2746,11 @@ def _claude_projects_dir() -> Path:
 
     :returns: The projects directory (not guaranteed to exist).
     """
-    configured = selected_claude_config_dir()
+    configured = selected_claude_config_dir(launch_env)
     return configured / "projects" if configured is not None else _CLAUDE_PROJECTS_DIR
 
 
-def _claude_project_dir_for_cwd(cwd: Path) -> Path:
+def _claude_project_dir_for_cwd(cwd: Path, *, launch_env: Mapping[str, str] | None = None) -> Path:
     """
     Return Claude's project transcript directory for *cwd*.
 
@@ -2748,7 +2761,7 @@ def _claude_project_dir_for_cwd(cwd: Path) -> Path:
     :param cwd: Absolute cwd, e.g. ``Path("/home/me/repo")``.
     :returns: Claude project transcript directory.
     """
-    return _claude_projects_dir() / _sanitize_claude_project_name(str(cwd))
+    return _claude_projects_dir(launch_env=launch_env) / _sanitize_claude_project_name(str(cwd))
 
 
 def _sanitize_claude_project_name(path: str) -> str:
@@ -4952,6 +4965,7 @@ def _run_with_remote_server(
                     resolved_session_id,
                     base_url=base_url,
                     headers=headers,
+                    launch_env=launch_env,
                 )
                 _mark_startup_step(
                     startup_profiler,

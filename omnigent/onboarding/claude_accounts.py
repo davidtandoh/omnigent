@@ -148,6 +148,11 @@ def find_account(config: dict[str, object], selector: str) -> ProviderEntry | No
     :param selector: The short account name it was created from (``"work"``).
     """
     entry = load_providers(config).get(account_provider_name(selector))
-    if entry is not None and entry.kind == SUBSCRIPTION_KIND and entry.cli == "claude":
+    if (
+        entry is not None
+        and entry.kind == SUBSCRIPTION_KIND
+        and entry.cli == "claude"
+        and entry.config_dir is not None
+    ):
         return entry
     return None

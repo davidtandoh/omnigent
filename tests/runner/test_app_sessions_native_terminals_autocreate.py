@@ -1918,6 +1918,22 @@ async def test_auto_create_claude_terminal_enforces_requested_account(
 ) -> None:
     """Probe the selected account before creating a terminal or seeding its config."""
     import sys
+    from unittest.mock import AsyncMock
+
+    from omnigent.harnesses.claude_native.main import ClaudeNativeUcodeConfig
+
+    resolver = AsyncMock(
+        return_value=ClaudeNativeUcodeConfig(
+            env={
+                "ANTHROPIC_BASE_URL": "https://gateway.invalid",
+                "ANTHROPIC_AUTH_TOKEN": "other-key",
+            },
+            api_key_helper="printf other-key",
+            model="other-provider-model",
+        )
+        if account
+        else None
+    )
 
     monkeypatch.setattr(claude_native_bridge, "_TRUSTED_PARENT", tmp_path)
     monkeypatch.setattr(claude_native_bridge, "_BRIDGE_ROOT", tmp_path / "root")
@@ -1985,7 +2001,11 @@ async def test_auto_create_claude_terminal_enforces_requested_account(
         transport=httpx.MockTransport(lambda req: httpx.Response(200, json={"labels": {}})),
     ) as client:
         launch = _auto_create_claude_terminal(
-            "a" * 32, _RecordingClaudeRegistry(captured), lambda *_: None, server_client=client
+            "a" * 32,
+            _RecordingClaudeRegistry(captured),
+            lambda *_: None,
+            server_client=client,
+            resolve_launch_config=resolver,
         )
         if account in {"signed-out", "mismatch"} or (account and "conflicting" in account):
             with pytest.raises(RuntimeError, match=r"not signed in|different CLAUDE_CONFIG_DIR"):
@@ -2000,6 +2020,12 @@ async def test_auto_create_claude_terminal_enforces_requested_account(
             expected_account = selected if account else str(tmp_path / "daemon-account")
             assert env["CLAUDE_CONFIG_DIR"] == expected_account
             assert env["USER"] == env["LOGNAME"] == "alice"
+            assert "ANTHROPIC_BASE_URL" not in captured["spec"].env
+            assert "ANTHROPIC_AUTH_TOKEN" not in captured["spec"].env
+    if account:
+        resolver.assert_not_awaited()
+    else:
+        resolver.assert_awaited_once()
     if account in {
         "signed-in",
         "signed-out",
