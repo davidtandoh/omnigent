@@ -664,6 +664,7 @@ async def test_auto_create_repl_terminal_launches_attach_and_stamps_label(
     workspace = tmp_path / "workspace"
     monkeypatch.setenv("OMNIGENT_RUNNER_WORKSPACE", str(workspace))
     monkeypatch.setenv("RUNNER_SERVER_URL", "http://ap.example")
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path / "service-data"))
 
     launched_specs: list[Any] = []
 
@@ -755,6 +756,9 @@ async def test_auto_create_repl_terminal_launches_attach_and_stamps_label(
     # client attaches — never-opened terminals stay an idle tmux pane,
     # and the session is fully live by first attach.
     assert launched.tmux_start_on_attach is True
+    # The pane drops inherited service state, so the REPL reads its auth
+    # store through this explicit value.
+    assert launched.env["OMNIGENT_DATA_DIR"] == str(tmp_path / "service-data")
     # cwd pins to the runner workspace (same convention as the
     # claude-native terminal); a wrong cwd drops the REPL into $HOME.
     assert launched.os_env.cwd == str(workspace)

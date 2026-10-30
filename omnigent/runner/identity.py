@@ -13,6 +13,8 @@ import uuid
 from collections.abc import Mapping
 from pathlib import Path
 
+from omnigent.process_logging import DATA_DIR_ENV_VAR, PROCESS_LOG_FILE_ENV_VAR
+
 RUNNER_ID_ENV_VAR = "OMNIGENT_RUNNER_ID"
 ORCHESTRATION_SOURCE_HEADER = "X-Omnigent-Orchestration-Source"
 RUNNER_PARENT_PID_ENV_VAR = "OMNIGENT_RUNNER_PARENT_PID"
@@ -95,6 +97,22 @@ RUNNER_AUTH_SECRET_ENV_VARS: frozenset[str] = frozenset(
     }
 )
 
+# Service state locations and runner internals. A native harness must not
+# inherit them: its shell and the tests it runs would read or write the
+# service's own config and data. Stripped from the inherited pane environment
+# via :func:`strip_runner_service_env`.
+RUNNER_SERVICE_ENV_VARS: frozenset[str] = frozenset(
+    {"OMNIGENT_CONFIG_HOME", DATA_DIR_ENV_VAR, PROCESS_LOG_FILE_ENV_VAR}
+)
+RUNNER_SERVICE_ENV_PREFIX = "OMNIGENT_RUNNER_"
+# The subset that Omnigent helpers inside a harness (MCP bridge, hooks) still
+# need, so the helper resolves the same config, data, and replica as its runner.
+RUNNER_HELPER_ENV_VARS: tuple[str, ...] = (
+    "OMNIGENT_CONFIG_HOME",
+    DATA_DIR_ENV_VAR,
+    RUNNER_SLICE_KEY_ENV_VAR,
+)
+
 
 def touch_connect_marker(env: Mapping[str, str] | None = None) -> None:
     """Mark a host-launched tunnel connect, if configured.
@@ -169,6 +187,34 @@ def strip_runner_auth_secrets(env: Mapping[str, str]) -> dict[str, str]:
         preserved unchanged.
     """
     return {key: value for key, value in env.items() if key not in RUNNER_AUTH_SECRET_ENV_VARS}
+
+
+def strip_runner_service_env(env: Mapping[str, str]) -> dict[str, str]:
+    """Return a copy of *env* without the service state and runner internals.
+
+    :param env: Source environment, e.g. ``os.environ``. Not mutated.
+    :returns: A new dict without :data:`RUNNER_SERVICE_ENV_VARS` or any
+        ``OMNIGENT_RUNNER_*`` name.
+    """
+    return {
+        key: value
+        for key, value in env.items()
+        if key not in RUNNER_SERVICE_ENV_VARS and not key.startswith(RUNNER_SERVICE_ENV_PREFIX)
+    }
+
+
+def runner_helper_environment(env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Return the runner values an Omnigent helper inside a harness needs.
+
+    Generated harness configs pass these explicitly to the MCP bridge and
+    hooks, because the harness itself no longer inherits them.
+
+    :param env: Source environment. ``None`` reads ``os.environ``.
+    :returns: The set :data:`RUNNER_HELPER_ENV_VARS` entries, e.g.
+        ``{"OMNIGENT_DATA_DIR": "/srv/omnigent/data"}``.
+    """
+    source = os.environ if env is None else env
+    return {name: source[name] for name in RUNNER_HELPER_ENV_VARS if source.get(name)}
 
 
 def get_stable_runner_id() -> str:

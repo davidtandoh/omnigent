@@ -3626,11 +3626,11 @@ def test_augment_claude_args_injects_mcp_and_hooks(tmp_path: Path) -> None:
     assert "--disallowedTools" not in args
 
 
-def test_generated_claude_subprocesses_pin_runner_tmpdir(
+def test_generated_claude_subprocesses_pin_runner_helper_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """MCP and Python hooks use the temp root that created the bridge."""
+    """MCP and Python hooks use the temp root, config, and data of their runner."""
     runner_tmpdir = tmp_path / "runner-tmp"
     bridge_dir = (
         runner_tmpdir
@@ -3646,6 +3646,15 @@ def test_generated_claude_subprocesses_pin_runner_tmpdir(
         runner_tmpdir,
     )
     monkeypatch.setenv("TMPDIR", str(inherited_tmpdir))
+    helper_env = {
+        "OMNIGENT_CONFIG_HOME": str(tmp_path / "service config"),
+        "OMNIGENT_DATA_DIR": str(tmp_path / "service-data"),
+        "OMNIGENT_RUNNER_SLICE_KEY": "host-1",
+    }
+    for name, value in helper_env.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("OMNIGENT_PROCESS_LOG_FILE", str(tmp_path / "runner.log"))
+    monkeypatch.setenv("OMNIGENT_RUNNER_WORKSPACE", str(tmp_path))
 
     args = augment_claude_args(
         (),
@@ -3659,7 +3668,7 @@ def test_generated_claude_subprocesses_pin_runner_tmpdir(
     settings = _load_invocation_settings(args)
 
     server_env = mcp_config["mcpServers"]["omnigent"]["env"]
-    assert server_env["TMPDIR"] == str(runner_tmpdir)
+    assert server_env == {"PYTHONUNBUFFERED": "1", "TMPDIR": str(runner_tmpdir), **helper_env}
     python_commands = [
         hook["command"]
         for entries in settings["hooks"].values()
@@ -3668,8 +3677,16 @@ def test_generated_claude_subprocesses_pin_runner_tmpdir(
         if "/venv/bin/python" in hook["command"]
     ]
     assert len(python_commands) == 19
-    expected_tmpdir = f"env TMPDIR={shlex.quote(str(runner_tmpdir))}"
-    assert all(expected_tmpdir in command for command in python_commands)
+    expected_prefix = shlex.join(
+        [
+            "env",
+            f"TMPDIR={runner_tmpdir}",
+            *(f"{name}={value}" for name, value in helper_env.items()),
+        ]
+    )
+    assert all(expected_prefix in command for command in python_commands)
+    assert not any("OMNIGENT_PROCESS_LOG_FILE" in command for command in python_commands)
+    assert not any("OMNIGENT_RUNNER_WORKSPACE" in command for command in python_commands)
 
 
 def test_augment_claude_args_observes_worktree_moves(tmp_path: Path) -> None:

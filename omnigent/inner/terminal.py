@@ -35,7 +35,7 @@ from omnigent.debug_logging import debug_event
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.native import owner_claim
 from omnigent.process_logging import redact_log_text
-from omnigent.runner.identity import strip_runner_auth_secrets
+from omnigent.runner.identity import strip_runner_auth_secrets, strip_runner_service_env
 from omnigent.util.tmux_compat import MIN_TMUX_VERSION, MIN_TMUX_VERSION_HINT, tmux_version
 
 if TYPE_CHECKING:
@@ -759,7 +759,9 @@ def terminal_pane_environment(
     # commands outside the sandbox. The host-side control plane
     # addresses the socket via the instance's ``socket_path`` and never
     # needs the env var; any inherited value is stripped below too.
-    result: dict[str, str] = os.environ.copy() if inherit_env else {}
+    # The pane runs agent shells and their tests: keep the service's own config,
+    # data, and runner internals out of it. Helpers get them explicitly.
+    result: dict[str, str] = strip_runner_service_env(os.environ) if inherit_env else {}
     result.pop("OMNIGENT_TMUX_SOCK", None)
     # Apply per-terminal env overrides (takes precedence over inherited env).
     result.update(env)

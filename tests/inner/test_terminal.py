@@ -29,6 +29,7 @@ from omnigent.inner.terminal import (
     _has_utf8_locale,
     _is_utf8_locale_value,
     create_terminal_instance,
+    terminal_pane_environment,
 )
 from omnigent.inner.terminal_lifecycle import (
     TERMINAL_INSTANCE_ID_ENV,
@@ -3027,6 +3028,35 @@ async def test_launch_strips_runner_binding_token_from_tmux_child(
     # pane — the unsandboxed tmux server's run-shell would otherwise be
     # one ``tmux -S <sock>`` away for the agent payload in the pane.
     assert "OMNIGENT_TMUX_SOCK" not in spawned_env
+
+
+def test_pane_environment_drops_inherited_service_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A native harness pane cannot reach the service's config or data.
+
+    Tests run from the pane would otherwise write into the live service
+    config. An explicit per-terminal value still applies.
+    """
+    service_env = {
+        "OMNIGENT_CONFIG_HOME": "/srv/omnigent/config",
+        "OMNIGENT_DATA_DIR": "/srv/omnigent/data",
+        "OMNIGENT_PROCESS_LOG_FILE": "/srv/omnigent/data/logs/runner.log",
+        "OMNIGENT_RUNNER_WORKSPACE": "/work",
+        "OMNIGENT_RUNNER_SLICE_KEY": "host-1",
+    }
+    for name, value in {**service_env, "OMNIGENT_BENIGN_SENTINEL": "keep-me"}.items():
+        monkeypatch.setenv(name, value)
+
+    pane_env = terminal_pane_environment(inherit_env=True, env={}, env_unset=[])
+    explicit_env = terminal_pane_environment(
+        inherit_env=True, env={"OMNIGENT_DATA_DIR": "/explicit/data"}, env_unset=[]
+    )
+
+    assert service_env.keys().isdisjoint(pane_env)
+    assert pane_env["OMNIGENT_BENIGN_SENTINEL"] == "keep-me"
+    assert explicit_env["OMNIGENT_DATA_DIR"] == "/explicit/data"
+    assert "OMNIGENT_CONFIG_HOME" not in explicit_env
 
 
 @pytest.mark.parametrize("inherit_env", [False, True])

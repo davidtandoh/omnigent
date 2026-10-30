@@ -337,6 +337,14 @@ values cross the configured Omnigent server and host-daemon control channel.
 Use a trusted server and host. Do not put secrets on a command line because
 shell history and process inspection can expose command-line values.
 
+A native terminal does not inherit the Omnigent service's own
+`OMNIGENT_CONFIG_HOME`, `OMNIGENT_DATA_DIR`, `OMNIGENT_PROCESS_LOG_FILE`, or
+`OMNIGENT_RUNNER_*` variables. Tests and tools that run in the agent's shell
+therefore cannot read or write the service's configuration and data. Omnigent
+passes the configuration and data directories explicitly to the Claude MCP
+bridge, the Claude hooks, and the session's `omnigent attach` terminal. To give
+the agent one of these variables, pass it with `--env`.
+
 `omnigent agy` requires agy 1.1.13 or newer. When `GEMINI_API_KEY` is set,
 direct Gemini API authentication takes precedence over agy's saved OAuth login.
 
