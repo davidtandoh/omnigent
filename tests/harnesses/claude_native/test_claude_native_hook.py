@@ -317,6 +317,7 @@ def test_clear_session_start_hook_rotates_before_printing_conversation_url(
                     "id": "conv_old",
                     "agent_id": "ag_claude",
                     "account": "work",
+                    "harness_override": "claude-native",
                     "runner_id": "runner_one",
                     "labels": {"omnigent.claude_native.bridge_id": "bridge_shared"},
                 },
@@ -399,6 +400,7 @@ def test_clear_session_start_hook_rotates_before_printing_conversation_url(
             {
                 "agent_id": "ag_claude",
                 "account": "work",
+                "harness_override": "claude-native",
                 "labels": {"omnigent.claude_native.bridge_id": "bridge_shared"},
             },
         ),

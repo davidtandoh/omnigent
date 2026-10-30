@@ -70,6 +70,7 @@ async def test_clear_hook_rotates_active_session_without_reprocessing(
                     "id": "conv_old",
                     "agent_id": "ag_claude",
                     "account": "work",
+                    "harness_override": "claude-native",
                     "runner_id": "runner_one",
                     "labels": {
                         "omnigent.ui": "terminal",
@@ -81,6 +82,7 @@ async def test_clear_hook_rotates_active_session_without_reprocessing(
             assert body == {
                 "agent_id": "ag_claude",
                 "account": "work",
+                "harness_override": "claude-native",
                 "labels": {
                     "omnigent.ui": "terminal",
                     BRIDGE_ID_LABEL_KEY: "bridge_shared",
@@ -143,6 +145,7 @@ async def test_clear_hook_rotates_active_session_without_reprocessing(
             {
                 "agent_id": "ag_claude",
                 "account": "work",
+                "harness_override": "claude-native",
                 "labels": {
                     "omnigent.ui": "terminal",
                     BRIDGE_ID_LABEL_KEY: "bridge_shared",
