@@ -374,10 +374,10 @@ precedence. Agent spec provider names do not set the recorded session account.
 Choose an account explicitly with `--account` or the API `account` field;
 Claude-native children inherit the parent account. Claude SDK children refuse
 an inherited account; other child harnesses record no Claude account. Forks
-inherit accounts under the rules above. If an agent spec
-names an extra account with `executor.auth: {type: provider, name: claude-work}`,
-the runner refuses a launch that would not use that account. A gateway provider
-such as `claude-gateway` remains a normal provider. Only Claude
+inherit accounts under the rules above. Account sessions must remain on
+`claude-native`; agent replacements that change that harness are refused.
+Provider names such as `claude-gateway` do not select session accounts and
+continue to use normal provider routing. Only Claude
 Code (`claude-native`) sessions can use an extra account. The web UI does not
 expose this account selector yet. An extra account cannot be a default. Setup
 lists each account as **Subscription (claude-work)**. When an account's

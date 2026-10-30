@@ -10338,18 +10338,12 @@ def _resolve_create_account(
     :raises OmnigentError: ``INVALID_INPUT`` when the request conflicts with
         the harness or the parent's account.
     """
-    if requested is not None and harness != "claude-native":
-        raise OmnigentError(
-            "A Claude account applies only to Claude Code (claude-native) sessions.",
-            code=ErrorCode.INVALID_INPUT,
-        )
+    from omnigent.server.routes._session_create_validation import validate_account_harness
+
+    validate_account_harness(requested, harness)
     if parent is not None:
-        if harness == "claude-sdk" and parent.account is not None:
-            raise OmnigentError(
-                "Claude SDK children cannot use an inherited Claude account. "
-                "Use a claude-native child instead.",
-                code=ErrorCode.INVALID_INPUT,
-            )
+        if harness == "claude-sdk":
+            validate_account_harness(parent.account, harness)
         if harness != "claude-native":
             return None
         if requested is not None and requested != parent.account:

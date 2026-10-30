@@ -615,7 +615,7 @@ async def test_child_account_follows_the_child_harness(
         )
     if harness == "claude-sdk":
         assert response.status_code == 400, response.text
-        assert "Claude SDK children" in response.text
+        assert "requires the claude-native harness" in response.text
         assert "private-work" not in response.text
     else:
         assert response.status_code == 201, response.text

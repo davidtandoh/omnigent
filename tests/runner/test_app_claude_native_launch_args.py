@@ -1245,6 +1245,7 @@ async def _auto_create_claude_terminal_for_test(
     account: str | None = None,
     external_session_id: str | None = None,
     launch_config: ClaudeNativeUcodeConfig | None = None,
+    agent_spec=None,
 ) -> None:
     """
     Run ``_auto_create_claude_terminal`` with host config and diagnostics stubbed.
@@ -1275,6 +1276,7 @@ async def _auto_create_claude_terminal_for_test(
         Mock(),
         server_client=AsyncMock(spec=httpx.AsyncClient),
         session_init=session_init,
+        agent_spec=agent_spec,
         auth_token_factory=lambda: None,
         resolve_launch_config=AsyncMock(return_value=launch_config),
     )
@@ -1751,6 +1753,8 @@ async def test_ambient_config_folder_does_not_bypass_default_gateway(
 ) -> None:
     from unittest.mock import Mock
 
+    from omnigent.spec.types import AgentSpec, ExecutorSpec, ProviderAuth
+
     from omnigent.runner.resource_registry import SessionResourceRegistry
 
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/unregistered/claude")
@@ -1776,6 +1780,14 @@ async def test_ambient_config_folder_does_not_bypass_default_gateway(
             workspace=bridge_dir,
             registry=registry,
             launch_config=gateway,
+            agent_spec=AgentSpec(
+                spec_version=1,
+                executor=ExecutorSpec(
+                    type="omnigent",
+                    auth=ProviderAuth(name="claude-gateway"),
+                    config={"harness": "claude-native"},
+                ),
+            ),
         )
     registry.launch_required_terminal.assert_awaited_once()
     spec = registry.launch_required_terminal.call_args.kwargs["spec"]

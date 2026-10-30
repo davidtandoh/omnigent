@@ -11642,6 +11642,11 @@ async def _create_session_from_existing_agent(
             _create_resolved_harness, agent, harness_override, agent_cache
         )
     )
+    session_account = _resolve_create_account(
+        requested=body.account,
+        harness=selected_harness,
+        parent=_parent_for_routing,
+    )
     await validate_create_harness_readiness(
         harness=selected_harness,
         host_id=body.host_id,
@@ -11839,11 +11844,6 @@ async def _create_session_from_existing_agent(
             agent_for_user, agent_store, artifact_store, agent, user_id
         )
 
-    session_account = _resolve_create_account(
-        requested=body.account,
-        harness=selected_harness,
-        parent=_parent_for_routing,
-    )
     try:
         # Include spec-seeded defaults before create; overflow must not leave a session.
         encode_session_overrides(

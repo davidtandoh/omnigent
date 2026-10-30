@@ -32,7 +32,7 @@ def test_top_level_session_records_only_the_explicit_account(requested: str | No
 
 
 def test_account_is_rejected_off_claude_native() -> None:
-    with pytest.raises(OmnigentError, match="only to Claude Code"):
+    with pytest.raises(OmnigentError, match="requires the claude-native harness"):
         _resolve_create_account(requested="work", harness="codex-native", parent=None)
 
 
@@ -82,8 +82,26 @@ def test_non_claude_child_has_no_account(harness: str) -> None:
 
 
 def test_sdk_child_cannot_inherit_a_claude_account() -> None:
-    with pytest.raises(OmnigentError, match="Claude SDK children") as caught:
+    with pytest.raises(OmnigentError, match="requires the claude-native harness") as caught:
         _resolve_create_account(
             requested=None, harness="claude-sdk", parent=_parent("private-work")
         )
     assert "private-work" not in str(caught.value)
+
+
+def test_agent_replacement_checks_all_account_sessions(db_uri: str) -> None:
+    from omnigent.server.routes._session_create_validation import validate_agent_account_sessions
+    from omnigent.spec.types import AgentSpec, ExecutorSpec
+    from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+
+    store = SqlAlchemyConversationStore(db_uri)
+    protected = store.create_conversation(agent_id="087b7cb7ac30abf4debfaa578d052ec6", account="private-work")
+    for _ in range(100):
+        store.create_conversation(agent_id="087b7cb7ac30abf4debfaa578d052ec6")
+    replacement = AgentSpec(
+        spec_version=1, executor=ExecutorSpec(type="omnigent", config={"harness": "claude-sdk"})
+    )
+    with pytest.raises(OmnigentError, match="requires the claude-native harness") as caught:
+        validate_agent_account_sessions(store, "087b7cb7ac30abf4debfaa578d052ec6", replacement)
+    assert "private-work" not in str(caught.value)
+    assert store.get_conversation(protected.id).account == "private-work"

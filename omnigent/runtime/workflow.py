@@ -1197,16 +1197,6 @@ def _resolve_provider_for_build(
                 f"Run `{cli_invocation()} setup --no-internal-beta` to configure one.",
                 code=ErrorCode.INVALID_INPUT,
             )
-        if entry.config_dir is not None:
-            from omnigent.harness_aliases import canonicalize_harness
-
-            if canonicalize_harness(identity) != "claude-native":
-                # Other harnesses would run on the CLI's default login instead.
-                raise OmnigentError(
-                    f"executor.auth names the extra Claude account {auth.name!r}, which only "
-                    "Claude Code (harness: claude-native) sessions can use.",
-                    code=ErrorCode.INVALID_INPUT,
-                )
         return entry
     if isinstance(auth, DatabricksAuth):
         # Spec databricks auth → synthesized provider for a gateway-harness

@@ -10553,33 +10553,3 @@ async def test_host_publishes_stored_workspace_at_startup(
 
     assert host._origin_workspace_id == "1965859176160743"
     assert os.environ[debug_logging.ORIGIN_WORKSPACE_ID_ENV_VAR] == "1965859176160743"
-
-
-async def test_sdk_account_launch_is_refused_before_account_resolution(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    def unexpected_resolution(*args, **kwargs):
-        pytest.fail("Claude SDK launch must refuse before resolving a sign-in folder")
-
-    monkeypatch.setattr(
-        "omnigent.onboarding.claude_accounts.account_launch_environment", unexpected_resolution
-    )
-    host = _make_host_process()
-    try:
-        result = await host._handle_launch(
-            HostLaunchRunnerFrame(
-                request_id="sdk-account",
-                binding_token="sdk-binding",
-                workspace=str(tmp_path),
-                harness="claude-sdk",
-                account="private-work",
-            )
-        )
-        assert result.status == "failed"
-        assert result.error_code == "harness_not_configured"
-        assert "claude-sdk" in (result.error or "")
-        assert "Use a claude-native session" in (result.error or "")
-        assert str(tmp_path) not in (result.error or "")
-        assert not host._runners
-    finally:
-        _cleanup_host(host)

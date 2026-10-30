@@ -2627,26 +2627,14 @@ async def test_session_account_is_sent_on_create_and_every_relaunch(
             f"/v1/sessions/{session_id}/agent",
             files={"bundle": ("agent.tar.gz", replacement, "application/gzip")},
         )
-        assert updated.status_code == 200, updated.text
+        assert updated.status_code == 400, updated.text
+        assert "recorded Claude account requires the claude-native harness" in updated.text
 
     set_runner_client(None)
     post_task = asyncio.create_task(_post_hi(client, session_id))
     try:
         relaunch_frame = await _wait_for_launch(comm, budget_s=budget(5.0))
-        if replace_with_sdk:
-            assert relaunch_frame is not None and relaunch_frame.harness == "claude-sdk"
-            host = HostProcess(
-                identity=HostIdentity(host_id=_HOST_ID, name="test"),
-                server_url="http://testserver",
-            )
-            refusal = await host._handle_launch(relaunch_frame)
-            assert refusal.status == "failed"
-            assert refusal.error_code == HARNESS_NOT_CONFIGURED_ERROR_CODE
-            await comm.send_input(
-                {"type": "websocket.receive", "text": encode_host_frame(refusal)}
-            )
-            sent = await asyncio.wait_for(post_task, timeout=budget(5.0))
-            assert sent.status_code == 202, sent.text
+        assert relaunch_frame is not None and relaunch_frame.harness == "claude-native"
     finally:
         post_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -2742,11 +2730,12 @@ async def test_agent_provider_does_not_infer_a_session_account(
         assert resp.json()["account"] == account
 
 
+@pytest.mark.parametrize("harness", ["codex-native", "claude-sdk"])
 async def test_account_is_refused_for_non_claude_native_sessions(
-    client: httpx.AsyncClient, app: FastAPI
+    client: httpx.AsyncClient, app: FastAPI, harness: str
 ) -> None:
     agent = await create_test_agent(
-        client, executor={"type": "omnigent", "config": {"harness": "codex-native"}}
+        client, executor={"type": "omnigent", "config": {"harness": harness}}
     )
     resp = await client.post("/v1/sessions", json={"agent_id": agent["id"], "account": "work"})
     assert resp.status_code == 400, resp.text
@@ -4786,3 +4775,34 @@ async def test_compact_preserves_codex_binding_while_owner_reconnects(
         if owner_status != "disconnected":
             await comm.send_input({"type": "websocket.disconnect", "code": 1000})
         await comm.wait()
+
+
+async def test_invalid_account_is_refused_before_creating_a_worktree(
+    client: httpx.AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.server.routes._sessions import orchestration
+
+    comm = await _connect_host(app)
+    monkeypatch.setattr(
+        "omnigent.server.routes._workspace_validation.validate_workspace",
+        AsyncMock(return_value=_WORKSPACE),
+    )
+    create_worktree = AsyncMock()
+    monkeypatch.setattr(orchestration, "_create_session_worktree", create_worktree)
+    agent = await create_test_agent(
+        client, executor={"type": "omnigent", "config": {"harness": "claude-sdk"}}
+    )
+    response = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "account": "work",
+            "host_id": _HOST_ID,
+            "workspace": _WORKSPACE,
+            "git": {"branch_name": "feature/account"},
+        },
+    )
+    assert response.status_code == 400, response.text
+    assert "requires the claude-native harness" in response.text
+    create_worktree.assert_not_called()
+    await comm.send_input({"type": "websocket.disconnect", "code": 1000})

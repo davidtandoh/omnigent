@@ -20,6 +20,7 @@ from omnigent.models.model_override import validate_model_override
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.auth import LEVEL_READ, RESERVED_USER_LOCAL, local_single_user_enabled
 from omnigent.server.routes._auth_helpers import require_access
+from omnigent.spec.types import AgentSpec
 from omnigent.stores import AgentStore, ConversationStore, PermissionStore
 from omnigent.stores.host_store import host_is_live
 from omnigent.stores.project_store import ProjectStore
@@ -533,3 +534,41 @@ async def validate_uploaded_bundle_host_workspace(
         spec_cwd=spec_cwd,
         host_name=host_name,
     )
+
+
+def validate_account_harness(account: str | None, harness: str | None) -> None:
+    """Require recorded Claude accounts to use Claude Code."""
+    from omnigent.harness_aliases import canonicalize_harness
+
+    if account is not None and canonicalize_harness(harness) != "claude-native":
+        raise OmnigentError(
+            "A recorded Claude account requires the claude-native harness. "
+            "Start a session without a Claude account to use another harness.",
+            code=ErrorCode.INVALID_INPUT,
+        )
+
+
+def validate_agent_account_sessions(
+    conversation_store: ConversationStore | None, agent_id: str, spec: AgentSpec
+) -> None:
+    """Validate an agent replacement against every session using that agent."""
+    from omnigent.runtime.workflow import _find_spec_by_name
+    from omnigent.server.routes._sessions.helpers import _spec_harness
+
+    if conversation_store is None:
+        return
+    after = None
+    while True:
+        page = conversation_store.list_conversations(
+            limit=100, after=after, kind=None, agent_id=agent_id, include_archived=True
+        )
+        for conversation in page.data:
+            selected = (
+                _find_spec_by_name(spec, conversation.sub_agent_name)
+                if conversation.sub_agent_name
+                else None
+            )
+            validate_account_harness(conversation.account, _spec_harness(selected or spec))
+        if not page.has_more:
+            return
+        after = page.last_id

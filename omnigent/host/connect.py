@@ -1965,11 +1965,6 @@ class HostProcess:
             # account's folder: a live runner on another account is refused.
             try:
                 harness = canonicalize_harness(frame.harness) or frame.harness
-                if is_claude_sdk_harness_name(harness):
-                    raise AccountUnavailableError(
-                        f"Claude account {frame.account!r} cannot be used by claude-sdk "
-                        f"on host {self._identity.name!r}. Use a claude-native session instead."
-                    )
                 if harness not in {"claude-native", None}:
                     frame = dataclasses.replace(frame, account=None)
                 else:

@@ -504,7 +504,7 @@ def test_account_refusal_response_preserves_details_but_shared_events_do_not(
 ) -> None:
     from omnigent.harnesses.claude_native.account import (
         ensure_claude_account_signed_in,
-        ensure_spec_account_selected,
+        ensure_session_account_selected,
     )
     from omnigent.onboarding.claude_accounts import AccountUnavailableError
     from omnigent.server.routes._sessions.helpers import (
@@ -534,7 +534,7 @@ def test_account_refusal_response_preserves_details_but_shared_events_do_not(
                 cwd=tmp_path,
             )
         elif failure == "mismatch":
-            ensure_spec_account_selected(None, None, session_account="private-work", config=config)
+            ensure_session_account_selected("private-work", None, config=config)
         else:
             raise AccountUnavailableError(
                 "Could not confirm this session's Claude account; retry."

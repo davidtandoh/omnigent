@@ -7630,29 +7630,6 @@ def _codex_native_model_from_spec(agent_spec: AgentSpec | ResolvedSpec | None) -
     return config_model if isinstance(config_model, str) and config_model else None
 
 
-def _ensure_spec_account_selected(
-    agent_spec: AgentSpec | ResolvedSpec | None,
-    requested_config_dir: str | None,
-    session_account: str | None,
-) -> None:
-    """Refuse a launch whose agent spec names a Claude account it does not use.
-
-    :param agent_spec: Agent spec object, or a resolved wrapper; ``None`` passes.
-    :param requested_config_dir: This runner's launch ``CLAUDE_CONFIG_DIR``.
-    :param session_account: The session's recorded account name, or ``None`` for default.
-    """
-    from omnigent.harnesses.claude_native.account import ensure_spec_account_selected
-    from omnigent.spec.types import ProviderAuth
-
-    spec = agent_spec.spec if isinstance(agent_spec, ResolvedSpec) else agent_spec
-    auth = spec.executor.auth if spec is not None else None
-    ensure_spec_account_selected(
-        auth.name if isinstance(auth, ProviderAuth) else None,
-        requested_config_dir,
-        session_account=session_account,
-    )
-
-
 def _claude_native_model_from_spec(agent_spec: AgentSpec | ResolvedSpec | None) -> str | None:
     """
     Read the Claude Code model id to launch the native TUI with, from a spec.
@@ -9192,8 +9169,10 @@ async def _auto_create_claude_terminal(
         raise AccountUnavailableError("Could not confirm this session's Claude account; retry.")
     resolved_launch_env = native_launch_environment()
     requested_account = resolved_launch_env.get("CLAUDE_CONFIG_DIR")
+    from omnigent.harnesses.claude_native.account import ensure_session_account_selected
+
     await asyncio.to_thread(
-        _ensure_spec_account_selected, agent_spec, requested_account, launch_metadata.account
+        ensure_session_account_selected, launch_metadata.account, requested_account
     )
     from omnigent.config import load_effective_config
     from omnigent.harness_startup_config import (

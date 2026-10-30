@@ -88,48 +88,22 @@ def _account_name_for_config_dir(config_dir: str) -> str | None:
         return None
 
 
-def ensure_spec_account_selected(
-    spec_provider: str | None,
+def ensure_session_account_selected(
+    session_account: str | None,
     requested_config_dir: str | None,
     *,
     config: dict[str, object] | None = None,
-    session_account: str | None = None,
 ) -> None:
-    """Require the runner to use the session and agent spec Claude account.
-
-    An agent whose ``executor.auth`` names an extra Claude account must run on
-    that account, never silently on the default login or another account.
-
-    :param spec_provider: The spec's ``executor.auth`` provider name, e.g.
-        ``"claude-work"``; ``None`` when it names none.
-    :param requested_config_dir: The launch's ``CLAUDE_CONFIG_DIR``, or ``None``
-        for the default login.
-    :param config: Parsed user config; ``None`` reads the global config.
-    :param session_account: The session's recorded account name, or ``None`` for default.
-    :raises AccountUnavailableError: If the session or spec account does not match the runner.
-    """
+    """Require the runner to use the session's recorded Claude account."""
     from omnigent.config import load_global_config
     from omnigent.onboarding.claude_accounts import (
         account_launch_environment,
         account_name_for_config_dir,
-        account_name_from_provider,
     )
-    from omnigent.onboarding.provider_config import load_providers
 
-    spec_account = account_name_from_provider(spec_provider) if spec_provider else None
-    if session_account is None and spec_account is None and not requested_config_dir:
+    if session_account is None and not requested_config_dir:
         return
     config = load_global_config() if config is None else config
-    if spec_account is not None:
-        entry = load_providers(config).get(spec_provider)
-        if entry is None or (
-            entry.config_dir is not None and entry.config_dir != requested_config_dir
-        ):
-            raise AccountUnavailableError(
-                f"config_mismatch: this agent runs on Claude account {spec_account!r}. "
-                f"Check that {_account_label(spec_account)} is set up, then launch "
-                "a new runner for this account."
-            )
     if session_account is not None:
         import socket
 

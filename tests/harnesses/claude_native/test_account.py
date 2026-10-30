@@ -11,7 +11,7 @@ import pytest
 
 from omnigent.harnesses.claude_native.account import (
     ensure_claude_account_signed_in,
-    ensure_spec_account_selected,
+    ensure_session_account_selected,
 )
 
 
@@ -189,43 +189,6 @@ _SPEC_ACCOUNT_CONFIG = {
 
 
 @pytest.mark.parametrize(
-    ("provider", "launch_dir"),
-    [
-        (None, None),
-        ("claude-work", "/accounts/work"),
-        ("anthropic", None),
-        ("claude-subscription", None),
-        ("claude-gateway", None),
-    ],
-)
-def test_spec_account_guard_allows_matching_or_unrelated_providers(
-    provider: str | None, launch_dir: str | None
-) -> None:
-    ensure_spec_account_selected(
-        provider,
-        launch_dir,
-        config=_SPEC_ACCOUNT_CONFIG,
-        session_account="work" if provider == "claude-work" else None,
-    )
-
-
-@pytest.mark.parametrize(
-    ("provider", "launch_dir"),
-    [
-        ("claude-work", None),
-        ("claude-work", "/accounts/other"),
-        ("claude-missing", None),
-    ],
-)
-def test_spec_account_guard_never_runs_a_named_account_elsewhere(
-    provider: str, launch_dir: str | None
-) -> None:
-    """An agent that names an account runs on it or is refused, never on the default."""
-    with pytest.raises(RuntimeError, match="runs on Claude account"):
-        ensure_spec_account_selected(provider, launch_dir, config=_SPEC_ACCOUNT_CONFIG)
-
-
-@pytest.mark.parametrize(
     ("account", "launch_dir", "matches"),
     [
         ("work", "/accounts/work", True),
@@ -239,14 +202,10 @@ def test_recorded_session_account_must_match_the_runner(
     account: str | None, launch_dir: str | None, matches: bool
 ) -> None:
     if matches:
-        ensure_spec_account_selected(
-            None, launch_dir, session_account=account, config=_SPEC_ACCOUNT_CONFIG
-        )
+        ensure_session_account_selected(account, launch_dir, config=_SPEC_ACCOUNT_CONFIG)
     else:
         with pytest.raises(RuntimeError, match="config_mismatch") as caught:
-            ensure_spec_account_selected(
-                None, launch_dir, session_account=account, config=_SPEC_ACCOUNT_CONFIG
-            )
+            ensure_session_account_selected(account, launch_dir, config=_SPEC_ACCOUNT_CONFIG)
         assert (repr(account) if account else "default Claude login") in str(caught.value)
 
 
@@ -263,9 +222,8 @@ def test_recorded_account_cannot_use_a_provider_without_a_sign_in_folder(
     from omnigent.onboarding.claude_accounts import AccountUnavailableError
 
     with pytest.raises(AccountUnavailableError, match="'work' is not set up on host"):
-        ensure_spec_account_selected(
+        ensure_session_account_selected(
+            "work",
             None,
-            None,
-            session_account="work",
             config={"providers": {"claude-work": provider}},
         )
