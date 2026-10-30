@@ -2693,26 +2693,25 @@ async def test_older_host_is_never_sent_an_account(
     assert "session manager" in error["message"]
 
 
-async def test_agent_spec_that_names_an_account_records_it(
-    client: httpx.AsyncClient, app: FastAPI, db_uri: str
+@pytest.mark.parametrize("provider", ["claude-work", "claude-gateway"])
+async def test_agent_provider_does_not_infer_a_session_account(
+    client: httpx.AsyncClient, db_uri: str, provider: str
 ) -> None:
-    """An agent whose spec names an extra account runs on it; a different pick is refused."""
     executor = {
         "type": "omnigent",
         "config": {"harness": "claude-native"},
-        "auth": {"type": "provider", "name": "claude-work"},
+        "auth": {"type": "provider", "name": provider},
     }
     agent = await create_test_agent(client, executor=executor)
-    resp = await client.post("/v1/sessions", json={"agent_id": agent["id"]})
-    assert resp.status_code == 201, resp.text
-    conv = SqlAlchemyConversationStore(db_uri).get_conversation(resp.json()["id"])
-    assert conv is not None and conv.account == "work"
-
-    conflict = await client.post(
-        "/v1/sessions", json={"agent_id": agent["id"], "account": "client-a"}
-    )
-    assert conflict.status_code == 400, conflict.text
-    assert "'work'" in conflict.text
+    for account in (None, "work"):
+        body = {"agent_id": agent["id"]}
+        if account is not None:
+            body["account"] = account
+        resp = await client.post("/v1/sessions", json=body)
+        assert resp.status_code == 201, resp.text
+        conv = SqlAlchemyConversationStore(db_uri).get_conversation(resp.json()["id"])
+        assert conv is not None and conv.account == account
+        assert resp.json()["account"] == account
 
 
 async def test_account_is_refused_for_non_claude_native_sessions(

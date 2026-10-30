@@ -134,7 +134,7 @@ def ensure_spec_account_selected(
 
         expected = account_launch_environment(
             session_account, None, host_name=socket.gethostname(), config=config
-        ).get("CLAUDE_CONFIG_DIR")
+        )["CLAUDE_CONFIG_DIR"]
         if expected == (requested_config_dir or None):
             return
     elif (

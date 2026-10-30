@@ -1672,8 +1672,8 @@ class _SessionCreateRequestBase(BaseModel):
         session, by its short name, e.g. ``"work"``. Only the name is
         stored; the launching host resolves it from its own config and
         refuses the launch when it cannot. ``None`` inherits a child's
-        parent account, else the account the agent spec names, else the
-        host's default login. Create-time only.
+        parent account; a top-level session without an explicit account uses
+        the host's default login. Create-time only.
     """
 
     inference_configuration_revision: str | None = None

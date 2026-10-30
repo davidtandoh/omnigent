@@ -10315,64 +10315,40 @@ def _spec_harness(spec: AgentSpec) -> str:
     return canonicalize_harness(harness) or harness
 
 
-def _spec_account(spec: AgentSpec | None) -> str | None:
-    """Return the Claude account an agent spec names through ``executor.auth``.
-
-    :param spec: A parsed agent / sub-agent spec, or ``None``.
-    :returns: e.g. ``"work"`` for ``auth: {type: provider, name: claude-work}``;
-        ``None`` when the spec names no account-shaped provider.
-    """
-    from omnigent.onboarding.claude_accounts import account_name_from_provider
-    from omnigent.spec.types import ProviderAuth
-
-    auth = spec.executor.auth if spec is not None else None
-    return account_name_from_provider(auth.name) if isinstance(auth, ProviderAuth) else None
-
-
 def _resolve_create_account(
     *,
     requested: str | None,
-    spec: AgentSpec | None,
     harness: str | None,
     parent: Conversation | None,
 ) -> str | None:
     """Choose the Claude account a new session records.
 
-    An explicit request wins, else the account the agent spec names. Only
-    claude-native sessions take one. A child always runs on its parent's
-    account, which the store copies, so a child may only restate it.
+    Only explicit requests select an account for a top-level claude-native
+    session. A child always runs on its parent's account, which the store
+    copies, so a child may only restate it.
 
     :param requested: The create request's ``account``, e.g. ``"work"``.
-    :param spec: The session's resolved agent spec, if loaded.
     :param harness: The session's canonical harness, e.g. ``"claude-native"``.
     :param parent: The parent conversation for a child create, else ``None``.
     :returns: The account to store, or ``None`` for the default login (or,
         for a child, the parent's account).
     :raises OmnigentError: ``INVALID_INPUT`` when the request conflicts with
-        the harness, the spec, or the parent's account.
+        the harness or the parent's account.
     """
     if requested is not None and harness != "claude-native":
         raise OmnigentError(
             "A Claude account applies only to Claude Code (claude-native) sessions.",
             code=ErrorCode.INVALID_INPUT,
         )
-    spec_account = _spec_account(spec) if harness == "claude-native" else None
-    chosen = requested or spec_account
     if parent is not None:
-        if chosen is not None and chosen != parent.account:
+        if requested is not None and requested != parent.account:
             raise OmnigentError(
                 "A child session runs on its parent's Claude account; "
                 "the requested account conflicts with that account.",
                 code=ErrorCode.INVALID_INPUT,
             )
         return None
-    if requested is not None and spec_account is not None and requested != spec_account:
-        raise OmnigentError(
-            f"The agent runs on Claude account {spec_account!r}, "
-            f"so the session cannot use account {requested!r}.",
-            code=ErrorCode.INVALID_INPUT,
-        )
-    return chosen
+    return requested
 
 
 def _spec_config_flag_explicitly_disabled(spec: AgentSpec, key: str) -> bool:

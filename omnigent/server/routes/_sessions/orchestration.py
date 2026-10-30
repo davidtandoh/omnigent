@@ -11841,7 +11841,6 @@ async def _create_session_from_existing_agent(
 
     session_account = _resolve_create_account(
         requested=body.account,
-        spec=selection_spec,
         harness=selected_harness,
         parent=_parent_for_routing,
     )
@@ -12230,7 +12229,6 @@ def _create_session_from_bundle(
         update={
             "account": _resolve_create_account(
                 requested=metadata.account,
-                spec=spec,
                 harness=_spec_harness(spec),
                 parent=bundle_parent,
             )

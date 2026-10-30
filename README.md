@@ -370,9 +370,12 @@ source account only when the caller can manage the source session.
 Resume lookup and transcript relocation use the session's account folder,
 including when the original workspace is gone. New sessions read reasoning
 effort from that account's `settings.json`; an explicit `--effort` takes
-precedence. An agent spec selects an account with
-`executor.auth: {type: provider, name: claude-work}`; sessions of that agent
-record the account, and a launch that would not use it is refused. Only Claude
+precedence. Agent spec provider names do not set the recorded session account.
+Choose an account explicitly with `--account` or the API `account` field;
+children and forks inherit accounts under the rules above. If an agent spec
+names an extra account with `executor.auth: {type: provider, name: claude-work}`,
+the runner refuses a launch that would not use that account. A gateway provider
+such as `claude-gateway` remains a normal provider. Only Claude
 Code (`claude-native`) sessions can use an extra account. The web UI does not
 expose this account selector yet. An extra account cannot be a default. Setup
 lists each account as **Subscription (claude-work)**. When an account's
