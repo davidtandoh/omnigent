@@ -80,7 +80,10 @@ def test_find_account_resolves_short_names_exactly() -> None:
         ({**_WORK, "config_dir": "accounts/work"}, "absolute path"),
         ({**_WORK, "config_dir": "~/accounts/work"}, "absolute path"),
         ({**_WORK, "cli": "codex"}, "only supported for cli: claude"),
-        ({**_WORK, "default": True}, "cannot be a default"),
+        (
+            {**_WORK, "default": True},
+            "cannot be a default.*`omnigent claude --account work`",
+        ),
     ],
 )
 def test_hand_edited_account_entries_fail_with_a_fix(

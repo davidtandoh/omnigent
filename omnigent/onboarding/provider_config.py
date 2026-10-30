@@ -1001,7 +1001,7 @@ def _parse_provider(name: str, raw: dict[str, object]) -> ProviderEntry:
             raise OmnigentError(
                 f"provider {name!r}: an extra Claude account cannot be a default. "
                 f"Remove 'default' and select it per session with "
-                f"`omnigent claude --account {name}`.",
+                f"`omnigent claude --account {name.removeprefix('claude-')}`.",
                 code=ErrorCode.INVALID_INPUT,
             )
         return ProviderEntry(
