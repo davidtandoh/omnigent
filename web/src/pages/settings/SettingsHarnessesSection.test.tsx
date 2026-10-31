@@ -14,6 +14,7 @@ import type { SkillContent } from "@/hooks/useSkillContent";
 import type { HarnessInventory } from "@/hooks/useHarnessInventory";
 import { ApiError } from "@/lib/sessionsApi";
 import type { HarnessStartup, Host } from "@/hooks/useHosts";
+import type { ClaudeAccountQuota } from "@/lib/claudeAccounts";
 import { SettingsHarnessesSection } from "./SettingsHarnessesSection";
 
 let pluginMetadataRequested = false;
@@ -87,6 +88,13 @@ let startupData = STARTUP;
 let startupError: ApiError | null = null;
 const startupCalls = vi.fn();
 let hosts: Host[] = [];
+let claudeQuotas: {
+  data?: ClaudeAccountQuota[];
+  isPending: boolean;
+  dataUpdatedAt?: number;
+} = { isPending: true, dataUpdatedAt: 0 };
+const QUOTA_NOW = new Date("2026-10-31T12:00:00Z");
+vi.mock("@/hooks/useNow", () => ({ useNow: () => QUOTA_NOW }));
 vi.mock("@/hooks/useHosts", async (importActual) => ({
   ...(await importActual()),
   useHosts: () => {
@@ -96,6 +104,7 @@ vi.mock("@/hooks/useHosts", async (importActual) => ({
       initialData: hosts,
     });
   },
+  useHostClaudeQuotas: () => claudeQuotas,
   useHarnessStartup: (hostId: string, harness: string) => {
     startupCalls(hostId, harness);
     return { data: startupError ? undefined : startupData, error: startupError, isPending: false };
@@ -235,6 +244,7 @@ const ONLINE: Host = {
 };
 
 afterEach(() => {
+  claudeQuotas = { isPending: true, dataUpdatedAt: 0 };
   contentQuery = { data: CONTENT, isPending: false };
   contentLookup = null;
   contentSource = undefined;
@@ -614,7 +624,7 @@ describe("Harness details", () => {
 
     const accounts = screen.getByTestId("claude-accounts");
     const rowText = (id: string) =>
-      within(accounts).getByTestId(`claude-account-${id}`).textContent;
+      within(accounts).getByTestId(`claude-account-${id}`).firstElementChild?.textContent;
     expect(rowText("default")).toBe("Default loginSigned out");
     expect(rowText("client-a")).toBe("client-aSigned out");
     expect(rowText("work")).toBe("workSigned in");
@@ -627,11 +637,76 @@ describe("Harness details", () => {
     expect(within(accounts).getByText(/Run this on my-laptop/)).toBeTruthy();
   });
 
+  it("shows each account's usage windows and never presents an old number as current", () => {
+    hosts = [{ ...ONLINE, claude_accounts: { default: true, work: true, "client-a": true } }];
+    claudeQuotas = {
+      isPending: false,
+      dataUpdatedAt: 0,
+      data: [
+        {
+          account: "default",
+          status: "available",
+          five_hour: { percent_used: 42, resets_at: "2026-10-31T14:10:00Z" },
+          seven_day: { percent_used: 91, resets_at: "2026-11-03T09:00:00Z" },
+          model_windows: [{ model: "Opus", percent_used: 30, resets_at: "2026-11-03T09:00:00Z" }],
+          observed_at: "2026-10-31T11:58:00Z",
+        },
+        {
+          account: "work",
+          status: "stale",
+          five_hour: { percent_used: 75, resets_at: "2026-10-31T11:00:00Z" },
+          seven_day: { percent_used: 20, resets_at: "2026-11-03T09:00:00Z" },
+          observed_at: "2026-10-31T09:00:00Z",
+        },
+        { account: "client-a", status: "unavailable" },
+      ],
+    };
+    renderHarnesses("claude-native", "?tab=settings");
+
+    const quota = (id: string) => screen.getByTestId(`claude-quota-${id}`).textContent;
+    expect(quota("default")).toContain("5-hour42% usedResets in 2h 10m");
+    expect(quota("default")).toContain("Weekly91% used");
+    expect(quota("default")).toContain("Opus weekly30% used");
+    expect(quota("default")).toContain("Read 2m ago");
+    expect(quota("default")).not.toContain("Stale");
+    // The 5-hour window reset after the stale reading, so its old 75% is dropped.
+    expect(quota("work")).toContain("5-hourUnknownReset since this reading");
+    expect(quota("work")).not.toContain("75%");
+    expect(quota("work")).toContain("Stale · Read 3h ago. Current usage may differ.");
+    expect(quota("client-a")).toBe("Usage unavailable");
+  });
+
+  it("ages a reading from its arrival when the shared clock lags behind it", () => {
+    hosts = [{ ...ONLINE, claude_accounts: { default: true } }];
+    claudeQuotas = {
+      isPending: false,
+      dataUpdatedAt: Date.parse("2026-10-31T12:03:00Z"),
+      data: [
+        {
+          account: "default",
+          status: "available",
+          five_hour: { percent_used: 10, resets_at: "2026-10-31T14:00:00Z" },
+          observed_at: "2026-10-31T11:58:00Z",
+        },
+      ],
+    };
+    renderHarnesses("claude-native", "?tab=settings");
+    expect(screen.getByTestId("claude-quota-default").textContent).toContain("Read 5m ago");
+  });
+
+  it("says usage is loading before the host answers", () => {
+    hosts = [{ ...ONLINE, claude_accounts: { default: true } }];
+    renderHarnesses("claude-native", "?tab=settings");
+    expect(screen.getByTestId("claude-quota-default").textContent).toBe("Checking usage…");
+  });
+
   it("explains when an older machine does not report Claude accounts", () => {
     hosts = [ONLINE];
     renderHarnesses("claude-native", "?tab=settings");
 
-    expect(screen.getByTestId("claude-account-default").textContent).toBe("Default loginUnknown");
+    expect(screen.getByTestId("claude-account-default").firstElementChild?.textContent).toBe(
+      "Default loginUnknown",
+    );
     expect(screen.getByTestId("claude-accounts-unreported").textContent).toContain(
       "my-laptop has not reported extra Claude accounts",
     );

@@ -23,8 +23,15 @@ import { cn } from "@/lib/utils";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { isFeatureEnabled } from "@/lib/capabilities";
 import { ComposerAgentIcon } from "@/shell/NewChatDialog";
-import { useHarnessStartup, useHosts, type Host } from "@/hooks/useHosts";
-import { CLAUDE_DEFAULT_ACCOUNT_LABEL, hostClaudeAccountNames } from "@/lib/claudeAccounts";
+import { useHarnessStartup, useHostClaudeQuotas, useHosts, type Host } from "@/hooks/useHosts";
+import {
+  accountQuotaView,
+  CLAUDE_DEFAULT_ACCOUNT_LABEL,
+  hostClaudeAccountNames,
+  type AccountQuotaView,
+} from "@/lib/claudeAccounts";
+import { useNow } from "@/hooks/useNow";
+import { Progress } from "@/components/ui/progress";
 import { CliCommandBlock } from "@/shell/CliCommandBlock";
 import { ApiError } from "@/lib/sessionsApi";
 import { INVENTORY_HARNESS_IDS } from "@/hooks/useHarnessInventory";
@@ -710,12 +717,72 @@ function HarnessDetail({
 }
 
 /**
+ * One account's 5-hour, weekly and per-model usage. Stale and unavailable
+ * readings say so in words, so an old number never reads as current.
+ */
+function AccountQuota({
+  testId,
+  loading,
+  view,
+}: {
+  testId: string;
+  loading: boolean;
+  view: AccountQuotaView;
+}) {
+  if (loading || view.state === "unavailable") {
+    return (
+      <p className="text-xs text-muted-foreground" data-testid={`claude-quota-${testId}`}>
+        {loading ? "Checking usage…" : "Usage unavailable"}
+      </p>
+    );
+  }
+  const stale = view.state === "stale";
+  return (
+    <div className="flex flex-col gap-2" data-testid={`claude-quota-${testId}`}>
+      <div className={cn("grid gap-x-4 gap-y-2.5 sm:grid-cols-2", stale && "opacity-60")}>
+        {view.windows.map((window) => (
+          <div key={window.label} className="flex min-w-0 flex-col gap-1">
+            <div className="flex items-baseline justify-between gap-2 text-xs">
+              <span className="truncate">{window.label}</span>
+              <span className="shrink-0 tabular-nums">
+                {window.percentUsed == null ? "Unknown" : `${Math.round(window.percentUsed)}% used`}
+              </span>
+            </div>
+            <Progress
+              value={window.percentUsed ?? 0}
+              aria-label={`${window.label} usage`}
+              className={cn(
+                "h-1.5",
+                (window.percentUsed ?? 0) >= 80 &&
+                  "[&>[data-slot=progress-indicator]]:bg-amber-500",
+              )}
+            />
+            <span className="text-xs text-muted-foreground">{window.resetText}</span>
+          </div>
+        ))}
+      </div>
+      <p
+        className={cn(
+          "text-xs",
+          stale ? "text-amber-600 dark:text-amber-500" : "text-muted-foreground",
+        )}
+      >
+        {stale ? `Stale · ${view.ageText}. Current usage may differ.` : view.ageText}
+      </p>
+    </div>
+  );
+}
+
+/**
  * Claude accounts on one machine, each with its own sign-in status. Sign-in is
  * interactive and stored in that machine's keychain, so "Add account" shows the
  * command to run there instead of signing in from the browser.
  */
 function ClaudeAccountsCard({ host }: { host: Host }) {
   const [showAddCommand, setShowAddCommand] = useState(false);
+  const quotas = useHostClaudeQuotas(host.host_id);
+  // The shared clock ticks every 30s; a reading cannot be newer than its arrival.
+  const nowMs = Math.max(useNow().getTime(), quotas.dataUpdatedAt);
   const reported = host.claude_accounts != null;
   const rows = [
     { name: CLAUDE_DEFAULT_ACCOUNT_LABEL, testId: "default", ready: host.claude_accounts?.default },
@@ -748,20 +815,30 @@ function ClaudeAccountsCard({ host }: { host: Host }) {
         {rows.map((row) => (
           <li
             key={row.testId}
-            className="flex items-center justify-between gap-3 px-3 py-2 text-ui"
+            className="flex flex-col gap-2 px-3 py-2.5 text-ui"
             data-testid={`claude-account-${row.testId}`}
           >
-            <span className="min-w-0 truncate">{row.name}</span>
-            <span
-              className={cn(
-                "shrink-0 text-xs",
-                row.ready === true
-                  ? "text-green-600 dark:text-green-400"
-                  : "text-amber-600 dark:text-amber-500",
+            <div className="flex items-center justify-between gap-3">
+              <span className="min-w-0 truncate">{row.name}</span>
+              <span
+                className={cn(
+                  "shrink-0 text-xs",
+                  row.ready === true
+                    ? "text-green-600 dark:text-green-400"
+                    : "text-amber-600 dark:text-amber-500",
+                )}
+              >
+                {row.ready === true ? "Signed in" : row.ready == null ? "Unknown" : "Signed out"}
+              </span>
+            </div>
+            <AccountQuota
+              testId={row.testId}
+              loading={quotas.isPending}
+              view={accountQuotaView(
+                quotas.data?.find((quota) => quota.account === row.testId),
+                nowMs,
               )}
-            >
-              {row.ready === true ? "Signed in" : row.ready == null ? "Unknown" : "Signed out"}
-            </span>
+            />
           </li>
         ))}
       </ul>
