@@ -131,3 +131,45 @@ def test_usage_command_json() -> None:
     payload = json.loads(result.output)
     assert payload["cost_today"] == 1.5
     assert payload["sessions"][0]["models"] == {"claude-opus-4-8": 1.5}
+
+
+def test_render_usage_account_column(capsys):
+    _render_usage(
+        {
+            "sessions": [
+                {"id": "one", "account": "work"},
+                {"id": "two", "account": None, "account_visible": True},
+                {"id": "shared", "account": None, "account_visible": False},
+            ]
+        },
+        limit=10,
+    )
+    out = capsys.readouterr().out
+    assert "Account" in out
+    assert "work" in out
+    assert "default" in out
+
+    assert "unspecified" in out
+
+
+def test_render_account_quota_windows(capsys):
+    from rich.console import Console
+
+    from omnigent.cli import _render_claude_quotas
+
+    _render_claude_quotas(
+        Console(width=140),
+        [
+            {
+                "account": "work",
+                "status": "available",
+                "five_hour": {"percent_used": 20, "resets_at": "2026-11-01T01:00:00Z"},
+                "seven_day": {"percent_used": 80, "resets_at": "2026-11-07T01:00:00Z"},
+            },
+            {"account": "default", "status": "unavailable"},
+        ],
+    )
+    output = capsys.readouterr().out
+    assert "work" in output and "20%" in output and "80%" in output
+    assert "2026-11-01T01:00:00Z" in output and "2026-11-07T01:00:00Z" in output
+    assert "default" in output and "unavailable" in output

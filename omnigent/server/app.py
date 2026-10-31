@@ -3529,6 +3529,8 @@ def create_app(
             conversation_store,
             auth_provider=auth_provider,
             feature_flags=resolved_feature_flags,
+            host_registry=host_registry,
+            host_store=host_store,
         ),
         prefix="/v1",
         tags=["usage"],
@@ -4548,6 +4550,7 @@ def create_app(
     # except (a hidden failure). No host_store = host support is simply
     # not enabled (host connects get 404), rather than silently broken.
     if host_store is not None:
+        from omnigent.server.routes.claude_quotas import create_claude_quotas_router
         from omnigent.server.routes.harness_startup import create_harness_startup_router
         from omnigent.server.routes.host_tunnel import create_host_tunnel_router
         from omnigent.server.routes.hosts import create_hosts_router
@@ -4624,7 +4627,17 @@ def create_app(
             tags=["hosts"],
         )
         app.include_router(
-            create_mcp_servers_router(host_registry, host_store, auth_provider=auth_provider),
+            create_mcp_servers_router(
+                host_registry,
+                host_store,
+                auth_provider=auth_provider,
+                conversation_store=conversation_store,
+            ),
+            prefix="/v1",
+            tags=["hosts"],
+        )
+        app.include_router(
+            create_claude_quotas_router(host_registry, host_store, auth_provider=auth_provider),
             prefix="/v1",
             tags=["hosts"],
         )

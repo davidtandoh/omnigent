@@ -40,6 +40,7 @@ from omnigent.db.account_authority import (
 from omnigent.db.db_models import InvalidUuidError, current_workspace_id, uuid_to_bytes
 from omnigent.host.frames import (
     CAP_CODEX_SIDE_CHAT,
+    HostClaudeQuotasResultFrame,
     HostHelloFrame,
     HostMcpServersResultFrame,
     HostMcpToolsResultFrame,
@@ -90,6 +91,13 @@ def _canonical_host_id(host_id: str) -> str:
         return uuid_to_bytes(host_id).hex()
     except InvalidUuidError:
         return host_id
+
+
+def _fail_pending_claude_quotas(conn: HostConnection) -> None:
+    while conn.pending_claude_quotas:
+        request_id, future = conn.pending_claude_quotas.popitem()
+        if not future.done():
+            future.set_result(HostClaudeQuotasResultFrame(request_id))
 
 
 def _fail_pending_harness_startup(conn: HostConnection) -> None:
@@ -486,6 +494,9 @@ class HostConnection:
     pending_skills: dict[str, asyncio.Future[HostSkillsResultFrame]] = field(
         default_factory=dict,
     )
+    pending_claude_quotas: dict[str, asyncio.Future[HostClaudeQuotasResultFrame]] = field(
+        default_factory=dict
+    )
     pending_harness_startup: dict[str, asyncio.Future[HarnessStartup | None]] = field(
         default_factory=dict
     )
@@ -610,6 +621,7 @@ class HostRegistry:
                 old.retirement_reason = "replaced"
                 old.outbound_queue.put_nowait(None)
                 _fail_pending_imports(old)
+                _fail_pending_claude_quotas(old)
                 _fail_pending_harness_startup(old)
                 _fail_pending_plugins(old)
                 _fail_pending_skill_content(old)
@@ -659,6 +671,7 @@ class HostRegistry:
         removed.retirement_reason = "deregistered"
         removed.outbound_queue.put_nowait(None)
         _fail_pending_imports(removed)
+        _fail_pending_claude_quotas(removed)
         _fail_pending_harness_startup(removed)
         _fail_pending_plugins(removed)
         _fail_pending_skill_content(removed)

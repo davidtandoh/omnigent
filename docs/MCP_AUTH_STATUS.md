@@ -38,6 +38,8 @@ to `connected` updates the row.
 
 ## Rules the reader enforces
 
+- Named Claude account inventories omit this file's Claude auth state and sign-in
+  URLs because entries have no account scope. Codex and Cursor entries still apply.
 - An entry naming a server the host did not discover is ignored. Report servers under
   the name and harness the config uses.
 - A `status` outside the two values above is ignored, so a newer manager can add one

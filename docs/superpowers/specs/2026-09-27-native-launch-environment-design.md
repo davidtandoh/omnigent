@@ -87,3 +87,26 @@ Focused tests cover parsing, duplicates, empty values, size limits, API-to-host
 transport, daemon-to-runner transport, envelope removal, and all four native
 terminal builders. Live verification uses harmless sentinels with Codex and
 Claude and reads them from each wrapped agent's tool shell.
+
+## Account usage and configuration readers
+
+See the [native launch usage](../../../README.md#2-start-your-first-agent)
+for account labels, quota output, and visibility rules.
+`GET /v1/usage` reads each session's recorded `session_overrides.account`.
+Its `account_visible` field distinguishes a withheld account from the default
+login when `account` is null.
+
+The status-line wrapper and runner skill discovery use
+`selected_claude_config_dir`. The explicit runner selection takes precedence
+over the ambient environment.
+
+The host reads each Claude account's 5-hour and 7-day usage and reset times
+with the installed `quota-axi --provider claude --json --no-credential-refresh`,
+using that account's local `CLAUDE_CONFIG_DIR` and a three-second timeout per
+read. `GET /v1/hosts/{host_id}/claude-quotas` returns a `quotas` object field;
+`GET /v1/usage` groups these readings by host in `claude_quotas`.
+
+For session skill and MCP discovery, the server authorizes the host and session
+owner before sending the recorded account name. The host resolves the folder
+locally and scopes its cache by account. Account folder paths never cross the
+tunnel.

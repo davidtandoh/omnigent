@@ -75,6 +75,7 @@ def skills_app(db_uri: str, tmp_path: Path):
         owner="owner",
     )
     app = FastAPI()
+    app.state.conversations = conversations
     app.state.host_store = hosts
     app.state.agent_cache = AgentCache(artifacts, tmp_path / "cache")
     app.state.agent_store = agents
@@ -388,3 +389,33 @@ async def test_managed_host_bundle_token_is_bound_to_session_host(
         assert response.headers["X-Agent-Id"] == agent.id
         assert response.headers["X-Agent-Version"] == str(agent.version)
         assert response.headers["Cache-Control"] == "no-store"
+
+
+@pytest.mark.parametrize("user", ["owner", "editor"])
+async def test_named_account_skills_require_owner_and_send_account(presession_app, user):
+    from omnigent.host.frames import CAP_ACCOUNT_INVENTORY
+
+    app, _, conn, original, agent, _ = presession_app
+    conv = app.state.conversations.create_conversation(
+        agent_id=agent.id, host_id=conn.host_id, workspace="/actual/workspace", account="work"
+    )
+    app.state.conversations.get_session_owner = lambda *a, **k: "owner"
+    app.state.conversations.get_conversation = lambda *a, **k: conv
+    conn.hello.capabilities.append(CAP_ACCOUNT_INVENTORY)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        task = asyncio.create_task(
+            client.get(
+                "/v1/skills", params={"session_id": original.id}, headers={"x-test-user": user}
+            )
+        )
+        if user == "owner":
+            frame = decode_host_frame((await asyncio.wait_for(conn.outbound_queue.get(), 2)).data)
+            assert isinstance(frame, HostSkillsFrame) and frame.account == "work"
+            conn.pending_skills[frame.request_id].set_result(
+                HostSkillsResultFrame(frame.request_id, "ok", session_id=original.id)
+            )
+        response = await task
+    assert response.status_code == (200 if user == "owner" else 403)
+    assert conn.outbound_queue.empty()

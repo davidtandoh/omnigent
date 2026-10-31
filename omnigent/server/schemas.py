@@ -31,6 +31,7 @@ from omnigent.entities import (
     USER_SESSION_TITLE_MAX_CHARS,
     ConversationItem,
 )
+from omnigent.host.claude_quotas import ClaudeAccountQuota
 from omnigent.inner.native_attachments import reject_authored_framework_notices
 
 # ── Shared ──────────────────────────────────────────────────────
@@ -3150,6 +3151,9 @@ class SessionUsage(BaseModel):
     other_harnesses: list[str] | None = None
     llm_model: str | None = None
     agent_name: str | None = None
+    # Owner-only Claude account name; account_visible distinguishes withheld values.
+    account: str | None = None
+    account_visible: bool = False
 
 
 class DailyCost(BaseModel):
@@ -3157,6 +3161,12 @@ class DailyCost(BaseModel):
 
     day: str
     cost_usd: float = 0.0
+
+
+class HostClaudeQuota(BaseModel):
+    host_id: str
+    host_name: str
+    quotas: list[ClaudeAccountQuota]
 
 
 class UsageReport(BaseModel):
@@ -3191,6 +3201,7 @@ class UsageReport(BaseModel):
     total_cost_usd: float = 0.0
     daily_costs: list[DailyCost] = Field(default_factory=list)
     sessions: list[SessionUsage] = Field(default_factory=list)
+    claude_quotas: list[HostClaudeQuota] = Field(default_factory=list)
 
 
 # ── Permissions ────────────────────────────────────────────────────

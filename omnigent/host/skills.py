@@ -51,9 +51,17 @@ class HostSkillDiscovery:
 
     def discover(self, frame: HostSkillsFrame, root: Path) -> list[dict[str, str]]:
         """Return metadata for the exact launch target or effective session bundle."""
+        from omnigent.onboarding.claude_accounts import account_launch_environment
+
+        launch_env = (
+            account_launch_environment(frame.account, None, host_name="this host")
+            if frame.account is not None
+            else None
+        )
         key = (
             str(root),
             frame.harness,
+            frame.account,
             frame.session_id,
             frame.agent_id,
             frame.agent_version,
@@ -69,7 +77,10 @@ class HostSkillDiscovery:
                 return list(cached[1])
             if frame.session_id is None:
                 ctx = skill_source_context_from_env(
-                    roots=(root,), harness=frame.harness, skills_filter=frame.skills_filter
+                    roots=(root,),
+                    harness=frame.harness,
+                    skills_filter=frame.skills_filter,
+                    launch_env=launch_env,
                 )
                 skills = resolve_harness_skills(ctx, frame.harness)
             else:
@@ -91,7 +102,9 @@ class HostSkillDiscovery:
                     )
                     if frame.sub_agent_name:
                         spec, directory = _subagent_bundle(spec, directory, frame.sub_agent_name)
-                    skills = resolve_session_skills(spec, (root, directory), directory)
+                    skills = resolve_session_skills(
+                        spec, (root, directory), directory, launch_env=launch_env
+                    )
             result = [
                 {"name": skill.name, "description": skill.description}
                 | ({"display_name": skill.display_name} if skill.display_name else {})

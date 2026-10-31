@@ -8,7 +8,7 @@ import type { Host } from "@/hooks/useHosts";
 const authenticatedFetchMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/identity", () => ({ authenticatedFetch: authenticatedFetchMock }));
 
-import { installedHarnesses, useHarnessInventory } from "./useHarnessInventory";
+import { installedHarnesses, useHarnessInventory, useHostMcpServers } from "./useHarnessInventory";
 
 const HOST: Host = {
   host_id: "host_1",
@@ -256,4 +256,27 @@ it("keeps import review on active derived assets without fetching installed meta
   expect(authenticatedFetchMock.mock.calls.some(([url]) => String(url).endsWith("/plugins"))).toBe(
     false,
   );
+});
+
+it("scopes MCP inventory requests and cached results by session", async () => {
+  authenticatedFetchMock.mockImplementation(async (url: string) => {
+    const session = new URL(url, "http://test").searchParams.get("session_id");
+    return Response.json({
+      mcp_servers: [{ name: session, harness: "claude", transport: "stdio", scope: "user" }],
+    });
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const stableWrapper = ({ children }: { children: ReactNode }) => (
+    <QueryClientProvider client={client}>{children}</QueryClientProvider>
+  );
+  const { result, rerender } = renderHook(
+    ({ session }) => useHostMcpServers("host_1", true, undefined, session),
+    { initialProps: { session: "work session" }, wrapper: stableWrapper },
+  );
+  await waitFor(() => expect(result.current.data?.[0].name).toBe("work session"));
+  rerender({ session: "default session" });
+  await waitFor(() => expect(result.current.data?.[0].name).toBe("default session"));
+  rerender({ session: "work session" });
+  await waitFor(() => expect(result.current.data?.[0].name).toBe("work session"));
+  expect(authenticatedFetchMock).toHaveBeenCalledTimes(2);
 });

@@ -34,6 +34,7 @@ from omnigent.debug_logging import debug_event, set_current_user_id
 from omnigent.errors import ErrorCategory, ErrorImpact, ErrorPhase
 from omnigent.host.frames import (
     IMPORT_SESSION_MAX_CONNECTION_REASSEMBLED_CHARS,
+    HostClaudeQuotasResultFrame,
     HostConnectionErrorFrame,
     HostCreateDirResultFrame,
     HostCreateWorktreeResultFrame,
@@ -1030,6 +1031,11 @@ async def _receive_loop(
             skills_future = conn.pending_skills.pop(frame.request_id, None)
             if skills_future is not None and not skills_future.done():
                 skills_future.set_result(frame)
+            continue
+        if isinstance(frame, HostClaudeQuotasResultFrame):
+            quota_future = conn.pending_claude_quotas.pop(frame.request_id, None)
+            if quota_future is not None and not quota_future.done():
+                quota_future.set_result(frame)
             continue
         if isinstance(frame, HostHarnessStartupResultFrame):
             startup_future = conn.pending_harness_startup.pop(frame.request_id, None)

@@ -2563,6 +2563,7 @@ function ComposerImpl(
           : false,
       [hostMcpHarness],
     ),
+    composerSessionId,
   );
   const hostMcpStatus =
     hostMcpHarness === null

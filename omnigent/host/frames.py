@@ -30,6 +30,7 @@ from urllib.parse import urlsplit
 from pydantic import ValidationError
 
 from omnigent.harness_availability import HarnessAvailability, is_harness_availability
+from omnigent.host.claude_quotas import ClaudeAccountQuota
 from omnigent.host.harness_startup import HarnessStartup
 from omnigent.inner.native_attachments import (
     CAP_FILESYSTEM_ATTACHMENT_DELIVERY,
@@ -68,6 +69,8 @@ RUNNER_LOG_TAIL_HEADING = "--- runner log tail ---"
 CAP_CODEX_SIDE_CHAT = "codex_side_chat"
 # The host answers ``host.mcp_servers`` with its user-level MCP inventory:
 CAP_MCP_INVENTORY = "mcp_inventory"
+CAP_ACCOUNT_INVENTORY = "account_inventory"
+CAP_CLAUDE_QUOTAS = "claude_quotas"
 CAP_HARNESS_STARTUP = "harness_startup"
 CAP_PLUGINS = "plugins"
 CAP_SKILL_CONTENT = "skill_content"
@@ -90,6 +93,8 @@ HOST_CAPABILITIES: list[str] = [
     CAP_MCP_REGISTRY,
     CAP_MCP_INVENTORY,
     CAP_HARNESS_STARTUP,
+    CAP_ACCOUNT_INVENTORY,
+    CAP_CLAUDE_QUOTAS,
     CAP_REFRESH_HARNESSES,
     CAP_CLAUDE_ACCOUNT,
 ]
@@ -185,6 +190,8 @@ class HostFrameKind(str, Enum):
     SKILL_CONTENT_RESULT = "host.skill_content_result"
     MCP_TOOLS = "host.mcp_tools"
     MCP_TOOLS_RESULT = "host.mcp_tools_result"
+    CLAUDE_QUOTAS = "host.claude_quotas"
+    CLAUDE_QUOTAS_RESULT = "host.claude_quotas_result"
     HARNESS_STARTUP = "host.harness_startup"
     HARNESS_STARTUP_RESULT = "host.harness_startup_result"
     MCP_SERVERS = "host.mcp_servers"
@@ -1104,6 +1111,7 @@ class HostSkillsFrame:
     agent_version: str | None = None
     sub_agent_name: str | None = None
     skills_filter: str | list[str] = "all"
+    account: str | None = None
 
 
 @dataclass
@@ -1136,10 +1144,22 @@ class HostHarnessStartupResultFrame:
 
 
 @dataclass
+class HostClaudeQuotasFrame:
+    request_id: str
+
+
+@dataclass
+class HostClaudeQuotasResultFrame:
+    request_id: str
+    quotas: list[ClaudeAccountQuota] = field(default_factory=list)
+
+
+@dataclass
 class HostMcpServersFrame:
     """Server → host: list the user-level MCP servers each harness loads."""
 
     request_id: str
+    account: str | None = None
 
 
 @dataclass
@@ -1382,6 +1402,8 @@ HostFrame = (
     | HostMcpToolsResultFrame
     | HostHarnessStartupFrame
     | HostHarnessStartupResultFrame
+    | HostClaudeQuotasFrame
+    | HostClaudeQuotasResultFrame
     | HostMcpServersFrame
     | HostMcpServersResultFrame
     | HostImportLocalFrame
@@ -1807,6 +1829,7 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "agent_version": frame.agent_version,
                 "sub_agent_name": frame.sub_agent_name,
                 "skills_filter": frame.skills_filter,
+                "account": frame.account,
             }
         )
     if isinstance(frame, HostSkillsResultFrame):
@@ -1895,9 +1918,25 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "startup": frame.startup.model_dump() if frame.startup is not None else None,
             }
         )
+    if isinstance(frame, HostClaudeQuotasFrame):
+        return _encode_payload(
+            {"kind": HostFrameKind.CLAUDE_QUOTAS.value, "request_id": frame.request_id}
+        )
+    if isinstance(frame, HostClaudeQuotasResultFrame):
+        return _encode_payload(
+            {
+                "kind": HostFrameKind.CLAUDE_QUOTAS_RESULT.value,
+                "request_id": frame.request_id,
+                "quotas": [q.model_dump(mode="json") for q in frame.quotas],
+            }
+        )
     if isinstance(frame, HostMcpServersFrame):
         return _encode_payload(
-            {"kind": HostFrameKind.MCP_SERVERS.value, "request_id": frame.request_id}
+            {
+                "kind": HostFrameKind.MCP_SERVERS.value,
+                "request_id": frame.request_id,
+                "account": frame.account,
+            }
         )
     if isinstance(frame, HostMcpServersResultFrame):
         return _encode_payload(
@@ -2282,6 +2321,7 @@ def _decode_known_host_frame(
                 agent_version=_optional_nullable_str(msg, "agent_version"),
                 sub_agent_name=_optional_nullable_str(msg, "sub_agent_name"),
                 skills_filter=skills_filter,
+                account=_optional_nullable_str(msg, "account"),
             )
         case HostFrameKind.SKILLS_RESULT:
             return _decode_skills_result(msg)
@@ -2297,8 +2337,24 @@ def _decode_known_host_frame(
                 # Keep correlation so malformed replies fail promptly instead of timing out.
                 startup = None
             return HostHarnessStartupResultFrame(request_id, startup)
+        case HostFrameKind.CLAUDE_QUOTAS:
+            return HostClaudeQuotasFrame(request_id=_required_str(msg, "request_id"))
+        case HostFrameKind.CLAUDE_QUOTAS_RESULT:
+            request_id = _required_str(msg, "request_id")
+            try:
+                quotas = (
+                    [ClaudeAccountQuota.model_validate_json(json.dumps(q)) for q in msg["quotas"]]
+                    if isinstance(msg.get("quotas"), list)
+                    else []
+                )
+            except (ValueError, TypeError):
+                quotas = []
+            return HostClaudeQuotasResultFrame(request_id, quotas)
         case HostFrameKind.MCP_SERVERS:
-            return HostMcpServersFrame(request_id=_required_str(msg, "request_id"))
+            return HostMcpServersFrame(
+                request_id=_required_str(msg, "request_id"),
+                account=_optional_nullable_str(msg, "account"),
+            )
         case HostFrameKind.MCP_SERVERS_RESULT:
             return _decode_mcp_servers_result(msg)
         case HostFrameKind.PLUGINS:

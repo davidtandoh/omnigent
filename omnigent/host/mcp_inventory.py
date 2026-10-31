@@ -157,8 +157,9 @@ def _claude_servers(home: Path, env: Mapping[str, str]) -> list[ConfiguredMcpSer
     out = _managed_claude_servers()
     # Enterprise policy outranks user config, so a managed server keeps its name.
     managed = {server.summary["name"] for server in out}
-    configured = env.get("CLAUDE_CONFIG_DIR")
-    config_dir = Path(configured).expanduser() if configured else None
+    from omnigent.harnesses.claude_native.account import selected_claude_config_dir
+
+    config_dir = selected_claude_config_dir(env)
     data = _read_config((config_dir or home) / ".claude.json", "claude")
     out += [
         ConfiguredMcpServer(summary, config)
@@ -228,15 +229,20 @@ def _cursor_servers(home: Path) -> list[ConfiguredMcpServer]:
     ]
 
 
-def configured_mcp_servers() -> list[ConfiguredMcpServer]:
+def configured_mcp_servers(
+    launch_env: Mapping[str, str] | None = None,
+) -> list[ConfiguredMcpServer]:
     """List user-level MCP servers across Claude, Codex, and Cursor on this host.
 
     Each harness is read independently, so a missing or broken config for one
     never hides another's servers.
     """
+    from omnigent.native.launch_environment import native_launch_environment
+
     home = Path.home()
+    env = {**os.environ, **(native_launch_environment() if launch_env is None else launch_env)}
     readers = (
-        ("claude", lambda: _claude_servers(home, os.environ)),
+        ("claude", lambda: _claude_servers(home, env)),
         ("codex", _codex_servers),
         ("cursor", lambda: _cursor_servers(home)),
     )
@@ -249,8 +255,8 @@ def configured_mcp_servers() -> list[ConfiguredMcpServer]:
     return out
 
 
-def discover_mcp_servers() -> list[McpServerSummary]:
-    return [server.summary for server in configured_mcp_servers()]
+def discover_mcp_servers(launch_env: Mapping[str, str] | None = None) -> list[McpServerSummary]:
+    return [server.summary for server in configured_mcp_servers(launch_env)]
 
 
 def auth_status_path(home: Path) -> Path:
@@ -340,15 +346,33 @@ class HostMcpInventory:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._cached: tuple[float, list[McpServerSummary]] | None = None
+        self._cached: dict[str | None, tuple[float, list[McpServerSummary]]] = {}
 
-    def discover(self) -> list[McpServerSummary]:
+    def discover(self, account: str | None = None) -> list[McpServerSummary]:
         """Return the cached inventory, rescanning after the TTL; account state is always fresh."""
+        from omnigent.onboarding.claude_accounts import account_launch_environment
+
+        launch_env = (
+            account_launch_environment(account, None, host_name="this host")
+            if account is not None
+            else None
+        )
         with self._lock:
-            if self._cached is not None and self._cached[0] > time.monotonic():
-                servers = [dict(server) for server in self._cached[1]]
+            cached = self._cached.get(account)
+            if cached is not None and cached[0] > time.monotonic():
+                servers = [dict(server) for server in cached[1]]
             else:
-                result = discover_mcp_servers()
-                self._cached = (time.monotonic() + MCP_INVENTORY_CACHE_TTL_SECONDS, result)
+                result = (
+                    discover_mcp_servers(launch_env)
+                    if launch_env is not None
+                    else discover_mcp_servers()
+                )
+                self._cached[account] = (
+                    time.monotonic() + MCP_INVENTORY_CACHE_TTL_SECONDS,
+                    result,
+                )
                 servers = [dict(server) for server in result]
-        return apply_auth_status(servers, _auth_status_overlay())
+        overlay = _auth_status_overlay()
+        if account is not None:
+            overlay = {key: fields for key, fields in overlay.items() if key[0] != "claude"}
+        return apply_auth_status(servers, overlay)

@@ -9,7 +9,12 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from omnigent.harness_aliases import canonicalize_harness
-from omnigent.host.frames import HostSkillsFrame, HostSkillsResultFrame, encode_host_frame
+from omnigent.host.frames import (
+    CAP_ACCOUNT_INVENTORY,
+    HostSkillsFrame,
+    HostSkillsResultFrame,
+    encode_host_frame,
+)
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.auth import LEVEL_EDIT, AuthProvider
 from omnigent.server.host_registry import HostConnection, HostRegistry
@@ -63,6 +68,7 @@ def create_skills_router(
         The two forms cannot be combined.
         """
         user_id = require_user(request, auth_provider)
+        account = None
         agent_version = sub_agent_name = None
         spec: AgentSpec | None = None
         host = None
@@ -83,6 +89,19 @@ def create_skills_router(
             if conv.host_id is None or not conv.workspace:
                 raise HTTPException(status_code=409, detail="session host is not ready")
             host_id, path, harness = conv.host_id, conv.workspace, "session"
+            account = conv.account
+            if account is not None:
+                host = await asyncio.to_thread(
+                    resolve_host_owner, user_id=user_id, host_id=host_id, host_store=host_store
+                )
+                if (
+                    user_id is not None
+                    and await asyncio.to_thread(
+                        conversation_store.get_session_owner, conv.id, owner_only=True
+                    )
+                    != user_id
+                ):
+                    raise HTTPException(403, "session account discovery requires ownership")
             agent = (
                 await asyncio.to_thread(agent_store.get, conv.agent_id)
                 if agent_store is not None and conv.agent_id is not None
@@ -131,7 +150,10 @@ def create_skills_router(
             if host is not None:
                 raise host_absent_error(host)
             raise HTTPException(status_code=503, detail="session host is offline")
+        if account is not None and CAP_ACCOUNT_INVENTORY not in conn.hello.capabilities:
+            raise HTTPException(501, "update the host to discover account skills")
         result = await request_host_skills(
+            account=account,
             host_registry=host_registry,
             host_conn=conn,
             harness=harness,
@@ -182,6 +204,7 @@ async def request_host_skills(
     agent_version: str | None = None,
     sub_agent_name: str | None = None,
     skills_filter: str | list[str] = "all",
+    account: str | None = None,
 ) -> HostSkillsResultFrame:
     """Request skill metadata over the host tunnel, with bounded waiting and cleanup."""
     request_id = secrets.token_hex(8)
@@ -193,6 +216,7 @@ async def request_host_skills(
             encode_host_frame(
                 HostSkillsFrame(
                     request_id=request_id,
+                    account=account,
                     harness=harness,
                     path=path,
                     session_id=session_id,

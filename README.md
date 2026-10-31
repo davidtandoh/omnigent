@@ -391,6 +391,25 @@ removes its provider entry, and keeps its folder. If sign-out cannot be
 confirmed, setup warns that the login may remain. Adding the same name again
 reuses its sessions.
 
+`omnigent usage` labels each session's estimated cost with its recorded
+account. The session owner sees the account name, or `default` for the default
+login. Collaborators see `unspecified`. The cost summary still totals the
+calling user's daily costs across accounts.
+
+`omnigent usage` and `omnigent host status` also show each host owner's Claude
+accounts with their 5-hour and 7-day usage percentages and reset times.
+These readings require `quota-axi` on the host. Omnigent reads it without
+refreshing credentials. Missing tools, failed reads, or incomplete quota windows
+show `unavailable`. Usage reports also mark offline hosts as unavailable.
+Quota readings are separate from estimated session costs. Only the host owner
+receives these readings.
+
+The status-line wrapper, skills, and MCP list use the session's selected
+Claude account folder. Account names are visible only to the session owner,
+and account folder paths stay on the machine. See the
+[MCP auth-state rules](docs/MCP_AUTH_STATUS.md#rules-the-reader-enforces)
+for the limits of reported sign-in state.
+
 On macOS, Claude stores each sign-in in the login keychain, which an SSH
 session cannot open. Over SSH, setup refuses the login step and exits with an
 error. Add the account from the Mac's own screen or through Screen Sharing.

@@ -14879,3 +14879,40 @@ def test_usable_composer_height_does_not_deliver_after_resize_failure(
         with claude_native_bridge._usable_composer_height("/tmp/sock", "main"):
             pytest.fail("delivery continued after a failed resize")
     assert run.call_count == 3, "restore even if the timed-out resize may have taken effect"
+
+
+@pytest.mark.parametrize("selected_account", [False, True], ids=["default", "named"])
+def test_status_line_reads_account_settings_without_modifying_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selected_account: bool
+) -> None:
+    from omnigent.native import launch_environment
+
+    default_settings = tmp_path / "default" / "settings.json"
+    account_settings = tmp_path / "work" / "settings.json"
+    for settings, command in (
+        (default_settings, "default-hud"),
+        (account_settings, "account-hud"),
+    ):
+        settings.parent.mkdir()
+        settings.write_text(
+            json.dumps(
+                {
+                    "statusLine": {"command": command},
+                    "model": "opus",
+                    "hooks": {"Stop": []},
+                    "permissions": {"allow": ["Read"]},
+                }
+            )
+        )
+    before = {settings: settings.read_bytes() for settings in (default_settings, account_settings)}
+    monkeypatch.setattr(claude_native_bridge, "_USER_CLAUDE_SETTINGS_PATH", default_settings)
+    monkeypatch.setattr(
+        launch_environment,
+        "_installed_native_launch_environment",
+        {"CLAUDE_CONFIG_DIR": str(account_settings.parent)} if selected_account else {},
+    )
+
+    assert claude_native_bridge.read_user_status_line_command() == (
+        "account-hud" if selected_account else "default-hud"
+    )
+    assert {settings: settings.read_bytes() for settings in before} == before
