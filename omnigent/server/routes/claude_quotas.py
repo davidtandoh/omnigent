@@ -35,7 +35,8 @@ async def request_host_claude_quotas(
     conn.pending_claude_quotas[request_id] = future
     try:
         registry.send_text(conn, encode_host_frame(HostClaudeQuotasFrame(request_id)))
-        result = await asyncio.wait_for(future, timeout=10.0)
+        # Allow the host's 20-second account reads plus tunnel overhead.
+        result = await asyncio.wait_for(future, timeout=25.0)
         return result.quotas or unavailable
     except (ConnectionError, TimeoutError):
         return unavailable

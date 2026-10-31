@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -31,15 +32,19 @@ def quota_host(tmp_path: Path, monkeypatch):
     binary = tmp_path / "quota-axi"
     binary.write_text(f"""#!{sys.executable}
 import json, os, sys, time
-assert sys.argv[1:] == ["--provider", "claude", "--json", "--no-credential-refresh"]
+assert sys.argv[1:] == [
+    "--provider", "claude", "--json", "--no-credential-refresh", "--max-age", "60s"
+]
 folder = os.environ.get("CLAUDE_CONFIG_DIR")
 if folder:
     assert folder == {str(tmp_path / "work")!r}
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in os.environ
     assert "CLAUDE_SECURESTORAGE_CONFIG_DIR" not in os.environ
 mode = os.environ.get("FAKE_QUOTA_MODE")
+if mode == "slow":
+    time.sleep(4)
 if mode == "timeout":
-    time.sleep(2)
+    time.sleep(30)
 if mode == "exit":
     print("PRIVATE OUTPUT", file=sys.stderr)
     sys.exit(1)
@@ -95,6 +100,25 @@ def test_quota_windows_are_separate_and_sanitized(quota_host, monkeypatch):
     assert decode_host_frame(wire) == frame
     assert "private" not in wire and "secret" not in wire and str(quota_host.parent) not in wire
     assert "PRIVATE" not in wire
+
+
+def test_slow_quota_readings_are_available(quota_host, monkeypatch):
+    monkeypatch.setenv("FAKE_QUOTA_MODE", "slow")
+    config = {
+        "providers": {
+            f"claude-work{index}": {
+                "kind": "subscription",
+                "cli": "claude",
+                "config_dir": str(quota_host.parent / "work"),
+            }
+            for index in range(4)
+        }
+    }
+    monkeypatch.setattr("omnigent.config.load_global_config", lambda: config)
+    started = time.monotonic()
+    readings = claude_quotas.read_claude_quotas()
+    assert [q.status for q in readings] == ["available"] * 5
+    assert time.monotonic() - started < 7
 
 
 def test_stale_reading_keeps_surviving_windows_and_snapshot_time(quota_host, monkeypatch):

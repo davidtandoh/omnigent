@@ -408,8 +408,10 @@ calling user's daily costs across accounts.
 `omnigent usage` and `omnigent host status` also show each host owner's Claude
 accounts with their 5-hour and 7-day usage percentages and reset times.
 These readings require `quota-axi` on the host. Omnigent reads it without
-refreshing credentials. Missing tools or reads without a usable snapshot show
-`unavailable`. A fresh reading must contain both account-level windows. When a
+refreshing credentials. Each account read has a 20-second timeout, and accounts
+are read in parallel. Omnigent passes `--max-age 60s` so repeated loads can reuse
+quota-axi's recent reading, with its original observation time. Missing tools or
+reads without a usable snapshot show `unavailable`. A fresh reading must contain both account-level windows. When a
 fresh read fails and `quota-axi` serves its last reading instead, the CLI shows
 `stale`; that snapshot can contain only one account-level window. Usage reports
 also mark offline hosts as unavailable.
