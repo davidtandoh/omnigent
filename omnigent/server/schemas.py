@@ -3150,6 +3150,8 @@ class SessionUsage(BaseModel):
     other_harnesses: list[str] | None = None
     llm_model: str | None = None
     agent_name: str | None = None
+    # Owner-only Claude account name; None also represents the default login.
+    account: str | None = None
 
 
 class DailyCost(BaseModel):

@@ -260,3 +260,18 @@ def test_sum_daily_cost_range(db_uri: str) -> None:
     assert store.sum_daily_cost("alice", "0000-00-00") == 7.0  # all-time
     assert store.sum_daily_cost("alice", "2026-08-01") == 0.0  # nothing in range
     assert store.sum_daily_cost("nobody", "0000-00-00") == 0.0
+
+
+@pytest.mark.parametrize("owner, expected", [("owner", "work"), ("collaborator", None)])
+def test_usage_account_is_owner_only(db_uri, monkeypatch, owner, expected):
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(agent_id=_AGENT_ID, account="work")
+    monkeypatch.setattr(store, "get_session_owner", lambda *args, **kwargs: owner)
+    monkeypatch.setattr(
+        store,
+        "list_conversations",
+        lambda **kwargs: type("Page", (), {"data": [conv], "has_more": False})(),
+    )
+    report = _build_usage_report(store, "owner")
+    assert report.sessions[0].id == conv.id
+    assert report.sessions[0].account == expected

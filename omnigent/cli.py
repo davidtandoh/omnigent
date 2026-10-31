@@ -7434,7 +7434,7 @@ def _render_usage(report: dict[str, Any], limit: int) -> None:  # type: ignore[e
         ui.console.print("  [omni.muted]No usage recorded yet.[/omni.muted]")
         return
 
-    # Three columns: Session ID · Model · Cost. A single-model session fits on
+    # A single-model session fits on
     # one line; a multi-model session leaves the Model column blank on the
     # session line (id + bold authoritative total) and lists each model on its
     # own row beneath, cost muted to mark it as breakdown detail. The border
@@ -7446,20 +7446,23 @@ def _render_usage(report: dict[str, Any], limit: int) -> None:  # type: ignore[e
         border_style="omni.muted",
     )
     tbl.add_column("Session ID", style="omni.muted", no_wrap=True)
+    tbl.add_column("Account", no_wrap=True)
     tbl.add_column("Model", no_wrap=True)
     tbl.add_column("Cost", justify="right", no_wrap=True)
     for s in shown:
         sid = escape(str(s.get("id", "")))
+        account = escape(str(s.get("account") or "default"))
         total = f"[bold]{money(s.get('cost_usd', 0.0))}[/bold]"
         # Dominant model first, so the biggest spend leads (cost desc).
         models = sorted((s.get("models") or {}).items(), key=lambda kv: kv[1], reverse=True)
         if len(models) <= 1:
             model_cell = escape(str(models[0][0])) if models else "[omni.muted]—[/omni.muted]"
-            tbl.add_row(sid, model_cell, total)
+            tbl.add_row(sid, account, model_cell, total)
         else:
-            tbl.add_row(sid, "", total)
+            tbl.add_row(sid, account, "", total)
             for name, cost in models:
                 tbl.add_row(
+                    "",
                     "",
                     escape(str(name)),
                     f"[omni.muted]{money(float(cost))}[/omni.muted]",

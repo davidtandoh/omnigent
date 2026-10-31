@@ -14879,3 +14879,16 @@ def test_usable_composer_height_does_not_deliver_after_resize_failure(
         with claude_native_bridge._usable_composer_height("/tmp/sock", "main"):
             pytest.fail("delivery continued after a failed resize")
     assert run.call_count == 3, "restore even if the timed-out resize may have taken effect"
+
+
+def test_status_line_uses_selected_account(tmp_path, monkeypatch):
+    from omnigent.native import launch_environment
+
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"statusLine": {"command": "account-hud"}}))
+    monkeypatch.setattr(
+        launch_environment,
+        "_installed_native_launch_environment",
+        {"CLAUDE_CONFIG_DIR": str(tmp_path)},
+    )
+    assert claude_native_bridge.read_user_status_line_command() == "account-hud"

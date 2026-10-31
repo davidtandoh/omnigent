@@ -341,3 +341,17 @@ def test_claude_agents_skill_args_keeps_bundle_discovery_local(
         "workspace",
         "bundled",
     }
+
+
+def test_skill_context_uses_runner_account(tmp_path, monkeypatch):
+    from omnigent.native import launch_environment
+    from omnigent.spec.skill_sources import skill_source_context_from_env
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "ambient"))
+    monkeypatch.setattr(
+        launch_environment,
+        "_installed_native_launch_environment",
+        {"CLAUDE_CONFIG_DIR": str(tmp_path / "chosen")},
+    )
+    ctx = skill_source_context_from_env(roots=(), harness="claude-native")
+    assert ctx.claude_config_dir == tmp_path / "chosen"

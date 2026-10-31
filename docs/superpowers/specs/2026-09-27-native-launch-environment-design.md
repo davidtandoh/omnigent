@@ -87,3 +87,20 @@ Focused tests cover parsing, duplicates, empty values, size limits, API-to-host
 transport, daemon-to-runner transport, envelope removal, and all four native
 terminal builders. Live verification uses harmless sentinels with Codex and
 Claude and reads them from each wrapped agent's tool shell.
+
+## Account usage and configuration readers
+
+`omnigent usage` includes an Account column in the per-session table.
+`GET /v1/usage` reads each session's recorded `session_overrides.account`.
+An empty account selects the default login. Only the session owner receives
+an extra account name; collaborators receive no account name.
+The summary continues to use the existing per-user daily cost rollup.
+
+The status-line wrapper, native skill discovery, and MCP inventory use
+`selected_claude_config_dir` to follow the runner's selected account folder.
+The explicit runner selection takes precedence over the ambient environment.
+Account folder paths stay on the host.
+
+Omnigent has no quota-axi integration. Per-account 5-hour and 7-day quota
+windows and reset times remain follow-up work; session costs are estimates,
+not provider quota measurements.

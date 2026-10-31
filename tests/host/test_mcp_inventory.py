@@ -530,3 +530,18 @@ def test_the_status_file_can_live_outside_a_read_only_home(
 
     monkeypatch.setenv(mcp_inventory.MCP_AUTH_STATUS_ENV, str(elsewhere))
     assert HostMcpInventory().discover()[0]["auth_status"] == "connected"
+
+
+def test_runner_account_overrides_ambient_mcp(home, tmp_path, monkeypatch):
+    from omnigent.native import launch_environment
+
+    account = tmp_path / "account"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
+    monkeypatch.setattr(
+        launch_environment,
+        "_installed_native_launch_environment",
+        {"CLAUDE_CONFIG_DIR": str(account)},
+    )
+    _write_json(home / ".claude.json", {"mcpServers": {"wrong": _stdio()}})
+    _write_json(account / ".claude.json", {"mcpServers": {"chosen": _stdio()}})
+    assert [s["name"] for s in discover_mcp_servers()] == ["chosen"]

@@ -157,8 +157,10 @@ def _claude_servers(home: Path, env: Mapping[str, str]) -> list[ConfiguredMcpSer
     out = _managed_claude_servers()
     # Enterprise policy outranks user config, so a managed server keeps its name.
     managed = {server.summary["name"] for server in out}
-    configured = env.get("CLAUDE_CONFIG_DIR")
-    config_dir = Path(configured).expanduser() if configured else None
+    from omnigent.harnesses.claude_native.account import selected_claude_config_dir
+    from omnigent.native.launch_environment import native_launch_environment
+
+    config_dir = selected_claude_config_dir({**env, **native_launch_environment()})
     data = _read_config((config_dir or home) / ".claude.json", "claude")
     out += [
         ConfiguredMcpServer(summary, config)

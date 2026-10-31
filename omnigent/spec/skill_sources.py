@@ -126,7 +126,9 @@ def skill_source_context_from_env(
     bundle_dir: Path | None = None,
 ) -> SkillSourceContext:
     """Use the same ambient harness configuration for host and runner discovery."""
-    configured_claude_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    from omnigent.harnesses.claude_native.account import selected_claude_config_dir
+
+    configured_claude_dir = selected_claude_config_dir()
     codex_home: Path | None = None
     if _harness_family(harness) == "codex":
         from omnigent.inner.codex_executor import _codex_home_config_source_from_env
@@ -138,9 +140,7 @@ def skill_source_context_from_env(
         home=Path.home(),
         skills_filter=skills_filter,
         bundle_dir=bundle_dir,
-        claude_config_dir=(
-            Path(configured_claude_dir).expanduser() if configured_claude_dir else None
-        ),
+        claude_config_dir=configured_claude_dir,
         codex_home=codex_home,
     )
 

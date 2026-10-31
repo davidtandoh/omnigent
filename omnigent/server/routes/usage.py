@@ -192,6 +192,13 @@ def _build_usage_report(
             )
             sessions.append(
                 SessionUsage(
+                    account=(
+                        conv.account
+                        if user_id is None
+                        or conversation_store.get_session_owner(conv.id, owner_only=True)
+                        == user_id
+                        else None
+                    ),
                     id=conv.id,
                     created_at=conv.created_at,
                     updated_at=conv.updated_at,

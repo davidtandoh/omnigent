@@ -131,3 +131,13 @@ def test_usage_command_json() -> None:
     payload = json.loads(result.output)
     assert payload["cost_today"] == 1.5
     assert payload["sessions"][0]["models"] == {"claude-opus-4-8": 1.5}
+
+
+def test_render_usage_account_column(capsys):
+    _render_usage(
+        {"sessions": [{"id": "one", "account": "work"}, {"id": "two", "account": None}]}, limit=10
+    )
+    out = capsys.readouterr().out
+    assert "Account" in out
+    assert "work" in out
+    assert "default" in out

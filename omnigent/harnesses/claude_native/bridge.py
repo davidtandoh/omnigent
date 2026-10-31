@@ -8657,7 +8657,13 @@ def read_user_status_line_command() -> str | None:
         ``None`` when no global statusLine is configured / readable.
     """
     try:
-        raw = _USER_CLAUDE_SETTINGS_PATH.read_text(encoding="utf-8")
+        from omnigent.harnesses.claude_native.account import selected_claude_config_dir
+
+        config_dir = selected_claude_config_dir()
+        settings_path = (
+            config_dir / "settings.json" if config_dir is not None else _USER_CLAUDE_SETTINGS_PATH
+        )
+        raw = settings_path.read_text(encoding="utf-8")
     except OSError:
         return None
     try:
