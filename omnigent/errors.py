@@ -253,6 +253,7 @@ class ErrorCode:
     # Keep the string equal to frames.HARNESS_NOT_CONFIGURED_ERROR_CODE —
     # the host's wire error code passes through as the API error code.
     HARNESS_NOT_CONFIGURED = "harness_not_configured"
+    CLAUDE_ACCOUNT_UNAVAILABLE = "claude_account_unavailable"
     REFRESH_UNSUPPORTED = "refresh_unsupported"
     WORKSPACE_MISSING = "workspace_missing"
     SESSION_AGENT_MISSING = "session_agent_missing"
@@ -302,6 +303,7 @@ _CODE_TO_HTTP_STATUS: dict[str, int] = {
     # can't satisfy it until the user runs `omnigent setup` there —
     # neither a 400 (input is fine) nor a 503 (a retry won't help).
     ErrorCode.HARNESS_NOT_CONFIGURED: 412,
+    ErrorCode.CLAUDE_ACCOUNT_UNAVAILABLE: 412,
     ErrorCode.REFRESH_UNSUPPORTED: 409,
     ErrorCode.WORKSPACE_MISSING: 410,
     # 410 Gone, like WORKSPACE_MISSING: a valid request whose bound agent was
@@ -347,6 +349,7 @@ _CODE_TO_CATEGORY: dict[str, ErrorCategory] = {
     ErrorCode.HOST_OFFLINE: ErrorCategory.USER,
     ErrorCode.RUNNER_CAPABILITY_MISMATCH: ErrorCategory.CONFIG,
     ErrorCode.HARNESS_NOT_CONFIGURED: ErrorCategory.CONFIG,
+    ErrorCode.CLAUDE_ACCOUNT_UNAVAILABLE: ErrorCategory.CONFIG,
     ErrorCode.REFRESH_UNSUPPORTED: ErrorCategory.CONFIG,
     # The human deleted their own workspace on the host.
     ErrorCode.WORKSPACE_MISSING: ErrorCategory.USER,
@@ -388,6 +391,7 @@ _CODE_TO_IMPACT: dict[str, ErrorImpact] = {
     # Launch-time hard stops: the task cannot start until the host/deploy changes.
     ErrorCode.RUNNER_CAPABILITY_MISMATCH: ErrorImpact.BLOCKING,
     ErrorCode.HARNESS_NOT_CONFIGURED: ErrorImpact.BLOCKING,
+    ErrorCode.CLAUDE_ACCOUNT_UNAVAILABLE: ErrorImpact.BLOCKING,
     ErrorCode.WORKSPACE_MISSING: ErrorImpact.BLOCKING,
     ErrorCode.SESSION_AGENT_MISSING: ErrorImpact.BLOCKING,
     # Self-healing: a session state that resumes on reconnect, a routing
@@ -437,6 +441,7 @@ _CODE_TO_PHASE: dict[str, ErrorPhase] = {
     ErrorCode.HOST_OFFLINE: ErrorPhase.RUNNER_LAUNCH,
     ErrorCode.RUNNER_CAPABILITY_MISMATCH: ErrorPhase.RUNNER_LAUNCH,
     ErrorCode.HARNESS_NOT_CONFIGURED: ErrorPhase.HARNESS_SETUP,
+    ErrorCode.CLAUDE_ACCOUNT_UNAVAILABLE: ErrorPhase.HARNESS_SETUP,
     ErrorCode.REFRESH_UNSUPPORTED: ErrorPhase.HARNESS_SETUP,
     ErrorCode.WORKSPACE_MISSING: ErrorPhase.HARNESS_SETUP,
     ErrorCode.SESSION_AGENT_MISSING: ErrorPhase.HARNESS_SETUP,

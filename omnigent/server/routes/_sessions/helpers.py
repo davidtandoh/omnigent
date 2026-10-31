@@ -6232,9 +6232,26 @@ async def _launch_runner_on_host_locked(
     host_conn: HostConnection,
 ) -> _HostLaunchAttempt:
     """The launch round-trip proper; runs under the conversation's lock."""
-    from omnigent.host.frames import HostLaunchRunnerFrame, encode_host_frame
+    from omnigent.host.frames import (
+        HARNESS_NOT_CONFIGURED_ERROR_CODE,
+        HostLaunchRunnerFrame,
+        encode_host_frame,
+    )
     from omnigent.runner.identity import token_bound_runner_id
+    from omnigent.server.routes._host_launch import account_launch_refusal
 
+    shared_account_error = (
+        "The session's Claude account could not be used on this host. "
+        "Ask a session manager to check the host configuration and launch logs."
+    )
+    if (refusal := account_launch_refusal(conv.account, host_conn)) is not None:
+        _logger.error("Host refused account launch: %s", refusal)
+        # Refuse before rotating the binding: no runner is coming.
+        return _HostLaunchAttempt(
+            runner_id=conv.runner_id or "",
+            error_code=HARNESS_NOT_CONFIGURED_ERROR_CODE,
+            error=shared_account_error,
+        )
     await host_registry.admit_launch(host_conn, conv.id)
     if conv.runner_id and _resolve_harness(conv) == "codex-native":
         if conv.host_id is None or host_registry.get(conv.host_id) is not host_conn:
@@ -6330,6 +6347,7 @@ async def _launch_runner_on_host_locked(
                 # Only the binding we just replaced: an unbound session's old
                 # runner may now serve its /clear or /switch successor.
                 superseded_runner_ids=(superseded_runner_id,) if superseded_runner_id else (),
+                account=conv.account,
             )
         )
         try:
@@ -6387,12 +6405,13 @@ async def _launch_runner_on_host_locked(
                     error_category=refusal_category,
                     error_impact=ErrorImpact.BLOCKING.value,
                     error_phase=ErrorPhase.RUNNER_LAUNCH.value,
+                    error_detail=result.get("error"),
                 ),
             )
             return _HostLaunchAttempt(
                 runner_id=new_runner_id,
                 error_code=result.get("error_code"),
-                error=result.get("error"),
+                error=shared_account_error if conv.account is not None else result.get("error"),
             )
         return _HostLaunchAttempt(runner_id=new_runner_id, acknowledged=True)
 
@@ -6935,6 +6954,10 @@ def _native_terminal_failure_from_runner_response(
                 and isinstance(raw_message, str)
                 and raw_message.strip()
             ):
+                from omnigent.onboarding.claude_accounts import AccountUnavailableError
+
+                if raw_code == AccountUnavailableError.code:
+                    raw_message = AccountUnavailableError.public_message
                 return _NativeTerminalEnsureOutcome(
                     error=ErrorData(source="execution", code=raw_code, message=raw_message),
                     failure_context=normalize_failure_context(body.get("failure_context")),
@@ -8949,6 +8972,25 @@ def _agent_carries_cursor_fork_history(agent: Agent) -> bool:
     return canonicalize_harness(spec.executor.harness_kind) in _CURSOR_FORK_HISTORY_HARNESSES
 
 
+def _agent_harness(agent: Agent) -> str | None:
+    """Return *agent*'s canonical harness, or ``None`` when its bundle can't load.
+
+    :param agent: The agent to classify.
+    :returns: e.g. ``"claude-native"``.
+    """
+    from omnigent.harness_aliases import canonicalize_harness
+
+    try:
+        spec = (
+            get_agent_cache()
+            .load(agent.id, agent.bundle_location, expand_env=agent.operator_authored)
+            .spec
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    return canonicalize_harness(spec.executor.harness_kind) or spec.executor.harness_kind
+
+
 def _filesystem_attachment_in_history(
     session_id: str,
     conversation_store: ConversationStore,
@@ -10277,6 +10319,43 @@ def _spec_harness(spec: AgentSpec) -> str:
     return canonicalize_harness(harness) or harness
 
 
+def _resolve_create_account(
+    *,
+    requested: str | None,
+    harness: str | None,
+    parent: Conversation | None,
+) -> str | None:
+    """Choose the Claude account a new session records.
+
+    Only explicit requests select an account for a top-level claude-native
+    session. Claude-native children inherit the parent's account. Other
+    harnesses do not record a Claude account; Claude SDK children refuse one.
+
+    :param requested: The create request's ``account``, e.g. ``"work"``.
+    :param harness: The session's canonical harness, e.g. ``"claude-native"``.
+    :param parent: The parent conversation for a child create, else ``None``.
+    :returns: The effective account to store, or ``None`` for no account.
+    :raises OmnigentError: ``INVALID_INPUT`` when the request conflicts with
+        the harness or the parent's account.
+    """
+    from omnigent.server.routes._session_create_validation import validate_account_harness
+
+    validate_account_harness(requested, harness)
+    if parent is not None:
+        if harness == "claude-sdk":
+            validate_account_harness(parent.account, harness)
+        if harness != "claude-native":
+            return None
+        if requested is not None and requested != parent.account:
+            raise OmnigentError(
+                "A child session runs on its parent's Claude account; "
+                "the requested account conflicts with that account.",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        return parent.account
+    return requested
+
+
 def _spec_config_flag_explicitly_disabled(spec: AgentSpec, key: str) -> bool:
     """
     Return whether an ``executor.config`` flag is explicitly set false.
@@ -10787,6 +10866,7 @@ def _persist_stored_session_bundle(
             workspace=metadata.workspace,
             terminal_launch_args=metadata.terminal_launch_args,
             parent_conversation_id=metadata.parent_session_id,
+            account=metadata.account,
             runner_id=runner_id,
             project_id=metadata.project_id,
             host_id=metadata.host_id,
@@ -10870,6 +10950,7 @@ def _persist_session_for_uploaded_agent(
             inference_snapshot=inference_snapshot,
             labels=metadata.labels,
             reasoning_effort=metadata.reasoning_effort,
+            account=metadata.account,
             model_override=inference_model,
         )
     except IntegrityError as exc:

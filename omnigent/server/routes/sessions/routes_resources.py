@@ -50,6 +50,7 @@ from omnigent.server._elicitation_registry import (
 )
 from omnigent.server.auth import (
     LEVEL_EDIT,
+    LEVEL_MANAGE,
     LEVEL_OWNER,
     LEVEL_READ,
     AuthProvider,
@@ -1566,7 +1567,21 @@ def register_resources_routes(
             conv,
         )
         if status >= 400:
+            from omnigent.onboarding.claude_accounts import AccountUnavailableError
+
             error = payload.get("error", {})
+            if error.get("code") == AccountUnavailableError.code and permission_store is not None:
+                can_manage = await asyncio.to_thread(
+                    check_session_access,
+                    _get_user_id(request, auth_provider),
+                    session_id,
+                    LEVEL_MANAGE,
+                    permission_store,
+                    conversation_store,
+                    conversation=conv,
+                )
+                if not can_manage:
+                    error["message"] = AccountUnavailableError.public_message
             # OmnigentError derives http_status from code; pass the runner's code, not a status.
             raise OmnigentError(
                 error.get("message", f"Terminal launch failed (runner returned HTTP {status})"),

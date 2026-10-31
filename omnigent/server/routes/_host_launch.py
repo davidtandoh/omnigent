@@ -115,6 +115,27 @@ class HostLaunchTarget:
     conv: Conversation
 
 
+def account_launch_refusal(account: str | None, conn: HostConnection) -> str | None:
+    """Return why *conn*'s host cannot launch a session on *account*, or ``None``.
+
+    An older host drops the frame's ``account`` and would start the session
+    on its default Claude login, so the server refuses instead of sending it.
+
+    :param account: The session's Claude account name, e.g. ``"work"``.
+    :param conn: The live connection of the host that would launch it.
+    :returns: A user-facing refusal, or ``None`` when the launch may proceed.
+    """
+    from omnigent.host.frames import CAP_CLAUDE_ACCOUNT
+
+    if account is None or CAP_CLAUDE_ACCOUNT in conn.hello.capabilities:
+        return None
+    return (
+        f"Claude account {account!r} cannot be used on host {conn.hello.name!r}: "
+        "its Omnigent version cannot select Claude accounts. Upgrade Omnigent "
+        "on that machine, then retry."
+    )
+
+
 def resolve_host_owner(
     *,
     user_id: str | None,

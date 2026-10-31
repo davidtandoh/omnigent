@@ -162,7 +162,7 @@ from omnigent.server.managed_hosts import (
     parse_repo_workspace,
     read_managed_repo_workspaces,
 )
-from omnigent.server.permissions import check_session_access
+from omnigent.server.permissions import check_session_access, session_account_for_viewer
 from omnigent.server.routes._auth_helpers import (
     attribution_user as _attribution_user,
 )
@@ -338,6 +338,7 @@ from omnigent.server.routes._sessions.helpers import (
     _repl_terminal_ui_labels,
     _require_declared_subagent,
     _require_external_status_forward,
+    _resolve_create_account,
     _resolve_harness,
     _resolve_llm_model,
     _resolve_subagent_spec,
@@ -1371,6 +1372,7 @@ def _build_session_response(
     agent_store: AgentStore | None = None,
     agent_cache: AgentCache | None = None,
     side_chat_sealed: bool = False,
+    account: str | None = None,
 ) -> SessionResponse:
     """
     Build a :class:`SessionResponse` from store-side entities.
@@ -1506,6 +1508,7 @@ def _build_session_response(
         cost_control_mode_override=conv.cost_control_mode_override,
         subagent_routing_override=conv.subagent_routing_override,
         share_workspace_files=conv.share_workspace_files,
+        account=account,
         context_window=context_window,
         last_total_tokens=last_total_tokens,
         # Seed the client's cost indicator on resume. Uses the SUBTREE
@@ -11639,6 +11642,11 @@ async def _create_session_from_existing_agent(
             _create_resolved_harness, agent, harness_override, agent_cache
         )
     )
+    session_account = _resolve_create_account(
+        requested=body.account,
+        harness=selected_harness,
+        parent=_parent_for_routing,
+    )
     await validate_create_harness_readiness(
         harness=selected_harness,
         host_id=body.host_id,
@@ -11845,6 +11853,7 @@ async def _create_session_from_existing_agent(
                 "cost_control_mode_override": cost_control_mode_override,
                 "subagent_routing_override": subagent_routing_override,
                 "harness_override": harness_override,
+                "account": session_account,
             }
         )
         with creation_stage("create_persistence_ms"):
@@ -11866,6 +11875,7 @@ async def _create_session_from_existing_agent(
                 cost_control_mode_override=cost_control_mode_override,
                 subagent_routing_override=subagent_routing_override,
                 harness_override=harness_override,
+                account=session_account,
                 **snapshot_kwargs,
             )
     except NameAlreadyExistsError as exc:
@@ -12111,6 +12121,8 @@ async def _create_session_from_existing_agent(
         liveness_lookup=liveness_lookup,
         conversation=conv,
         request=request,
+        viewer_id=user_id,
+        permission_store=permission_store,
     )
     return response, conv
 
@@ -12207,6 +12219,21 @@ def _create_session_from_bundle(
             ) from exc
         if terminal_launch_args is not None:
             metadata = metadata.model_copy(update={"terminal_launch_args": terminal_launch_args})
+
+    bundle_parent = (
+        conversation_store.get_conversation(metadata.parent_session_id)
+        if metadata.parent_session_id is not None
+        else None
+    )
+    metadata = metadata.model_copy(
+        update={
+            "account": _resolve_create_account(
+                requested=metadata.account,
+                harness=_spec_harness(spec),
+                parent=bundle_parent,
+            )
+        }
+    )
 
     if agent_store is not None and metadata.parent_session_id is None:
         agent = uploaded_agent_for(
@@ -13252,6 +13279,7 @@ async def _get_session_snapshot(
     viewer_id: str | None = None,
     request: Request | None = None,
     include_usage: bool = True,
+    permission_store: PermissionStore | None = None,
 ) -> SessionResponse:
     """
     Read a full session snapshot from the store.
@@ -13547,6 +13575,9 @@ async def _get_session_snapshot(
         items,
         status,
         permission_level,
+        account=await asyncio.to_thread(
+            session_account_for_viewer, viewer_id, conv, permission_store, conv_store
+        ),
         side_chat_sealed=await _codex_side_chat_fork_sealed(conv, conv_store),
         background_task_count=_session_background_task_count_cache.get(session_id),
         background_tasks=_session_background_tasks_cache.get(session_id),

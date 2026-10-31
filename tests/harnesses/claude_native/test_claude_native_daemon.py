@@ -305,6 +305,86 @@ async def test_create_claude_session_uses_selected_account_effort(
         assert f'"reasoning_effort": "{expected}"'.encode() in captured["body"]
 
 
+async def test_create_claude_session_records_only_the_account_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, bytes] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content
+        return httpx.Response(201, json={"session_id": "conv_new"})
+
+    account_dir = str(tmp_path / "accounts" / "work")
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://e.com"
+    ) as client:
+        await claude_native._create_claude_session(
+            client,
+            b"bundle",
+            bridge_id=None,
+            launch_env={"CLAUDE_CONFIG_DIR": account_dir},
+            account="work",
+        )
+
+    assert b'"account": "work"' in captured["body"]
+    assert account_dir.encode() not in captured["body"]
+
+
+def _session_lookup(monkeypatch: pytest.MonkeyPatch, response: httpx.Response) -> None:
+    """Answer ``_resumed_session_account``'s session read with *response*."""
+    real_client = httpx.Client
+
+    def _client(**kwargs: Any) -> httpx.Client:
+        kwargs.pop("trust_env", None)
+        return real_client(transport=httpx.MockTransport(lambda request: response), **kwargs)
+
+    monkeypatch.setattr(claude_native.httpx, "Client", _client)
+
+
+@pytest.mark.parametrize(
+    ("recorded", "requested", "expected"),
+    [("work", None, "work"), ("work", "work", "work"), (None, None, None)],
+)
+def test_resume_keeps_the_recorded_account(
+    monkeypatch: pytest.MonkeyPatch,
+    recorded: str | None,
+    requested: str | None,
+    expected: str | None,
+) -> None:
+    _session_lookup(monkeypatch, httpx.Response(200, json={"id": "conv_a", "account": recorded}))
+    assert (
+        claude_native._resumed_session_account(
+            base_url="https://e.com", headers={}, session_id="conv_a", requested=requested
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize(("recorded", "current"), [("work", "'work'"), (None, "default")])
+def test_resume_on_another_account_is_refused_and_points_at_new_session(
+    monkeypatch: pytest.MonkeyPatch, recorded: str | None, current: str
+) -> None:
+    """Resuming with a different --account never re-homes the session silently."""
+    _session_lookup(monkeypatch, httpx.Response(200, json={"id": "conv_a", "account": recorded}))
+    with pytest.raises(click.ClickException) as caught:
+        claude_native._resumed_session_account(
+            base_url="https://e.com", headers={}, session_id="conv_a", requested="client-a"
+        )
+    assert current in caught.value.message
+    assert "Start a new session" in caught.value.message
+
+
+@pytest.mark.parametrize("requested", [None, "work"])
+def test_unreadable_session_refuses_resume(
+    monkeypatch: pytest.MonkeyPatch, requested: str | None
+) -> None:
+    _session_lookup(monkeypatch, httpx.Response(500, json={"detail": "boom"}))
+    with pytest.raises(click.ClickException, match=r"Cannot confirm.*Claude account; retry"):
+        claude_native._resumed_session_account(
+            base_url="https://e.com", headers={}, session_id="conv_a", requested=requested
+        )
+
+
 def _install_daemon_seam_mocks(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -349,6 +429,7 @@ def _install_daemon_seam_mocks(
         claude_native, "_align_working_directory_with_session", lambda *a, **k: None
     )
     monkeypatch.setattr(claude_native, "_record_launch_for_fresh_session", lambda sid: None)
+    monkeypatch.setattr(claude_native, "_resumed_session_account", lambda **k: None)
 
     async def _fake_prepare(**kwargs: Any) -> claude_native.PreparedClaudeTerminal:
         """Capture prepare kwargs and return the canned terminal."""
@@ -680,3 +761,95 @@ def test_remote_resume_relocates_the_selected_account_transcript(
         assert not source.exists()
         assert json.loads(target.read_text())["cwd"] == str(current.resolve())
     assert not (tmp_path / "other-account").exists()
+
+
+def test_remote_resume_bypasses_broken_default_provider(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Local reads use the session's account folder; only the name reaches the server."""
+    account_dir = tmp_path / "accounts" / "work"
+    (tmp_path / "config.yaml").write_text(
+        "providers:\n  claude-work:\n    kind: subscription\n    cli: claude\n"
+        f"    config_dir: {account_dir}\n"
+    )
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    spec_path = tmp_path / "claude.yaml"
+    spec_path.write_text("name: claude-native-ui\nprompt: hi\n")
+    resumed_session_account = claude_native._resumed_session_account
+    captured: dict[str, Any] = {}
+    _install_daemon_seam_mocks(
+        monkeypatch,
+        prepared=claude_native.PreparedClaudeTerminal(
+            session_id="conv_existing",
+            terminal_id=claude_native.claude_terminal_resource_id(),
+            bridge_dir=tmp_path / "bridge",
+            reattached=False,
+        ),
+        attach_outcome=claude_native._AttachOutcome.EXITED,
+        captured=captured,
+        ensured=[],
+    )
+    monkeypatch.setattr(claude_native, "_resumed_session_account", resumed_session_account)
+    _session_lookup(
+        monkeypatch, httpx.Response(200, json={"id": "conv_existing", "account": "work"})
+    )
+    monkeypatch.setattr(claude_native, "_preflight_local_tools", lambda command: None)
+
+    def broken_default_provider(**kwargs):
+        raise click.ClickException("Default gateway credential is unset")
+
+    monkeypatch.setattr(claude_native, "resolve_native_claude_config", broken_default_provider)
+
+    claude_native.run_claude_native(
+        server="https://example.com",
+        session_id="conv_existing",
+        resume_picker=False,
+        claude_args=(),
+    )
+
+    assert captured["settings_env"] == {"CLAUDE_CONFIG_DIR": str(account_dir)}
+    assert captured["launch_env"] is None
+
+
+@pytest.mark.parametrize("failure", ["timeout", "non-200"])
+@pytest.mark.parametrize("requested", [None, "work"])
+def test_resume_lookup_failure_stops_before_local_transcript_handling(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str, requested: str | None
+) -> None:
+    from unittest.mock import Mock
+
+    resumed_session_account = claude_native._resumed_session_account
+    captured: dict[str, Any] = {}
+    _install_daemon_seam_mocks(
+        monkeypatch,
+        prepared=claude_native.PreparedClaudeTerminal(
+            session_id="conv_existing",
+            terminal_id=claude_native.claude_terminal_resource_id(),
+            bridge_dir=tmp_path / "bridge",
+            reattached=False,
+        ),
+        attach_outcome=claude_native._AttachOutcome.EXITED,
+        captured=captured,
+        ensured=[],
+    )
+    monkeypatch.setattr(claude_native, "_resumed_session_account", resumed_session_account)
+    lookup = (
+        Mock(side_effect=httpx.ReadTimeout("transient failure"))
+        if failure == "timeout"
+        else Mock(return_value=httpx.Response(500))
+    )
+    monkeypatch.setattr(httpx.Client, "get", lookup)
+    align = Mock()
+    monkeypatch.setattr(claude_native, "_align_working_directory_with_session", align)
+    with pytest.raises(click.ClickException, match="Claude account; retry"):
+        claude_native._run_with_remote_server(
+            "https://example.com",
+            tmp_path / "agent.yaml",
+            session_id="conv_existing",
+            resume_picker=False,
+            claude_args=(),
+            account=requested,
+        )
+    lookup.assert_called_once()
+    align.assert_not_called()
+    assert captured == {}

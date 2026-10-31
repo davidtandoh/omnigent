@@ -8316,7 +8316,11 @@ def _native_terminal_start_failure_cause(exc: BaseException) -> str:
 
 
 def _native_terminal_start_error_payload(
-    exc: BaseException, runtime_name: str, *, session_id: str
+    exc: BaseException,
+    runtime_name: str,
+    *,
+    session_id: str,
+    include_account_details: bool = False,
 ) -> dict[str, str]:
     """
     Build the structured error payload for a native terminal start failure.
@@ -8325,10 +8329,13 @@ def _native_terminal_start_error_payload(
         e.g. ``ImportError("Native Codex requires the 'codex' CLI on PATH.")``.
     :param runtime_name: Human-readable runtime name, e.g. ``"Codex"``.
     :param session_id: Session whose terminal failed, which may be a runner's child.
+    :param include_account_details: Include the account refusal details for a
+        permission-filtered response; shared status events use the public message.
     :returns: ``{"code": ..., "message": ...}`` payload for SSE and
         JSON error responses. Known actionable configuration errors surface
         their safe message directly; other causes point to the runner log.
     """
+    from omnigent.onboarding.claude_accounts import AccountUnavailableError
     from omnigent.terminals.registry import TerminalCleanupRefused
 
     error_id = f"err_{uuid.uuid4().hex}"
@@ -8371,6 +8378,13 @@ def _native_terminal_start_error_payload(
         else None,
         error_impact=ErrorImpact.BLOCKING.value,
     )
+    if isinstance(exc, AccountUnavailableError):
+        _logger.warning("Claude account unavailable; error_id=%s: %s", error_id, exc, extra=extra)
+        return {
+            "code": exc.code,
+            "error_id": error_id,
+            "message": str(exc) if include_account_details else exc.public_message,
+        }
     if isinstance(exc, OmnigentError) and configuration_error:
         _logger.warning(
             "Native %s configuration needs attention; error_id=%s: %s",
@@ -8557,13 +8571,17 @@ def _native_terminal_start_error_response(
         agent or workspace, else 500,
         with an ``error`` object carrying the real failure message.
     """
-    status_code = 500
+    from omnigent.onboarding.claude_accounts import AccountUnavailableError
+
+    status_code = 412 if isinstance(exc, AccountUnavailableError) else 500
     if isinstance(exc, OmnigentError) and (
         exc.code in _NATIVE_TERMINAL_LIFECYCLE_ERROR_CODES
         or exc.code == ErrorCode.HARNESS_NOT_CONFIGURED
     ):
         status_code = exc.http_status
-    error = _native_terminal_start_error_payload(exc, runtime_name, session_id=session_id)
+    error = _native_terminal_start_error_payload(
+        exc, runtime_name, session_id=session_id, include_account_details=True
+    )
     return JSONResponse(
         status_code=status_code,
         content={
@@ -8717,6 +8735,8 @@ def _routed_spawn_launch_args(
 class _ClaudeSessionLaunchMetadata:
     """Persisted values consumed by Claude terminal launch."""
 
+    account: str | None = None
+    account_known: bool = True
     reasoning_effort: str | None = None
     model_override: str | None = None
     terminal_launch_args: list[str] | None = None
@@ -8762,6 +8782,7 @@ def _claude_launch_metadata_from_envelope(
         routing_enabled=routing_class.routing_enabled,
         auto_harness=routing_class.auto_harness,
         turn_routing=routing_class.turn_routing,
+        account=snapshot.account,
         reasoning_effort=snapshot.reasoning_effort,
         model_override=snapshot.model_override,
         terminal_launch_args=snapshot.terminal_launch_args,
@@ -8792,12 +8813,12 @@ async def _load_legacy_claude_launch_metadata(
         )
     except httpx.HTTPError:
         _logger.debug(
-            "Could not fetch session launch config for %s; terminal will use Claude's defaults",
+            "Could not confirm session launch config for %s",
             session_id,
         )
-        return _ClaudeSessionLaunchMetadata()
+        return _ClaudeSessionLaunchMetadata(account_known=False)
     if response.status_code != 200:
-        return _ClaudeSessionLaunchMetadata()
+        return _ClaudeSessionLaunchMetadata(account_known=False)
 
     snapshot = response.json()
     effort = snapshot.get("reasoning_effort")
@@ -8818,6 +8839,7 @@ async def _load_legacy_claude_launch_metadata(
         routing_enabled=routing_class.routing_enabled,
         auto_harness=routing_class.auto_harness,
         turn_routing=routing_class.turn_routing,
+        account=snapshot.get("account") if isinstance(snapshot.get("account"), str) else None,
         reasoning_effort=effort if isinstance(effort, str) and effort else None,
         model_override=(
             model_override if isinstance(model_override, str) and model_override else None
@@ -9143,6 +9165,88 @@ async def _auto_create_claude_terminal(
         session_id=session_id,
         session_init=session_init,
     )
+    if not launch_metadata.account_known:
+        from omnigent.onboarding.claude_accounts import AccountUnavailableError
+
+        raise AccountUnavailableError("Could not confirm this session's Claude account; retry.")
+    resolved_launch_env = native_launch_environment()
+    requested_account = resolved_launch_env.get("CLAUDE_CONFIG_DIR")
+    from omnigent.harnesses.claude_native.account import ensure_session_account_selected
+
+    provider = None
+    if agent_spec is not None:
+        from omnigent.runtime.workflow import _resolve_provider_for_build
+
+        provider = await asyncio.to_thread(
+            _resolve_provider_for_build,
+            _unwrap_resolved_spec(agent_spec),
+            harness_type="claude-sdk",
+            actual_harness="claude-native",
+        )
+    if launch_metadata.account is not None or provider is None or not provider.config_dir:
+        await asyncio.to_thread(
+            ensure_session_account_selected, launch_metadata.account, requested_account
+        )
+    if provider is not None and provider.config_dir:
+        if requested_account != provider.config_dir:
+            import socket
+
+            from omnigent.cli_invocation import cli_invocation
+            from omnigent.onboarding.claude_accounts import (
+                AccountUnavailableError,
+                account_name_from_provider,
+            )
+
+            account_name = account_name_from_provider(provider.name) or "NAME"
+            raise AccountUnavailableError(
+                f"Claude account provider {provider.name!r} on machine {socket.gethostname()!r} "
+                "requires its account to be selected for the runner. "
+                f"Start the session with that account: `{cli_invocation()} claude "
+                f"--account {account_name}`."
+            )
+    from omnigent.config import load_effective_config
+    from omnigent.harness_startup_config import (
+        resolve_harness_args,
+        resolve_harness_command,
+    )
+
+    _harness_cfg = load_effective_config(workspace=workspace)
+    launch_command = resolve_harness_command("claude-native", default="claude", cfg=_harness_cfg)
+    if requested_account is not None:
+        from omnigent.harnesses.claude_native.account import ensure_claude_account_signed_in
+        from omnigent.harnesses.claude_native.main import managed_claude_gateway_signal
+        from omnigent.host.harness_startup import env_wrapper_command
+
+        managed_base_url, managed_credential = managed_claude_gateway_signal()
+        if managed_base_url or managed_credential:
+            raise RuntimeError(
+                "native-claude: managed settings override the selected account. "
+                "A subscription account cannot be selected while managed Claude settings "
+                "configure a gateway or apiKeyHelper."
+            )
+
+        probe_spec = TerminalEnvSpec(
+            os_env=OSEnvSpec(type="caller_process", cwd=workspace),
+            command=launch_command,
+            args=resolve_harness_args("claude-native", (), cfg=_harness_cfg),
+            env=resolved_launch_env,
+            env_unset=_claude_terminal_env_unset(None),
+        )
+        probe_env = _claude_terminal_launch_env(probe_spec)
+        probe_command = launch_command
+        if Path(launch_command).name == "env":
+            probe_command = env_wrapper_command(
+                launch_command,
+                list(probe_spec.args),
+                _claude_terminal_pre_wrapper_env(probe_spec),
+            )
+        await asyncio.to_thread(
+            ensure_claude_account_signed_in,
+            probe_command,
+            requested_account,
+            env=probe_env,
+            cwd=_claude_terminal_launch_cwd(probe_spec, agent_os_env),
+        )
     session_effort = launch_metadata.reasoning_effort
     session_model_override = launch_metadata.model_override
     session_launch_args = launch_metadata.terminal_launch_args
@@ -9278,7 +9382,9 @@ async def _auto_create_claude_terminal(
         # A missing local transcript or cross-family source needs the fork's
         # copied Omnigent items rebuilt into a resumable Claude transcript.
         # The chosen workspace supplies its project directory and cwd fields.
-        from omnigent.harnesses.claude_native.main import _ensure_local_claude_resume_transcript
+        from omnigent.harnesses.claude_native.main import (
+            _ensure_local_claude_resume_transcript,
+        )
 
         our_uuid = str(uuid.uuid4())
         _clone_workspace = Path(workspace).resolve()
@@ -9360,7 +9466,7 @@ async def _auto_create_claude_terminal(
 
     inference_config = None
     claude_binding = None
-    if "CLAUDE_CONFIG_DIR" not in native_launch_environment():
+    if "CLAUDE_CONFIG_DIR" not in resolved_launch_env:
         inference_config = load_runtime_inference_config()
         claude_binding = binding_for_harness(inference_config, "claude-native")
         try:
@@ -9385,16 +9491,6 @@ async def _auto_create_claude_terminal(
                 extra={"session_id": session_id},
             )
             _launch_config_resolution_failed = True
-    else:
-        from omnigent.harnesses.claude_native.main import managed_claude_gateway_signal
-
-        managed_base_url, managed_credential = managed_claude_gateway_signal()
-        if managed_base_url or managed_credential:
-            raise RuntimeError(
-                "native-claude: managed settings override the selected account. "
-                "A subscription account cannot be selected while managed Claude settings "
-                "configure a gateway or apiKeyHelper."
-            )
     # A transient resolver failure must not be cached as "no provider configured".
     # A routed session's turn-1 ``/model`` can only reach ids this launch env
     # spells, so point the family aliases at the router's frozen arms before the
@@ -9683,7 +9779,10 @@ async def _auto_create_claude_terminal(
         subagent_router_dir=subagent_router_dir,
         append_system_prompt="\n\n".join(
             x
-            for x in [_native_startup_raw_instructions_from_spec(agent_spec), routed_spawn_note]
+            for x in [
+                _native_startup_raw_instructions_from_spec(agent_spec),
+                routed_spawn_note,
+            ]
             if x
         )
         or None,
@@ -9701,14 +9800,6 @@ async def _auto_create_claude_terminal(
     # appended above, so the ``--`` stays first). Identity by default. This is
     # the same resolver the local-CLI native launch uses (see cli_native.py), so
     # both terminal-creation paths honour one config surface.
-    from omnigent.config import load_effective_config
-    from omnigent.harness_startup_config import (
-        resolve_harness_args,
-        resolve_harness_command,
-    )
-
-    _harness_cfg = load_effective_config(workspace=workspace)
-    launch_command = resolve_harness_command("claude-native", default="claude", cfg=_harness_cfg)
     launch_args = resolve_harness_args("claude-native", tuple(claude_args), cfg=_harness_cfg)
     # Validate the binary this terminal will actually spawn: ``launch_command``
     # already reflects the OMNIGENT_CLAUDE_PATH / config overrides, and a bare
@@ -9740,7 +9831,7 @@ async def _auto_create_claude_terminal(
         # ENABLE_TOOL_SEARCH=true so MCP schemas are loaded on demand.
         env={
             **build_native_claude_terminal_env(claude_config),
-            **native_launch_environment(),
+            **resolved_launch_env,
         },
         # Names to strip (see ``_claude_terminal_env_unset``). Dropping
         # ``DATABRICKS_CONFIG_PROFILE`` matters because Claude's MCP servers
@@ -9763,24 +9854,18 @@ async def _auto_create_claude_terminal(
     )
     # Seed trust and onboarding in the config selected by the terminal's launch environment.
     try:
-        requested_account = native_launch_environment().get("CLAUDE_CONFIG_DIR")
         launch_env = _claude_terminal_launch_env(env_spec)
         launch_cwd = _claude_terminal_launch_cwd(env_spec, agent_os_env)
-        if requested_account is not None:
-            from omnigent.harnesses.claude_native.account import ensure_claude_account_signed_in
-            from omnigent.host.harness_startup import env_wrapper_command
+        if (
+            requested_account is not None
+            and launch_env.get("CLAUDE_CONFIG_DIR") != requested_account
+        ):
+            from omnigent.harnesses.claude_native.account import _account_label
+            from omnigent.onboarding.claude_accounts import AccountUnavailableError
 
-            probe_command = launch_command
-            if Path(launch_command).name == "env":
-                probe_command = env_wrapper_command(
-                    launch_command, list(launch_args), _claude_terminal_pre_wrapper_env(env_spec)
-                )
-            await asyncio.to_thread(
-                ensure_claude_account_signed_in,
-                probe_command,
-                requested_account,
-                env=launch_env,
-                cwd=launch_cwd,
+            raise AccountUnavailableError(
+                f"{_account_label(launch_metadata.account)} would receive a different "
+                "CLAUDE_CONFIG_DIR. Check the harness launch command."
             )
         ensure_claude_workspace_trusted(
             launch_cwd,

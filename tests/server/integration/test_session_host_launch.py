@@ -37,6 +37,7 @@ from omnigent.cli_invocation import cli_invocation
 from omnigent.entities import Conversation
 from omnigent.host.connect import HostProcess
 from omnigent.host.frames import (
+    CAP_CLAUDE_ACCOUNT,
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
     WORKSPACE_MISSING_ERROR_CODE,
     HostHelloFrame,
@@ -157,12 +158,16 @@ def app(runtime_init: None, db_uri: str, tmp_path) -> FastAPI:
     )
 
 
-async def _connect_host(app: FastAPI) -> ApplicationCommunicator:
+async def _connect_host(
+    app: FastAPI, *, capabilities: list[str] | None = None
+) -> ApplicationCommunicator:
     """Connect a mock host over the WebSocket tunnel and wait for it
     to register in the app's host registry.
 
     :param app: The FastAPI app under test (its ``state.host_registry``
         is the same instance the session-create launch path reads).
+    :param capabilities: Capability tokens the mock host advertises;
+        ``None`` advertises none, like an older host.
     :returns: The connected ASGI communicator, ready to exchange frames.
     """
     path = f"/v1/hosts/{_HOST_ID}/tunnel"
@@ -172,7 +177,12 @@ async def _connect_host(app: FastAPI) -> ApplicationCommunicator:
     assert accepted["type"] == "websocket.accept"
 
     hello = encode_host_frame(
-        HostHelloFrame(version="0.1.0-test", frame_protocol_version=1, name="laptop")
+        HostHelloFrame(
+            version="0.1.0-test",
+            frame_protocol_version=1,
+            name="laptop",
+            capabilities=list(capabilities or []),
+        )
     )
     await comm.send_input({"type": "websocket.receive", "text": hello})
     registry = app.state.host_registry
@@ -896,6 +906,7 @@ async def test_inline_create_harness_not_configured_stays_lenient(
         "launch_error",
         "expected_fragments",
         "wrapper_command",
+        "account",
     ),
     [
         (
@@ -904,6 +915,7 @@ async def test_inline_create_harness_not_configured_stays_lenient(
             _HARNESS_REFUSAL,
             ("omnigent setup", "harness 'codex' is not configured"),
             None,
+            None,
         ),
         (
             HARNESS_NOT_CONFIGURED_ERROR_CODE,
@@ -911,12 +923,14 @@ async def test_inline_create_harness_not_configured_stays_lenient(
             "",
             ("isaac omni setup",),
             "isaac omni",
+            None,
         ),
         (
             WORKSPACE_MISSING_ERROR_CODE,
             WORKSPACE_MISSING_ERROR_CODE,
             "runner log tail: SECRET_TOKEN\nforged workspace failure",
             ("workspace path does not exist", "/work/repo"),
+            None,
             None,
         ),
         (
@@ -925,6 +939,7 @@ async def test_inline_create_harness_not_configured_stays_lenient(
             "workspace path does not exist: /work/repo",
             ("workspace path does not exist", "/work/repo"),
             None,
+            None,
         ),
         (
             "runner_crashed",
@@ -932,6 +947,15 @@ async def test_inline_create_harness_not_configured_stays_lenient(
             "runner log tail: private output",
             (),
             None,
+            None,
+        ),
+        (
+            HARNESS_NOT_CONFIGURED_ERROR_CODE,
+            HARNESS_NOT_CONFIGURED_ERROR_CODE,
+            "Claude account 'private-work' is not set up on host 'mac-mini'",
+            ("session manager", "launch logs"),
+            None,
+            "private-work",
         ),
     ],
 )
@@ -945,6 +969,7 @@ async def test_message_relaunch_deterministic_failure_persists_error_turn(
     launch_error: str,
     expected_fragments: tuple[str, ...],
     wrapper_command: str | None,
+    account: str | None,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A deterministic host relaunch refusal persists user msg + error.
@@ -981,17 +1006,25 @@ async def test_message_relaunch_deterministic_failure_persists_error_turn(
     )
     caplog.set_level(logging.WARNING)
 
-    comm = await _connect_host(app)
+    comm = await _connect_host(app, capabilities=[CAP_CLAUDE_ACCOUNT])
     agent = await create_test_agent(
         client,
-        executor={"type": "omnigent", "config": {"harness": "codex"}},
+        executor={
+            "type": "omnigent",
+            "config": {"harness": "claude-native" if account else "codex"},
+        },
     )
     # Create with a successful create-time launch so the session binds a
     # runner_id (the fake runner never actually connects).
     create_responder = asyncio.create_task(_serve_one_launch(comm, launch_status="launched"))
     create_resp = await client.post(
         "/v1/sessions",
-        json={"agent_id": agent["id"], "host_id": _HOST_ID, "workspace": _WORKSPACE},
+        json={
+            "agent_id": agent["id"],
+            "host_id": _HOST_ID,
+            "workspace": _WORKSPACE,
+            "account": account,
+        },
     )
     await create_responder
     assert create_resp.status_code == 201, create_resp.text
@@ -1070,6 +1103,9 @@ async def test_message_relaunch_deterministic_failure_persists_error_turn(
     assert error_items[0]["code"] == expected_error_code
     for fragment in expected_fragments:
         assert fragment in error_items[0]["message"]
+    if account:
+        assert account not in error_items[0]["message"]
+        assert account in refusal.attributes["error_detail"]
     if expected_error_code == WORKSPACE_MISSING_ERROR_CODE:
         assert error_items[0]["message"] == "workspace path does not exist: /work/repo"
         assert "SECRET_TOKEN" not in error_items[0]["message"]
@@ -2533,6 +2569,177 @@ async def test_host_session_message_relaunches_offline_runner(
     assert launch_frame.superseded_runner_ids == (original_runner_id,), (
         "the relaunch must name the binding it replaced so the host stops it"
     )
+
+
+async def _post_hi(client: httpx.AsyncClient, session_id: str) -> httpx.Response:
+    return await client.post(
+        f"/v1/sessions/{session_id}/events",
+        json={
+            "type": "message",
+            "data": {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        },
+    )
+
+
+@pytest.mark.parametrize("replace_with_sdk", [False, True])
+async def test_session_account_is_sent_on_create_and_every_relaunch(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+    replace_with_sdk: bool,
+) -> None:
+    """The server stores only the account name and re-sends it on each launch."""
+    from omnigent.runtime import set_runner_client
+    from omnigent.server.routes import sessions as sessions_module
+
+    monkeypatch.setattr(sessions_module, "_HOST_BOUND_RUNNER_CONNECT_GRACE_S", 0.0)
+    comm = await _connect_host(app, capabilities=[CAP_CLAUDE_ACCOUNT])
+    agent = await create_test_agent(
+        client, executor={"type": "omnigent", "config": {"harness": "claude-native"}}
+    )
+    responder = asyncio.create_task(_serve_one_launch(comm, launch_status="launched"))
+    create_resp = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "host_id": _HOST_ID,
+            "workspace": _WORKSPACE,
+            "account": "work",
+        },
+    )
+    create_frame = await responder
+    assert create_resp.status_code == 201, create_resp.text
+    session_id = create_resp.json()["id"]
+    assert create_frame.account == "work"
+    assert create_frame.native_env is None  # no folder path leaves the server
+    assert create_resp.json()["account"] == "work"
+    conv = SqlAlchemyConversationStore(db_uri).get_conversation(session_id)
+    assert conv is not None and conv.account == "work"
+
+    if replace_with_sdk:
+        from tests.server.helpers import build_agent_bundle
+
+        replacement = build_agent_bundle(
+            name="test-agent", executor={"type": "omnigent", "config": {"harness": "claude-sdk"}}
+        )
+        updated = await client.put(
+            f"/v1/sessions/{session_id}/agent",
+            files={"bundle": ("agent.tar.gz", replacement, "application/gzip")},
+        )
+        assert updated.status_code == 400, updated.text
+        assert "recorded Claude account requires the claude-native harness" in updated.text
+
+    set_runner_client(None)
+    post_task = asyncio.create_task(_post_hi(client, session_id))
+    try:
+        relaunch_frame = await _wait_for_launch(comm, budget_s=budget(5.0))
+        assert relaunch_frame is not None and relaunch_frame.harness == "claude-native"
+    finally:
+        post_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await post_task
+    assert relaunch_frame is not None and relaunch_frame.account == "work"
+
+
+async def test_older_host_is_never_sent_an_account(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A host without account support would drop it, so the launch is refused instead."""
+    from omnigent.runtime import set_runner_client
+    from omnigent.server.routes import sessions as sessions_module
+
+    monkeypatch.setattr(sessions_module, "_HOST_BOUND_RUNNER_CONNECT_GRACE_S", 0.0)
+    comm = await _connect_host(app)
+    agent = await create_test_agent(
+        client, executor={"type": "omnigent", "config": {"harness": "claude-native"}}
+    )
+
+    async def _answer_stat_only() -> bool:
+        launched = False
+        with contextlib.suppress(TimeoutError):
+            for _ in range(40):
+                output = await comm.receive_output(timeout=budget(2.0))
+                if output["type"] != "websocket.send":
+                    continue
+                frame = decode_host_frame(output["text"])
+                if isinstance(frame, HostLaunchRunnerFrame):
+                    launched = True
+                elif isinstance(frame, HostStatFrame):
+                    await comm.send_input(
+                        {
+                            "type": "websocket.receive",
+                            "text": encode_host_frame(
+                                HostStatResultFrame(
+                                    request_id=frame.request_id,
+                                    status="ok",
+                                    exists=True,
+                                    type="directory",
+                                    canonical_path=frame.path,
+                                )
+                            ),
+                        }
+                    )
+        return launched
+
+    watcher = asyncio.create_task(_answer_stat_only())
+    create_resp = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "host_id": _HOST_ID,
+            "workspace": _WORKSPACE,
+            "account": "work",
+        },
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    session_id = create_resp.json()["id"]
+
+    set_runner_client(None)
+    msg_resp = await _post_hi(client, session_id)
+    assert not await watcher, "an account must never reach a host that cannot resolve it"
+    assert msg_resp.status_code == 202, msg_resp.text
+    items = (await client.get(f"/v1/sessions/{session_id}/items")).json()["data"]
+    [error] = [item for item in items if item.get("type") == "error"]
+    assert error["code"] == HARNESS_NOT_CONFIGURED_ERROR_CODE
+    assert "work" not in error["message"]
+    assert "session manager" in error["message"]
+
+
+@pytest.mark.parametrize("provider", ["claude-work", "claude-gateway"])
+async def test_agent_provider_does_not_infer_a_session_account(
+    client: httpx.AsyncClient, db_uri: str, provider: str
+) -> None:
+    executor = {
+        "type": "omnigent",
+        "config": {"harness": "claude-native"},
+        "auth": {"type": "provider", "name": provider},
+    }
+    agent = await create_test_agent(client, executor=executor)
+    for account in (None, "work"):
+        body = {"agent_id": agent["id"]}
+        if account is not None:
+            body["account"] = account
+        resp = await client.post("/v1/sessions", json=body)
+        assert resp.status_code == 201, resp.text
+        conv = SqlAlchemyConversationStore(db_uri).get_conversation(resp.json()["id"])
+        assert conv is not None and conv.account == account
+        assert resp.json()["account"] == account
+
+
+@pytest.mark.parametrize("harness", ["codex-native", "claude-sdk"])
+async def test_account_is_refused_for_non_claude_native_sessions(
+    client: httpx.AsyncClient, app: FastAPI, harness: str
+) -> None:
+    agent = await create_test_agent(
+        client, executor={"type": "omnigent", "config": {"harness": harness}}
+    )
+    resp = await client.post("/v1/sessions", json={"agent_id": agent["id"], "account": "work"})
+    assert resp.status_code == 400, resp.text
+    assert "claude-native" in resp.text
 
 
 async def test_unbound_host_session_relaunch_names_no_superseded_runner(
@@ -4568,3 +4775,81 @@ async def test_compact_preserves_codex_binding_while_owner_reconnects(
         if owner_status != "disconnected":
             await comm.send_input({"type": "websocket.disconnect", "code": 1000})
         await comm.wait()
+
+
+async def test_invalid_account_is_refused_before_creating_a_worktree(
+    client: httpx.AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.server.routes._sessions import orchestration
+
+    comm = await _connect_host(app)
+    monkeypatch.setattr(
+        "omnigent.server.routes._workspace_validation.validate_workspace",
+        AsyncMock(return_value=_WORKSPACE),
+    )
+    create_worktree = AsyncMock()
+    monkeypatch.setattr(orchestration, "_create_session_worktree", create_worktree)
+    agent = await create_test_agent(
+        client, executor={"type": "omnigent", "config": {"harness": "claude-sdk"}}
+    )
+    response = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "account": "work",
+            "host_id": _HOST_ID,
+            "workspace": _WORKSPACE,
+            "git": {"branch_name": "feature/account"},
+        },
+    )
+    assert response.status_code == 400, response.text
+    assert "requires the claude-native harness" in response.text
+    create_worktree.assert_not_called()
+    await comm.send_input({"type": "websocket.disconnect", "code": 1000})
+
+
+async def test_account_agent_replacement_preserves_native_harness_override(
+    client: httpx.AsyncClient, db_uri: str
+) -> None:
+    from tests._helpers.session import bundle_files, post_session_bundle
+
+    config = b"""spec_version: 1
+name: overridden-agent
+executor:
+  type: omnigent
+  config:
+    harness: claude-sdk
+"""
+    original = bundle_files({"config.yaml": config, "AGENTS.md": b"Original instructions"})
+    uploaded = await post_session_bundle(client.post, "/v1/sessions", original)
+    assert uploaded.status_code == 201, uploaded.text
+    created = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": uploaded.json()["agent_id"],
+            "account": "work",
+            "harness_override": "claude-native",
+        },
+    )
+    assert created.status_code == 201, created.text
+    session_id = created.json()["id"]
+    for instructions in (b"Original instructions", b"Updated instructions"):
+        replacement = (
+            original
+            if instructions == b"Original instructions"
+            else bundle_files(
+                {
+                    "config.yaml": config,
+                    "AGENTS.md": instructions,
+                }
+            )
+        )
+        updated = await client.put(
+            f"/v1/sessions/{session_id}/agent",
+            files={"bundle": ("agent.tar.gz", replacement, "application/gzip")},
+        )
+        assert updated.status_code == 200, updated.text
+        conversation = SqlAlchemyConversationStore(db_uri).get_conversation(session_id)
+        assert conversation is not None
+        assert conversation.account == "work"
+        assert conversation.harness_override == "claude-native"

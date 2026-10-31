@@ -74,6 +74,10 @@ CAP_SKILL_CONTENT = "skill_content"
 CAP_MCP_TOOLS = "mcp_tools"
 CAP_REFRESH_HARNESSES = "refresh_harnesses"
 CAP_MCP_REGISTRY = "mcp_registry"
+# The host resolves ``HostLaunchRunnerFrame.account`` from its own config. The
+# server never sends an account to a host without it, since an older host would
+# drop the field and start the session on its default login.
+CAP_CLAUDE_ACCOUNT = "claude_account"
 
 # Every capability THIS build supports; reported verbatim in the hello frame.
 HOST_CAPABILITIES: list[str] = [
@@ -87,6 +91,7 @@ HOST_CAPABILITIES: list[str] = [
     CAP_MCP_INVENTORY,
     CAP_HARNESS_STARTUP,
     CAP_REFRESH_HARNESSES,
+    CAP_CLAUDE_ACCOUNT,
 ]
 
 
@@ -302,6 +307,12 @@ class HostLaunchRunnerFrame:
         falls back to stopping every runner launched for ``session_id``; an
         empty tuple stops none, e.g. after /clear moved the old runner to
         another session.
+    :param account: Short name of the session's extra Claude account,
+        e.g. ``"work"``. The host resolves it to that account's sign-in
+        folder from its own config and refuses the launch when it cannot;
+        a folder path never travels in this frame. ``None`` keeps the
+        host's default Claude login. Sent only to hosts that advertise
+        :data:`CAP_CLAUDE_ACCOUNT`.
     """
 
     request_id: str
@@ -312,6 +323,7 @@ class HostLaunchRunnerFrame:
     inference_config: dict[str, Any] | None = None
     native_env: dict[str, str] | None = None
     superseded_runner_ids: tuple[str, ...] | None = None
+    account: str | None = None
 
 
 @dataclass
@@ -1464,6 +1476,8 @@ def encode_host_frame(frame: HostFrame) -> str:
             payload["native_env"] = frame.native_env
         if frame.superseded_runner_ids is not None:
             payload["superseded_runner_ids"] = list(frame.superseded_runner_ids)
+        if frame.account is not None:
+            payload["account"] = frame.account
         return _encode_payload(payload)
     if isinstance(frame, HostLaunchRunnerResultFrame):
         return _encode_payload(
@@ -2395,6 +2409,7 @@ def _decode_launch_runner(msg: _JsonObject) -> HostLaunchRunnerFrame:
             if "superseded_runner_ids" in msg
             else None
         ),
+        account=_optional_nullable_str(msg, "account"),
     )
 
 

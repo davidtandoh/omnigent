@@ -7840,6 +7840,18 @@
       "SessionResponse": {
         "description": "API representation of a session.\n\nReturned by `POST /v1/sessions`, `GET /v1/sessions/{id}`,\nand `PATCH /v1/sessions/{id}`.",
         "properties": {
+          "account": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The extra Claude account the session runs on, e.g. `\"work\"`. Shown only to viewers who can manage the session, since users may name accounts after an email; `None` otherwise and for the default login.",
+            "title": "Account"
+          },
           "active_response_id": {
             "anyOf": [
               {

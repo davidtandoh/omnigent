@@ -126,6 +126,7 @@ def test_every_error_code_has_a_concrete_category() -> None:
         (ErrorCode.RUNNER_UNAVAILABLE, ErrorCategory.CONFIG),
         (ErrorCode.HOST_OFFLINE, ErrorCategory.USER),
         (ErrorCode.HARNESS_NOT_CONFIGURED, ErrorCategory.CONFIG),
+        (ErrorCode.CLAUDE_ACCOUNT_UNAVAILABLE, ErrorCategory.CONFIG),
         (ErrorCode.RUNNER_CAPABILITY_MISMATCH, ErrorCategory.CONFIG),
         (ErrorCode.NOT_FOUND, ErrorCategory.USER),
         (ErrorCode.INVALID_INPUT, ErrorCategory.USER),
@@ -198,6 +199,7 @@ def test_every_error_code_has_an_impact() -> None:
         # Blocking: the turn/task cannot proceed without intervention.
         (ErrorCode.INTERNAL_ERROR, ErrorImpact.BLOCKING),
         (ErrorCode.HARNESS_NOT_CONFIGURED, ErrorImpact.BLOCKING),
+        (ErrorCode.CLAUDE_ACCOUNT_UNAVAILABLE, ErrorImpact.BLOCKING),
         (ErrorCode.WORKSPACE_MISSING, ErrorImpact.BLOCKING),
         (ErrorCode.UNAUTHORIZED, ErrorImpact.BLOCKING),
         # Transient: self-healing, no lost progress.
@@ -437,6 +439,7 @@ def test_every_error_code_has_a_phase() -> None:
         (ErrorCode.WRONG_REPLICA, ErrorPhase.ROUTING, True),
         (ErrorCode.RUNNER_UNAVAILABLE, ErrorPhase.RUNNER_LAUNCH, True),
         (ErrorCode.HARNESS_NOT_CONFIGURED, ErrorPhase.HARNESS_SETUP, True),
+        (ErrorCode.CLAUDE_ACCOUNT_UNAVAILABLE, ErrorPhase.HARNESS_SETUP, True),
         (ErrorCode.WORKSPACE_MISSING, ErrorPhase.HARNESS_SETUP, True),
         (ErrorCode.HARNESS_PROTOCOL_VIOLATION, ErrorPhase.TURN, False),
         (ErrorCode.INTERNAL_ERROR, ErrorPhase.UNKNOWN, False),
@@ -564,3 +567,11 @@ async def test_restart_on_stale_cursor_reraises_from_an_async_walk() -> None:
     with pytest.raises(StaleCursorError):
         await walk()
     assert calls == _STALE_CURSOR_ATTEMPTS
+
+
+def test_account_unavailable_is_a_configuration_refusal() -> None:
+    error = OmnigentError("Claude account unavailable", code=ErrorCode.CLAUDE_ACCOUNT_UNAVAILABLE)
+    assert error.http_status == 412
+    assert error.category is ErrorCategory.CONFIG
+    assert error.impact is ErrorImpact.BLOCKING
+    assert error.phase is ErrorPhase.HARNESS_SETUP

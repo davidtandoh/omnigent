@@ -75,12 +75,13 @@ def _parse_native_env_option(entries: tuple[str, ...]) -> dict[str, str]:
         raise click.UsageError(str(exc)) from None
 
 
-def _claude_account_launch_env(
+def _validated_claude_account(
     config: dict[str, object], account: str, launch_env: dict[str, str]
-) -> dict[str, str]:
-    """Add the named Claude account's ``CLAUDE_CONFIG_DIR`` to *launch_env*.
+) -> str:
+    """Check that *account* is set up here and return its name.
 
-    The runner then checks that account before launch, as for ``--env``.
+    Only the name is recorded on the session; the host daemon resolves it to
+    the account's folder on every launch and checks the sign-in there.
     """
     from omnigent.cli_invocation import cli_invocation
     from omnigent.errors import OmnigentError
@@ -97,8 +98,7 @@ def _claude_account_launch_env(
             f"No Claude account named {account!r}. "
             f"Add or list accounts with `{cli_invocation()} setup`."
         )
-    assert entry.config_dir is not None
-    return {**launch_env, "CLAUDE_CONFIG_DIR": entry.config_dir}
+    return account
 
 
 def _late_bound(
@@ -239,8 +239,8 @@ def register_native_commands(cli: click.Group) -> None:
         default=None,
         metavar="NAME",
         help=(
-            "Run this session on a Claude account added with `omnigent setup`, "
-            "e.g. --account work. Pass it again when you resume the session."
+            "Run a new session on a Claude account added with `omnigent setup`, "
+            "e.g. --account work. The session keeps it on every resume."
         ),
     )
     @click.option(
@@ -312,9 +312,11 @@ def register_native_commands(cli: click.Group) -> None:
 
         # Apply config defaults (same as ``run`` does).
         cfg = _load_effective_config()
+        if account is not None and smart_routing:
+            raise click.UsageError("--account cannot be combined with --smart-routing.")
         if account is not None:
             # Accounts are user-owned, so a project config cannot redirect one.
-            launch_env = _claude_account_launch_env(_load_global_config(), account, launch_env)
+            account = _validated_claude_account(_load_global_config(), account, launch_env)
             use_claude_config = True
         if server is None:
             server = cfg.get("server")
@@ -395,6 +397,7 @@ def register_native_commands(cli: click.Group) -> None:
             startup_profiler=startup_profiler,
             command=resolved_command,
             launch_env=launch_env,
+            account=account,
         )
 
     @cli.command(

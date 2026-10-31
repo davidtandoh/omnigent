@@ -523,6 +523,8 @@ def _create_clear_replacement_session(
         f"{ap_server_url}/v1/sessions",
         json={
             "agent_id": agent_id,
+            "account": old.get("account"),
+            "harness_override": old.get("harness_override"),
             "labels": labels,
         },
     )

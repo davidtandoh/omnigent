@@ -9,7 +9,10 @@ from unittest.mock import Mock
 
 import pytest
 
-from omnigent.harnesses.claude_native.account import ensure_claude_account_signed_in
+from omnigent.harnesses.claude_native.account import (
+    ensure_claude_account_signed_in,
+    ensure_session_account_selected,
+)
 
 
 @pytest.mark.parametrize("config_dir", ["/accounts/work", "/accounts/cafe\u0301/"])
@@ -67,7 +70,7 @@ def test_status_verdict_is_structural_and_output_is_private(
     )
     monkeypatch.setattr("omnigent.harnesses.claude_native.account.subprocess.run", probe)
     if signed_out:
-        with pytest.raises(RuntimeError, match="not signed in") as caught:
+        with pytest.raises(RuntimeError, match="signed out") as caught:
             ensure_claude_account_signed_in(
                 "claude",
                 "/accounts/work",
@@ -148,3 +151,79 @@ def test_runner_launch_account_selects_transcript_and_session_dirs(
     else:
         assert claude_native._claude_projects_dir() == Path(expected) / "projects"
         assert sessions_dir() == Path(expected) / "sessions"
+
+
+def _write_user_config(home: Path, body: str) -> None:
+    (home / "config.yaml").write_text(body)
+
+
+def test_signed_out_refusal_names_the_account_and_machine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_user_config(
+        tmp_path,
+        "host:\n  name: mac-mini\nproviders:\n  claude-work:\n    kind: subscription\n"
+        "    cli: claude\n    config_dir: /accounts/work\n",
+    )
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    probe = Mock(return_value=subprocess.CompletedProcess([], 1, '{"loggedIn":false}', ""))
+    monkeypatch.setattr("omnigent.harnesses.claude_native.account.subprocess.run", probe)
+    with pytest.raises(RuntimeError) as caught:
+        ensure_claude_account_signed_in(
+            "claude", "/accounts/work", env={"CLAUDE_CONFIG_DIR": "/accounts/work"}, cwd=tmp_path
+        )
+    message = str(caught.value)
+    assert "Claude account 'work' on host 'mac-mini' is signed out" in message
+    assert "setup" in message
+
+
+_SPEC_ACCOUNT_CONFIG = {
+    "providers": {
+        "claude-work": {"kind": "subscription", "cli": "claude", "config_dir": "/accounts/work"},
+        "claude-gateway": {
+            "kind": "gateway",
+            "anthropic": {"base_url": "https://gw.example/anthropic", "api_key": "$GW"},
+        },
+    }
+}
+
+
+@pytest.mark.parametrize(
+    ("account", "launch_dir", "matches"),
+    [
+        ("work", "/accounts/work", True),
+        ("work", None, False),
+        ("work", "/accounts/other", False),
+        (None, "/accounts/work", False),
+        (None, None, True),
+    ],
+)
+def test_recorded_session_account_must_match_the_runner(
+    account: str | None, launch_dir: str | None, matches: bool
+) -> None:
+    if matches:
+        ensure_session_account_selected(account, launch_dir, config=_SPEC_ACCOUNT_CONFIG)
+    else:
+        with pytest.raises(RuntimeError, match="config_mismatch") as caught:
+            ensure_session_account_selected(account, launch_dir, config=_SPEC_ACCOUNT_CONFIG)
+        assert (repr(account) if account else "default Claude login") in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "provider",
+    [
+        {"kind": "subscription", "cli": "claude"},
+        _SPEC_ACCOUNT_CONFIG["providers"]["claude-gateway"],
+    ],
+)
+def test_recorded_account_cannot_use_a_provider_without_a_sign_in_folder(
+    provider: dict[str, object],
+) -> None:
+    from omnigent.onboarding.claude_accounts import AccountUnavailableError
+
+    with pytest.raises(AccountUnavailableError, match="'work' is not set up on host"):
+        ensure_session_account_selected(
+            "work",
+            None,
+            config={"providers": {"claude-work": provider}},
+        )

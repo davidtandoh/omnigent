@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from omnigent.native.launch_environment import native_launch_environment
+from omnigent.onboarding.claude_accounts import AccountUnavailableError
 
 _logger = logging.getLogger(__name__)
 
@@ -58,6 +59,71 @@ def claude_auth_status(command: str, *, env: Mapping[str, str], cwd: Path) -> bo
     return None
 
 
+def _account_label(account: str | None) -> str:
+    """Name *account* and this machine for a refusal message.
+
+    :returns: e.g. ``"Claude account 'work' on host 'mac-mini'"``.
+    """
+    import socket
+
+    from omnigent.config import load_global_config
+
+    try:
+        host = load_global_config().get("host")
+        host_name = host.get("name") if isinstance(host, dict) else None
+    except Exception:  # noqa: BLE001 - the label must never hide the refusal
+        host_name = None
+    subject = f"Claude account {account!r}" if account else "The selected Claude account"
+    return f"{subject} on host {str(host_name or socket.gethostname())!r}"
+
+
+def _account_name_for_config_dir(config_dir: str) -> str | None:
+    """Return the account name whose sign-in folder is *config_dir*, if known."""
+    from omnigent.config import load_global_config
+    from omnigent.onboarding.claude_accounts import account_name_for_config_dir
+
+    try:
+        return account_name_for_config_dir(load_global_config(), config_dir)
+    except Exception:  # noqa: BLE001 - the label must never hide the refusal
+        return None
+
+
+def ensure_session_account_selected(
+    session_account: str | None,
+    requested_config_dir: str | None,
+    *,
+    config: dict[str, object] | None = None,
+) -> None:
+    """Require the runner to use the session's recorded Claude account."""
+    from omnigent.config import load_global_config
+    from omnigent.onboarding.claude_accounts import (
+        account_launch_environment,
+        account_name_for_config_dir,
+    )
+
+    if session_account is None and not requested_config_dir:
+        return
+    config = load_global_config() if config is None else config
+    if session_account is not None:
+        import socket
+
+        expected = account_launch_environment(
+            session_account, None, host_name=socket.gethostname(), config=config
+        )["CLAUDE_CONFIG_DIR"]
+        if expected == (requested_config_dir or None):
+            return
+    elif (
+        not requested_config_dir
+        or account_name_for_config_dir(config, requested_config_dir) is None
+    ):
+        return
+    subject = _account_label(session_account) if session_account else "the default Claude login"
+    raise AccountUnavailableError(
+        f"config_mismatch: this session requires {subject}, but this runner uses "
+        "a different Claude account. Launch a new runner for this session."
+    )
+
+
 def ensure_claude_account_signed_in(
     command: str | None,
     requested_config_dir: str,
@@ -71,9 +137,10 @@ def ensure_claude_account_signed_in(
     Account enforcement needs a fresh verdict under the child's exact environment.
     """
     if env.get("CLAUDE_CONFIG_DIR") != requested_config_dir:
-        raise RuntimeError(
-            "native-claude: the child would receive a different CLAUDE_CONFIG_DIR "
-            "than the requested account. Check the harness launch command."
+        raise AccountUnavailableError(
+            f"native-claude: {_account_label(_account_name_for_config_dir(requested_config_dir))} "
+            "would receive a different CLAUDE_CONFIG_DIR than the requested account. "
+            "Check the harness launch command."
         )
     if command is None:
         _logger.warning(
@@ -84,9 +151,13 @@ def ensure_claude_account_signed_in(
         return
     logged_in = claude_auth_status(command, env=env, cwd=cwd)
     if logged_in is False:
-        raise RuntimeError(
-            "native-claude: the selected CLAUDE_CONFIG_DIR account is not signed in. "
-            "Run claude auth login with that exact CLAUDE_CONFIG_DIR before launching."
+        from omnigent.cli_invocation import cli_invocation
+
+        label = _account_label(_account_name_for_config_dir(requested_config_dir))
+        raise AccountUnavailableError(
+            f"native-claude: {label} is signed out. "
+            f"Run `{cli_invocation()} setup` on that machine and sign in to the account "
+            "again, or start a new session on another account."
         )
     if logged_in is None:
         _logger.warning(

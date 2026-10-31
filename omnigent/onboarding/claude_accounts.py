@@ -8,6 +8,7 @@ default login (no ``config_dir``) is the CLI's own ``~/.claude``.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -16,7 +17,10 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 
+from omnigent.errors import ErrorCode
 from omnigent.onboarding.provider_config import SUBSCRIPTION_KIND, ProviderEntry, load_providers
+
+_logger = logging.getLogger(__name__)
 
 ACCOUNTS_DIRNAME = "claude-accounts"
 _ACCOUNT_NAME_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
@@ -33,11 +37,13 @@ def account_provider_name(account_name: str) -> str:
     return f"claude-{account_name}"
 
 
-def account_name_error(account_name: str, providers: Mapping[str, object]) -> str | None:
-    """Return why *account_name* cannot name a new account, or ``None`` when it can.
+def account_name_format_error(account_name: str) -> str | None:
+    """Return why *account_name* is not a well-formed account name, or ``None``.
 
-    :param account_name: The short name the user typed, e.g. ``"work"``.
-    :param providers: The raw ``providers:`` mapping, used to reject duplicates.
+    Checks only the shape, so the server can validate a session's account
+    without reading any machine's config.
+
+    :param account_name: The short name, e.g. ``"work"``.
     """
     if not account_name:
         return "Enter a short name, e.g. work."
@@ -47,6 +53,32 @@ def account_name_error(account_name: str, providers: Mapping[str, object]) -> st
         return "Use lowercase letters, digits, and single hyphens, e.g. work or client-a."
     if account_name in _RESERVED_ACCOUNT_NAMES:
         return f"{account_name!r} is reserved. Choose another name."
+    return None
+
+
+def account_name_from_provider(provider_name: str) -> str | None:
+    """Return the account name a ``claude-<name>`` provider key spells, or ``None``.
+
+    The inverse of :func:`account_provider_name`. ``claude-subscription``
+    (the default login) and malformed names return ``None``.
+
+    :param provider_name: A ``providers:`` key, e.g. ``"claude-work"``.
+    """
+    prefix = account_provider_name("")
+    if not provider_name.startswith(prefix):
+        return None
+    account_name = provider_name.removeprefix(prefix)
+    return account_name if account_name_format_error(account_name) is None else None
+
+
+def account_name_error(account_name: str, providers: Mapping[str, object]) -> str | None:
+    """Return why *account_name* cannot name a new account, or ``None`` when it can.
+
+    :param account_name: The short name the user typed, e.g. ``"work"``.
+    :param providers: The raw ``providers:`` mapping, used to reject duplicates.
+    """
+    if (format_error := account_name_format_error(account_name)) is not None:
+        return format_error
     if account_provider_name(account_name) in providers:
         return f"A provider named {account_provider_name(account_name)!r} already exists."
     return None
@@ -156,3 +188,83 @@ def find_account(config: dict[str, object], selector: str) -> ProviderEntry | No
     ):
         return entry
     return None
+
+
+def account_name_for_config_dir(config: dict[str, object], config_dir: str) -> str | None:
+    """Return the account name whose sign-in folder is *config_dir*, or ``None``.
+
+    :param config: Parsed user config.
+    :param config_dir: A ``CLAUDE_CONFIG_DIR`` value, e.g.
+        ``"/home/u/.omnigent/claude-accounts/work"``.
+    """
+    for name, entry in load_providers(config).items():
+        if (
+            entry.kind == SUBSCRIPTION_KIND
+            and entry.cli == "claude"
+            and entry.config_dir == config_dir
+        ):
+            return account_name_from_provider(name)
+    return None
+
+
+class AccountUnavailableError(RuntimeError):
+    """A session's recorded Claude account cannot be used on this machine.
+
+    The message is user-facing: it names the account, the machine, and the fix.
+    """
+
+    code = ErrorCode.CLAUDE_ACCOUNT_UNAVAILABLE
+    public_message = "Claude account unavailable"
+
+
+def account_launch_environment(
+    account: str,
+    native_env: Mapping[str, str] | None,
+    *,
+    host_name: str,
+    config: dict[str, object] | None = None,
+) -> dict[str, str]:
+    """Return *native_env* with *account*'s ``CLAUDE_CONFIG_DIR`` added.
+
+    Resolves the name against this machine's own user config, so the folder
+    path never comes from the server. Never falls back to the default login.
+
+    :param account: The session's account name, e.g. ``"work"``.
+    :param native_env: Explicit launch values already requested, e.g. from
+        ``--env``; not mutated.
+    :param host_name: This machine's host name, for the refusal message.
+    :param config: Parsed user config; ``None`` reads the global config.
+    :returns: A new launch environment selecting the account.
+    :raises AccountUnavailableError: If the account is not set up here, the
+        config cannot be read, or ``--env`` selects a different folder.
+    """
+    import yaml
+
+    from omnigent.cli_invocation import cli_invocation
+    from omnigent.errors import OmnigentError
+
+    try:
+        if config is None:
+            from omnigent.config import load_global_config
+
+            config = load_global_config()
+        entry = find_account(config, account)
+    except (OSError, ValueError, yaml.YAMLError, OmnigentError):
+        _logger.warning("Claude account configuration could not be read", exc_info=True)
+        raise AccountUnavailableError(
+            f"Claude account {account!r} cannot be checked on host {host_name!r}: "
+            "its Omnigent config could not be read."
+        ) from None
+    if entry is None or entry.config_dir is None:
+        raise AccountUnavailableError(
+            f"Claude account {account!r} is not set up on host {host_name!r}. "
+            f"Run `{cli_invocation()} setup` on that machine to add it, "
+            "or start a new session on another account."
+        )
+    requested = dict(native_env or {})
+    if requested.get("CLAUDE_CONFIG_DIR", entry.config_dir) != entry.config_dir:
+        raise AccountUnavailableError(
+            f"Claude account {account!r} and --env CLAUDE_CONFIG_DIR select different "
+            "sign-in folders. Pass only one of them."
+        )
+    return {**requested, "CLAUDE_CONFIG_DIR": entry.config_dir}

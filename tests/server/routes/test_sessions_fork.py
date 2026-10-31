@@ -187,6 +187,7 @@ class _ConversationStore:
         override_reasoning_effort_set: bool = False,
         override_terminal_launch_args: list[str] | None = None,
         override_terminal_launch_args_set: bool = False,
+        copy_account: bool = True,
         dropped_label_keys: frozenset[str] = frozenset(),
         extra_labels: dict[str, str] | None = None,
         carry_history_into_native: bool = False,
@@ -253,6 +254,7 @@ class _ConversationStore:
                 "override_reasoning_effort_set": override_reasoning_effort_set,
                 "override_terminal_launch_args": override_terminal_launch_args,
                 "override_terminal_launch_args_set": override_terminal_launch_args_set,
+                "copy_account": copy_account,
                 "dropped_label_keys": dropped_label_keys,
                 "extra_labels": extra_labels,
                 "carry_history_into_native": carry_history_into_native,
@@ -310,6 +312,7 @@ class _ConversationStore:
             root_conversation_id=fork_id,
             title=title or f"Fork of {src.title}",
             agent_id=effective_agent_id,
+            account=src.account if copy_account else None,
             labels=fork_labels,
         )
         self._convs[fork_id] = fork
@@ -500,6 +503,7 @@ def _make_conversation(
     title: str = "Source Chat",
     kind: str = "default",
     labels: dict[str, str] | None = None,
+    account: str | None = None,
 ) -> Conversation:
     """
     Build a minimal Conversation entity for testing.
@@ -511,6 +515,7 @@ def _make_conversation(
         ``"sub_agent"``.
     :param labels: Session labels, e.g. the sandbox repository a managed
         source recorded. Empty when omitted.
+    :param account: The source's Claude account name, e.g. ``"work"``.
     :returns: A Conversation.
     """
     return Conversation(
@@ -522,6 +527,7 @@ def _make_conversation(
         title=title,
         kind=kind,
         labels=dict(labels or {}),
+        account=account,
     )
 
 
@@ -2799,3 +2805,63 @@ def test_fork_counts_files_recorded_for_filesystem_delivery(
         assert [f.source_metadata for f in copied if f.filename == "trace.gz"] == [recorded]
     else:
         assert not conv_store.fork_calls
+
+
+@pytest.mark.parametrize(
+    ("body", "target_harness", "source_level", "expect_account", "expect_resume_source"),
+    [
+        ({}, "claude-native", None, "work", True),
+        ({}, "claude-native", 3, "work", True),
+        ({"agent_id": "280d725b404d2915f9e9d6cccce91303"}, "codex-native", None, None, False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_fork_inherits_account_only_for_claude_and_source_managers(
+    monkeypatch: pytest.MonkeyPatch,
+    body: dict[str, object],
+    target_harness: str,
+    source_level: int | None,
+    expect_account: str | None,
+    expect_resume_source: bool,
+) -> None:
+    from omnigent.server.routes._auth_helpers import SessionAccess
+
+    source_id = "e9f8f58523cec9a57d3bdf93be543e8c"
+    source = _make_conversation(account="work")
+    conv_store = _ConversationStore(
+        conversations={source_id: source},
+        items_by_conv={source_id: [_make_item("9980c8a9248139f14f4165e5d53088aa", "Hi")]},
+    )
+
+    async def source_access(*args: Any) -> SessionAccess:
+        return SessionAccess(level=source_level, conversation=source)
+
+    monkeypatch.setattr(routes_core, "_require_access_and_level", source_access)
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions.get_agent_cache",
+        lambda: _StubAgentCache(
+            {
+                "087b7cb7ac30abf4debfaa578d052ec6": "claude-native",
+                "280d725b404d2915f9e9d6cccce91303": target_harness,
+            }
+        ),
+    )
+    client = TestClient(_build_app(conv_store, agent_store=_switch_agent_store()))
+    resp = client.post(f"/v1/sessions/{source_id}/fork", json=body)
+    assert resp.status_code == 201, resp.text
+    [fork_call] = conv_store.fork_calls
+    assert fork_call["copy_account"] is (expect_account is not None)
+    assert fork_call["resume_source_native_session"] is expect_resume_source
+    fork = conv_store.get_conversation(resp.json()["id"])
+    assert fork is not None and fork.account == expect_account
+    assert resp.json()["account"] == expect_account
+
+
+@pytest.mark.parametrize("account", ["work", None])
+def test_fork_rejects_account_switching(account: str | None) -> None:
+    from pydantic import ValidationError
+
+    from omnigent.server.schemas import SessionForkRequest
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        SessionForkRequest.model_validate({"account": account})

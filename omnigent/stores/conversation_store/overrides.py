@@ -21,6 +21,9 @@ _SESSION_OVERRIDE_KEYS = (
     # Stored as the string ``"on"`` when the owner shares workspace files
     # with view-level collaborators; absent (SQL NULL blob key) otherwise.
     "share_workspace_files",
+    # Short name of an extra Claude account, e.g. ``"work"``. Only the name is
+    # stored; the launching host resolves it to that account's sign-in folder.
+    "account",
 )
 
 

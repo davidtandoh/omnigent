@@ -68,6 +68,25 @@ def check_session_access(
     return permission_store.check_access(user_id, conversation_id, required_level)
 
 
+def session_account_for_viewer(
+    user_id: str | None,
+    conversation: Conversation,
+    permission_store: PermissionStore | None,
+    conversation_store: ConversationStore,
+) -> str | None:
+    """Show the account only to managers of its owning top-level session."""
+    if permission_store is None or check_session_access(
+        user_id,
+        conversation.id,
+        LEVEL_MANAGE,
+        permission_store,
+        conversation_store,
+        conversation=conversation,
+    ):
+        return conversation.account
+    return None
+
+
 def resolved_allows(access: ResolvedAccess, required_level: int) -> bool:
     """Whether *access* grants *required_level*, ignoring sub-agent delegation.
 

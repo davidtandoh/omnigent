@@ -169,6 +169,12 @@ class Conversation:
         ``.env`` / key files). Set from the share dialog (manage-gated) via
         ``PATCH /v1/sessions/{id}``; never widens absolute-path browsing,
         which stays owner-only. See ``designs/SESSIONS_AUTH.md``.
+    :param account: Short name of the extra Claude account this
+        claude-native session runs on, e.g. ``"work"``. ``None`` means
+        the host's default Claude login. Set at create and sent on every
+        launch; the host resolves it from its own config and refuses the
+        launch when it cannot. See the session-create API for child inheritance
+        and ``ConversationStore.fork_conversation`` for account copying.
     :param sub_agent_name: For sub-agent sessions (``kind="sub_agent"``),
         the sub-agent type name within the parent's spec tree,
         e.g. ``"summarizer"``. The runner uses this to resolve the
@@ -254,6 +260,7 @@ class Conversation:
     subagent_routing_override: str | None = None
     harness_override: str | None = None
     share_workspace_files: bool = False
+    account: str | None = None
     sub_agent_name: str | None = None
     task_summary: str | None = None
     external_session_id: str | None = None

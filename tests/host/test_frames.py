@@ -901,6 +901,27 @@ def test_launch_runner_frame_round_trip() -> None:
     assert decoded.native_env == {"FM_HOME": "/tmp/fm", "CLEAR_OVERRIDE": ""}
 
 
+def test_launch_runner_account_round_trips_and_is_absent_by_default() -> None:
+    """Only the account name travels; an absent field decodes as the default login."""
+    frame = HostLaunchRunnerFrame(
+        request_id="req_a", binding_token="tok", workspace="/w", account="work"
+    )
+    payload = json.loads(encode_host_frame(frame))
+    assert payload["account"] == "work"
+    decoded = decode_host_frame(encode_host_frame(frame))
+    assert isinstance(decoded, HostLaunchRunnerFrame) and decoded.account == "work"
+    plain = HostLaunchRunnerFrame(request_id="req_b", binding_token="tok", workspace="/w")
+    assert "account" not in json.loads(encode_host_frame(plain))
+    decoded_plain = decode_host_frame(encode_host_frame(plain))
+    assert isinstance(decoded_plain, HostLaunchRunnerFrame) and decoded_plain.account is None
+
+
+def test_host_advertises_claude_account_support() -> None:
+    from omnigent.host.frames import CAP_CLAUDE_ACCOUNT, HOST_CAPABILITIES
+
+    assert CAP_CLAUDE_ACCOUNT in HOST_CAPABILITIES
+
+
 def test_launch_runner_rejects_malformed_native_environment_without_values() -> None:
     """Invalid launch variables fail without echoing their supplied values."""
     secret = "sentinel-secret-value"

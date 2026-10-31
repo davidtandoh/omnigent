@@ -1642,6 +1642,7 @@ def run_claude_native(
     auto_open_conversation: bool = False,
     startup_profiler: StartupProfiler | None = None,
     launch_env: dict[str, str] | None = None,
+    account: str | None = None,
 ) -> None:
     """
     Launch Claude Code in an Omnigent terminal and attach locally.
@@ -1673,6 +1674,9 @@ def run_claude_native(
     :param startup_profiler: Optional shared startup profiler from the
         Click command. ``None`` creates one from
         ``OMNIGENT_CLAUDE_STARTUP_PROFILE``.
+    :param launch_env: Explicit ``--env`` values for a new runner.
+    :param account: Extra Claude account for a new session, e.g. ``"work"``.
+        Requires a server; a resumed session must already run on it.
     :returns: None after the attach session ends.
     :raises click.ClickException: If setup, launch, or attach fails.
     """
@@ -1693,22 +1697,15 @@ def run_claude_native(
     sanitized_args = _strip_resume_from_claude_args(claude_args)
     prompt = prompt if prompt and prompt.strip() else None
     startup_profiler.mark("claude args normalized")
-    # Resolve the launch config across all offerings: a configured provider
-    # (configure harnesses), the Databricks ucode profile, or Claude's own
-    # login — so `omnigent claude` honors the provider selection just like
-    # the in-process claude-sdk harness. ``use_claude_config`` forces the
-    # CLI's own ~/.claude config (skips all of it).
-    startup_profiler.mark("resolving claude config")
-    claude_config = None if use_claude_config else resolve_native_claude_config(spec=None)
-    startup_profiler.mark(
-        "claude config resolved",
-        detail="native config" if claude_config is not None else "claude cli config",
-    )
-
     with TemporaryDirectory(prefix="omnigent-claude-native-") as tmpdir:
         spec_path = _materialize_claude_agent_spec(Path(tmpdir))
         startup_profiler.mark("agent spec materialized")
         if server is None:
+            if account is not None:
+                raise click.ClickException("--account needs an Omnigent server to record it.")
+            startup_profiler.mark("resolving claude config")
+            claude_config = None if use_claude_config else resolve_native_claude_config(spec=None)
+            startup_profiler.mark("claude config resolved")
             # Keep the one-shot local prompt ahead of variadic flag values.
             local_args = (prompt, *sanitized_args) if prompt is not None else sanitized_args
             _run_with_local_server(
@@ -1735,6 +1732,7 @@ def run_claude_native(
                 auto_open_conversation=auto_open_conversation,
                 startup_profiler=startup_profiler,
                 launch_env=launch_env,
+                account=account,
             )
 
 
@@ -2381,6 +2379,77 @@ def _switch_to_recorded_working_directory(recorded_path: Path) -> None:
     """
     os.chdir(recorded_path)
     click.echo(f"Switched to {recorded_path}.", err=True)
+
+
+def _account_settings_env(
+    account: str | None, launch_env: Mapping[str, str] | None
+) -> Mapping[str, str] | None:
+    """Return *launch_env* plus this machine's folder for *account*.
+
+    :param account: Extra Claude account name, or ``None`` for the default.
+    :param launch_env: Explicit ``--env`` values.
+    :raises click.ClickException: If the account is not set up here.
+    """
+    if account is None:
+        return launch_env
+    from omnigent.host.identity import load_or_create_host_identity
+    from omnigent.onboarding.claude_accounts import (
+        AccountUnavailableError,
+        account_launch_environment,
+    )
+
+    try:
+        return account_launch_environment(
+            account, launch_env, host_name=load_or_create_host_identity().name
+        )
+    except AccountUnavailableError as exc:
+        raise click.ClickException(str(exc)) from None
+
+
+def _resumed_session_account(
+    *,
+    base_url: str,
+    headers: dict[str, str],
+    session_id: str,
+    requested: str | None,
+) -> str | None:
+    """Return the Claude account a resumed session runs on.
+
+    A session keeps the account it started on, so a different ``--account``
+    is refused rather than silently moving the session to another account.
+
+    :param base_url: Omnigent server base URL.
+    :param headers: HTTP headers for the Omnigent request.
+    :param session_id: Omnigent conversation id, e.g. ``"conv_abc123"``.
+    :param requested: The ``--account`` value, or ``None`` when not passed.
+    :returns: The recorded account name, or ``None`` for the default login.
+    :raises click.ClickException: If the session cannot be read or an explicit
+        account conflicts with its recorded account.
+    """
+    try:
+        with httpx.Client(
+            base_url=base_url,
+            headers=headers,
+            timeout=10.0,
+            trust_env=not is_loopback_url(base_url),
+        ) as client:
+            resp = client.get(f"/v1/sessions/{url_component(session_id)}")
+        payload = resp.json() if resp.status_code == 200 else None
+    except (httpx.HTTPError, ValueError):
+        payload = None
+    if not isinstance(payload, dict):
+        raise click.ClickException(f"Cannot confirm session {session_id}'s Claude account; retry.")
+    recorded = payload.get("account")
+    recorded = recorded if isinstance(recorded, str) and recorded else None
+    if requested is not None and requested != recorded:
+        current = f"Claude account {recorded!r}" if recorded else "the default Claude login"
+        raise click.ClickException(
+            f"Session {session_id} runs on {current}, not account {requested!r}. "
+            "A session keeps the account it started on. Start a new session to use "
+            "another account. Resume without --account to "
+            "continue it on its own account."
+        )
+    return recorded
 
 
 def _fetch_external_session_id_for_redirect(
@@ -4671,6 +4740,8 @@ async def _prepare_claude_terminal_via_daemon(
     host_id: str,
     workspace: str,
     launch_env: dict[str, str] | None = None,
+    account: str | None = None,
+    settings_env: Mapping[str, str] | None = None,
     startup_profiler: StartupProfiler | None = None,
     startup_progress: RunnerStartupProgress | None = None,
 ) -> PreparedClaudeTerminal:
@@ -4701,6 +4772,11 @@ async def _prepare_claude_terminal_via_daemon(
     :param host_id: This machine's host id, e.g. ``"host_abc123"``.
     :param workspace: Absolute host path for the runner cwd, e.g.
         ``"/Users/me/proj"``.
+    :param launch_env: Explicit ``--env`` values for a new runner.
+    :param account: Extra Claude account to record on a new session,
+        e.g. ``"work"``. A resumed session keeps its recorded account.
+    :param settings_env: Launch values that select the local Claude
+        settings to read; ``None`` uses *launch_env*.
     :param startup_profiler: Optional startup profiler for timing
         marks. ``None`` disables output.
     :param startup_progress: Optional user-visible progress renderer,
@@ -4742,7 +4818,8 @@ async def _prepare_claude_terminal_via_daemon(
                     bridge_id=None,
                     claude_args=tuple(persist_args),
                     terminal_launch_args=persist_args or None,
-                    launch_env=launch_env,
+                    launch_env=launch_env if settings_env is None else settings_env,
+                    account=account,
                 ),
                 wait_for_host_online(client, host_id, timeout_s=_DAEMON_HOST_ONLINE_TIMEOUT_S),
             )
@@ -4913,6 +4990,7 @@ def _run_with_remote_server(
     auto_open_conversation: bool = False,
     startup_profiler: StartupProfiler | None = None,
     launch_env: dict[str, str] | None = None,
+    account: str | None = None,
 ) -> None:
     """
     Launch Claude on a remote Omnigent server via the connect daemon.
@@ -4943,6 +5021,9 @@ def _run_with_remote_server(
         conversation URL after the session is prepared.
     :param startup_profiler: Optional startup profiler for timing
         marks. ``None`` disables output.
+    :param launch_env: Explicit ``--env`` values for a new runner.
+    :param account: Extra Claude account for a new session, e.g. ``"work"``;
+        a resumed session must already run on it.
     :returns: None.
     """
     from omnigent.chat import _bundle_agent, _remote_headers, _server_auth
@@ -4987,6 +5068,17 @@ def _run_with_remote_server(
             # Picker cancelled — don't launch a runner or fresh session.
             return
         should_print_resume_hint = resolved_session_id is None
+        session_account = account
+        if resolved_session_id is not None:
+            session_account = _resumed_session_account(
+                base_url=base_url,
+                headers=headers,
+                session_id=resolved_session_id,
+                requested=account,
+            )
+        # Local reads (settings, transcripts) use the account's folder; only the
+        # name goes to the server, and the host daemon resolves it again.
+        settings_env = _account_settings_env(session_account, launch_env)
         with runner_startup_progress(initial_message="Preparing Claude...") as progress:
             if resolved_session_id is not None:
                 # Align cwd with the resumed session before we sample
@@ -4995,7 +5087,7 @@ def _run_with_remote_server(
                     resolved_session_id,
                     base_url=base_url,
                     headers=headers,
-                    launch_env=launch_env,
+                    launch_env=settings_env,
                 )
                 _mark_startup_step(
                     startup_profiler,
@@ -5037,6 +5129,8 @@ def _run_with_remote_server(
                         claude_args=claude_args,
                         host_id=host_id,
                         launch_env=launch_env,
+                        account=account,
+                        settings_env=settings_env,
                         workspace=str(Path.cwd().resolve()),
                         startup_profiler=startup_profiler,
                         startup_progress=progress,
@@ -6396,6 +6490,7 @@ async def _create_claude_session(
     claude_args: tuple[str, ...] = (),
     terminal_launch_args: list[str] | None = None,
     launch_env: Mapping[str, str] | None = None,
+    account: str | None = None,
 ) -> str:
     """
     Create a bundled terminal-first Claude session.
@@ -6425,6 +6520,8 @@ async def _create_claude_session(
         (the CLI-direct path, which passes args via the live terminal
         POST instead) persists nothing.
     :param launch_env: Explicit launch values used to select the account settings.
+    :param account: Extra Claude account name to record on the session,
+        e.g. ``"work"``; the host resolves it on every launch.
     :returns: New session id, e.g. ``"conv_abc123"``.
     :raises click.ClickException: If creation fails.
     """
@@ -6440,6 +6537,8 @@ async def _create_claude_session(
     )
     if effort is not None:
         metadata["reasoning_effort"] = effort
+    if account is not None:
+        metadata["account"] = account
     resp = await client.post(
         "/v1/sessions",
         data={"metadata": json.dumps(metadata)},

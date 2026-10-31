@@ -1501,6 +1501,22 @@ _MAX_MANAGED_WORKSPACES = 10
 _MANAGED_HOST_ID_RE = re.compile(r"[0-9a-f]{32}")
 
 
+def _validated_account_name(value: str | None) -> str | None:
+    """Reject a malformed Claude account name; the host checks it exists.
+
+    :param value: The requested short account name, e.g. ``"work"``.
+    :returns: *value* unchanged.
+    :raises ValueError: If the name is not a well-formed account name.
+    """
+    if value is None:
+        return None
+    from omnigent.onboarding.claude_accounts import account_name_format_error
+
+    if (error := account_name_format_error(value)) is not None:
+        raise ValueError(f"invalid Claude account name: {error}")
+    return value
+
+
 class _SessionCreateRequestBase(BaseModel):
     """
     JSON request body for ``POST /v1/sessions``.
@@ -1652,6 +1668,13 @@ class _SessionCreateRequestBase(BaseModel):
         real message after the create returns. ``None`` everywhere else,
         including the bundle-agent auto path, which routes on the first
         message event instead.
+    :param account: Optional extra Claude account for a claude-native
+        session, by its short name, e.g. ``"work"``. Only the name is
+        stored; the launching host resolves it from its own config and
+        refuses the launch when it cannot. Claude-native children inherit
+        their parent's account; Claude SDK children refuse inherited accounts,
+        and other child harnesses record no Claude account. A top-level session
+        without an explicit account uses the host's default login. Create-time only.
     """
 
     inference_configuration_revision: str | None = None
@@ -1683,6 +1706,12 @@ class _SessionCreateRequestBase(BaseModel):
     subagent_routing_override: str | None = None
     harness_override: str | None = None
     smart_routing_message: str | None = None
+    account: str | None = None
+
+    @field_validator("account")
+    @classmethod
+    def _check_account(cls, value: str | None) -> str | None:
+        return _validated_account_name(value)
 
     @model_validator(mode="after")
     def _check_startup_input(self) -> Self:
@@ -1898,6 +1927,8 @@ class SessionCreateMetadata(BaseModel):
         provision on ``host_type: "managed"`` (one of the server's
         ``sandbox_providers``); ``None`` takes the server's first. Only
         valid with ``host_type: "managed"``.
+    :param account: Optional extra Claude account short name, e.g.
+        ``"work"``; same contract as the JSON create's ``account``.
     """
 
     inference_configuration_revision: str | None = None
@@ -1914,8 +1945,14 @@ class SessionCreateMetadata(BaseModel):
     parent_session_id: str | None = None
     host_type: Literal["external", "managed"] = "external"
     sandbox_provider: str | None = None
+    account: str | None = None
 
     model_config = ConfigDict(extra="forbid")
+
+    @field_validator("account")
+    @classmethod
+    def _check_account(cls, value: str | None) -> str | None:
+        return _validated_account_name(value)
 
     initial_input: SessionStartupInput | None = None
 
@@ -2261,6 +2298,10 @@ class SessionResponse(BaseModel):
         only. The web share dialog reads this to render the toggle, and the
         rail reads it to decide whether to mount the file surfaces for a
         view-only viewer.
+    :param account: The extra Claude account the session runs on, e.g.
+        ``"work"``. Shown only to viewers who can manage the session, since
+        users may name accounts after an email; ``None`` otherwise and for
+        the default login.
     :param context_window: The model's context window size in tokens
         as looked up server-side from litellm's registry (or from the
         ``AP_CONTEXT_WINDOW_OVERRIDE`` env var), e.g. ``200_000``.
@@ -2419,6 +2460,7 @@ class SessionResponse(BaseModel):
     cost_control_mode_override: str | None = None
     subagent_routing_override: str | None = None
     share_workspace_files: bool = False
+    account: str | None = None
     context_window: int | None = None
     last_total_tokens: int | None = None
     total_cost_usd: float | None = None

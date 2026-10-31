@@ -2034,6 +2034,7 @@ async def test_prepare_daemon_terminal_reports_progress_steps(
         claude_args: tuple[str, ...] = (),
         terminal_launch_args: list[str] | None = None,
         launch_env: dict[str, str] | None = None,
+        account: str | None = None,
     ) -> str:
         """
         Return a fresh session id and assert persisted launch args.
@@ -2045,9 +2046,11 @@ async def test_prepare_daemon_terminal_reports_progress_steps(
         :param terminal_launch_args: Claude launch args persisted on
             the session for the runner to apply.
         :param launch_env: Optional selected-account launch environment.
+        :param account: Extra Claude account name recorded on the session.
         :returns: Fixed conversation id.
         """
         del client
+        assert account is None
         assert bundle == b"bundle"
         assert bridge_id is None
         assert claude_args == ("--print", "hi")

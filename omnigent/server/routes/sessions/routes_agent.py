@@ -379,6 +379,13 @@ def register_agent_routes(
             tunnel_registry=getattr(request.app.state, "tunnel_registry", None),
             runner_router=runner_router,
         )
+        from omnigent.server.routes._session_create_validation import (
+            validate_agent_account_sessions,
+        )
+
+        await asyncio.to_thread(
+            validate_agent_account_sessions, conversation_store, agent.id, spec
+        )
         new_loc = bundle_location(agent.id, bundle_bytes)
 
         # Idempotency: same bundle content = no-op

@@ -1468,3 +1468,65 @@ async def test_background_title_timeout_releases_process(
     assert response.json()["error"] == "title_harness_timeout"
     [process_key] = process_manager.released
     assert uuid.UUID(process_key).hex == process_key
+
+
+@pytest.mark.parametrize("selected_account", [False, True])
+async def test_claude_title_preserves_account_selection_and_native_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, selected_account: bool
+) -> None:
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "omnigent.native.launch_environment._installed_native_launch_environment",
+        {"CLAUDE_CONFIG_DIR": "/accounts/work"} if selected_account else {},
+    )
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ambient-key")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example")
+
+    provider_lookups: list[dict[str, Any]] = []
+
+    def forbidden_provider_lookup(**kwargs):
+        provider_lookups.append(kwargs)
+        if selected_account:
+            raise AssertionError("selected account must bypass gateway configuration")
+        raise RuntimeError("default provider cannot be resolved")
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"Account title", b""
+
+    async def spawn(command: str, *args: str, **kwargs: Any) -> FakeProcess:
+        captured.update(args=args, env=kwargs["env"])
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.main.resolve_native_claude_config",
+        forbidden_provider_lookup,
+    )
+    monkeypatch.setattr("omnigent._platform.resolve_cli_binary", lambda name: None)
+    monkeypatch.setattr(
+        "omnigent.claude_launcher.resolve_claude_launch", lambda command, args: (command, args)
+    )
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    title = await claude_native_titles.generate_background_title(
+        BackgroundTitleContext(
+            prompt="name this task",
+            harness="claude-native",
+            spawn_env={},
+            process_manager=None,
+            cwd=tmp_path,
+        )
+    )
+    assert title == "Account title"
+    assert provider_lookups == ([] if selected_account else [{"spec": None}])
+    if selected_account:
+        assert captured["env"]["CLAUDE_CONFIG_DIR"] == "/accounts/work"
+        assert "ANTHROPIC_API_KEY" not in captured["env"]
+        assert "ANTHROPIC_BASE_URL" not in captured["env"]
+    else:
+        assert "CLAUDE_CONFIG_DIR" not in captured["env"]
+        assert captured["env"]["ANTHROPIC_API_KEY"] == "ambient-key"
+        assert captured["env"]["ANTHROPIC_BASE_URL"] == "https://gateway.example"
+    assert "--settings" not in captured["args"]

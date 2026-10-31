@@ -347,22 +347,42 @@ providers:
     config_dir: /Users/me/.omnigent/claude-accounts/work
 ```
 
-Start a session on that account with `omnigent claude --account work`, which
-passes the account's `CLAUDE_CONFIG_DIR` to the launch check above and uses
-Claude's own subscription routing, bypassing Omnigent gateway, key, and Bedrock
-providers for this launch. If managed Claude settings configure a gateway or
-`apiKeyHelper`, the launch is refused because those settings override the
-selected account. `NAME` is always the exact short account name;
-provider names are not aliases. Omit `--account` to use the default login
-when subscription routing is configured. No explicit default-login alias is
+Start a session on that account with `omnigent claude --account work`. The
+session records the account's name, never its folder. On every start,
+relaunch, and resume, the machine that launches the session looks the name
+up in its own `config.yaml`, passes that account's
+`CLAUDE_CONFIG_DIR` to the launch check above, and uses Claude's own
+subscription routing, bypassing Omnigent gateway, key, and Bedrock providers.
+If the account is missing, renamed, removed, or signed out on that machine, the
+launch is refused with the account and machine named; it never falls back to
+the default login. Moving a session to another machine therefore needs an
+account with the same name there. An older Omnigent host that cannot select
+accounts is refused rather than sent the account. If managed Claude settings
+configure a gateway or `apiKeyHelper`, the launch is refused because those
+settings override the selected account. `NAME` is always the exact short
+account name; provider names are not aliases. Sessions started without
+`--account` keep using the default login. No explicit default-login alias is
 supported. Adding an account always runs `claude auth login --claudeai`, even
-if its retained folder already reports signed in. Pass
-`--account` again when you resume the session, because Omnigent does not store
-the account with the session. Resume lookup and transcript relocation use the
-selected account's folder, including when the original workspace is gone.
-New sessions read reasoning effort from that account's `settings.json`;
-an explicit `--effort` takes precedence. The web UI and agent specs do not
-expose this account selector. An extra account cannot be a default. Setup
+if its retained folder already reports signed in. Resume needs no `--account`:
+the session keeps its account. Resuming with a different `--account` is
+refused. Start a new session to use another account. Claude forks keep the
+source account only when the caller can manage the source session.
+Resume lookup and transcript relocation use the session's account folder,
+including when the original workspace is gone. New sessions read reasoning
+effort from that account's `settings.json`; an explicit `--effort` takes
+precedence. Agent spec provider names do not set the recorded session account.
+Choose an account explicitly with `--account` or the API `account` field;
+Claude-native children inherit the parent account. Claude SDK children refuse
+an inherited account; other child harnesses record no Claude account. Forks
+inherit accounts under the rules above. Account sessions must remain on
+`claude-native`; agent replacements that change that harness are refused.
+Provider names such as `claude-gateway` do not select session accounts and
+continue to use normal provider routing. A Claude-native agent whose resolved
+provider has an account folder requires that account to be selected for the
+runner. Start the session with `omnigent claude --account NAME`; an unselected
+or different account is refused. Only Claude
+Code (`claude-native`) sessions can use an extra account. The web UI does not
+expose this account selector yet. An extra account cannot be a default. Setup
 lists each account as **Subscription (claude-work)**. When an account's
 sign-in expires, select it and choose **Sign in again**, which runs
 `claude auth login --claudeai` for that account only. Removing an account

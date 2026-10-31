@@ -76,7 +76,7 @@ from omnigent.server.background_session_titles import (
 from omnigent.server.bundles import agent_needs_own_copy, copy_agent_bundle, validate_agent_bundle
 from omnigent.server.creation_logging import creation_metadata, creation_stage, session_created
 from omnigent.server.host_registry import HostRegistry, RunnerExitReports
-from omnigent.server.permissions import check_session_access
+from omnigent.server.permissions import check_session_access, session_account_for_viewer
 from omnigent.server.routes._auth_helpers import (
     get_permission_level as _get_permission_level,
 )
@@ -123,6 +123,7 @@ from omnigent.server.routes._sessions.helpers import (
     SessionLiveness,
     _agent_carries_cursor_fork_history,
     _agent_carries_native_fork_history,
+    _agent_harness,
     _announce_session_added,
     _apply_liveness_to_items,
     _authorize_bundled_parent_and_inherit_runner,
@@ -743,6 +744,7 @@ def register_core_routes(
         from omnigent.runner.identity import token_bound_runner_id
         from omnigent.server.routes._host_launch import (
             LAUNCH_TIMEOUT_ENV_VAR,
+            account_launch_refusal,
             resolve_host_launch,
             resolve_launch_timeout_s,
         )
@@ -786,6 +788,11 @@ def register_core_routes(
                 stage="runner_launch",
             ),
         )
+        if (refusal := account_launch_refusal(target.conv.account, conn)) is not None:
+            # Never send an account the host would drop; the first message's
+            # relaunch surfaces this refusal to the user.
+            _logger.warning("Host %s cannot launch session %s: %s", host_id, session_id, refusal)
+            return runner_id, True
         request_id = secrets.token_hex(8)
         future: asyncio.Future[dict[str, str | None]] = asyncio.get_running_loop().create_future()
         conn.pending_launches[request_id] = future
@@ -812,6 +819,7 @@ def register_core_routes(
                 ),
                 # The session had no runner bound, so nothing is superseded.
                 superseded_runner_ids=(),
+                account=target.conv.account,
             )
         )
         launch_timeout_s = resolve_launch_timeout_s()
@@ -1147,6 +1155,9 @@ def register_core_routes(
                     LEVEL_OWNER,
                 )
             resp.permission_level = grant.level
+            resp.account = await asyncio.to_thread(
+                session_account_for_viewer, user_id, conv, permission_store, conversation_store
+            )
         await _accept_initial_input(request, resp.id, body.initial_input, user_id)
         # Managed host: schedule a BACKGROUND sandbox provision bound
         # to this session and return immediately — provisioning takes
@@ -1651,6 +1662,7 @@ def register_core_routes(
             sandbox_config=getattr(request.app.state, "sandbox_config", None),
             viewer_id=user_id,
             request=request,
+            permission_store=permission_store,
         )
 
     @router.get(
@@ -3561,6 +3573,7 @@ def register_core_routes(
             runner_exit_reports=runner_exit_reports,
             viewer_id=user_id,
             request=request,
+            permission_store=permission_store,
         )
 
     # ── POST /sessions/{source_id}/fork ─────────────────────────
@@ -3924,6 +3937,15 @@ def register_core_routes(
         # OWN fresh sandbox, whose filesystem has no copy of the source's local
         # native rollout, so the clone is likewise doomed — skip the directive
         # so the runner rebuilds from the copied Omnigent items instead.
+        fork_harness = (
+            source.harness_override
+            if copy_model_settings and source.harness_override
+            else await asyncio.to_thread(_agent_harness, base_agent)
+        )
+        source_account = await asyncio.to_thread(
+            session_account_for_viewer, user_id, source, permission_store, conversation_store
+        )
+        copy_account = fork_harness == "claude-native" and source_account is not None
         resume_source_native_session = (
             (not switching_agent or copy_model_settings)
             and not target_is_cursor
@@ -4075,6 +4097,7 @@ def register_core_routes(
                 override_reasoning_effort_set=effort_set,
                 override_terminal_launch_args=override_launch_args,
                 override_terminal_launch_args_set=launch_args_set,
+                copy_account=copy_account,
                 dropped_label_keys=dropped_label_keys,
                 extra_labels=extra_labels,
                 # Launch flags are CLI-specific. On an agent switch the fork may
@@ -4224,6 +4247,9 @@ def register_core_routes(
             list(reversed(fork_items.data)),
             "idle",
             permission_level=level,
+            account=await asyncio.to_thread(
+                session_account_for_viewer, user_id, new_conv, permission_store, conversation_store
+            ),
             last_task_error=None,
             agent_name=base_agent.name,
         )

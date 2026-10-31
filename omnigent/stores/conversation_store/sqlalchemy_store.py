@@ -273,6 +273,7 @@ def _to_conversation(
         harness_override=overrides["harness_override"],
         # Stored as ``"on"`` / absent; surfaced as a plain bool on the entity.
         share_workspace_files=overrides["share_workspace_files"] == "on",
+        account=overrides["account"],
         sub_agent_name=meta.sub_agent_name if meta else None,
         task_summary=meta.task_summary if meta else None,
         external_session_id=meta.external_session_id if meta else None,
@@ -1029,6 +1030,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         cost_control_mode_override: str | None = None,
         subagent_routing_override: str | None = None,
         harness_override: str | None = None,
+        account: str | None = None,
     ) -> Conversation:
         """
         Create a new conversation in the database.
@@ -1077,6 +1079,8 @@ class SqlAlchemyConversationStore(ConversationStore):
             terminal.
         :param conversation_id: Optional caller-supplied identifier.
             ``None`` generates a new random id.
+        :param account: Extra Claude account name, e.g. ``"work"``.
+            ``None`` records no account. The caller resolves child inheritance.
         :returns: The newly created :class:`Conversation`.
         :raises NameAlreadyExistsError: If
             ``parent_conversation_id`` is set and a sibling row
@@ -1102,15 +1106,15 @@ class SqlAlchemyConversationStore(ConversationStore):
         encoded_inference_snapshot = (
             json.dumps(inference_snapshot) if inference_snapshot is not None else None
         )
-        encoded_overrides = _encode_session_overrides(
-            {
-                "reasoning_effort": reasoning_effort,
-                "model_override": model_override,
-                "cost_control_mode_override": cost_control_mode_override,
-                "subagent_routing_override": subagent_routing_override,
-                "harness_override": harness_override,
-            }
-        )
+        overrides: dict[str, str | None] = {
+            "reasoning_effort": reasoning_effort,
+            "model_override": model_override,
+            "cost_control_mode_override": cost_control_mode_override,
+            "subagent_routing_override": subagent_routing_override,
+            "harness_override": harness_override,
+            "account": account,
+        }
+        encoded_overrides = _encode_session_overrides(overrides)
         prepared_labels = _prepare_label_updates(labels) if labels else {}
         try:
             # Get parent's root from AP, then write AP row and Omnigent meta separately.
@@ -4572,6 +4576,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         host_id: str | None = None,
         inference_snapshot: dict[str, Any] | None = None,
         created_by: str | None = None,
+        account: str | None = None,
     ) -> CreatedSession:
         """
         Insert a conversation row and session-scoped agent.
@@ -4624,6 +4629,8 @@ class SqlAlchemyConversationStore(ConversationStore):
         :param created_by: Identity of the creating user, recorded on the
             session-scoped agent so its code can only be mutated by the
             owner. ``None`` in single-user mode.
+        :param account: Extra Claude account name, e.g. ``"work"``.
+            ``None`` records no account. The caller resolves child inheritance.
         :returns: A :class:`CreatedSession` with both entities.
         :raises ConversationNotFoundError: If
             ``parent_conversation_id`` is set but no such
@@ -4647,6 +4654,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             host_id=host_id,
             inference_snapshot=inference_snapshot,
             created_by=created_by,
+            account=account,
         )
 
     def _create_session_with_agent_with_id(
@@ -4669,6 +4677,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         host_id: str | None = None,
         inference_snapshot: dict[str, Any] | None = None,
         created_by: str | None = None,
+        account: str | None = None,
     ) -> CreatedSession:
         """Body of :meth:`create_session_with_agent` under a caller-supplied
         ``conversation_id``. The public method generates a fresh id; this seam
@@ -4676,12 +4685,12 @@ class SqlAlchemyConversationStore(ConversationStore):
         from omnigent.stores.conversation_store import ConversationNotFoundError
 
         now = now_epoch()
-        encoded_overrides = _encode_session_overrides(
-            {
-                "reasoning_effort": reasoning_effort,
-                "model_override": model_override,
-            }
-        )
+        overrides: dict[str, str | None] = {
+            "reasoning_effort": reasoning_effort,
+            "model_override": model_override,
+            "account": account,
+        }
+        encoded_overrides = _encode_session_overrides(overrides)
         encoded_inference_snapshot = (
             json.dumps(inference_snapshot) if inference_snapshot is not None else None
         )
@@ -4784,6 +4793,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         override_reasoning_effort_set: bool = False,
         override_terminal_launch_args: list[str] | None = None,
         override_terminal_launch_args_set: bool = False,
+        copy_account: bool = True,
         dropped_label_keys: frozenset[str] = frozenset(),
         extra_labels: dict[str, str] | None = None,
         carry_history_into_native: bool = False,
@@ -4867,6 +4877,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         :param override_terminal_launch_args_set: Whether the caller chose
             explicit launch args. ``False`` (default) inherits per
             ``copy_terminal_launch_args``.
+        :param copy_account: Whether to inherit the source Claude account.
         :param dropped_label_keys: Source labels to NOT copy onto the fork,
             beyond the always-dropped instance-scoped set. The fork route
             passes the permission-mode / codex-bypass label keys here when
@@ -4943,6 +4954,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             override_reasoning_effort_set=override_reasoning_effort_set,
             override_terminal_launch_args=override_terminal_launch_args,
             override_terminal_launch_args_set=override_terminal_launch_args_set,
+            copy_account=copy_account,
             dropped_label_keys=dropped_label_keys,
             extra_labels=extra_labels,
             carry_history_into_native=carry_history_into_native,
@@ -4972,6 +4984,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         override_reasoning_effort_set: bool = False,
         override_terminal_launch_args: list[str] | None = None,
         override_terminal_launch_args_set: bool = False,
+        copy_account: bool = True,
         dropped_label_keys: frozenset[str] = frozenset(),
         extra_labels: dict[str, str] | None = None,
         carry_history_into_native: bool = False,
@@ -5042,6 +5055,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                     "harness_override": (
                         source_overrides["harness_override"] if copy_model_settings else None
                     ),
+                    "account": source_overrides["account"] if copy_account else None,
                 }
             )
             new_conv_values: dict[str, Any] = {

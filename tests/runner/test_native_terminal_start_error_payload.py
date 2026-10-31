@@ -496,3 +496,67 @@ def test_ensure_response_and_diagnostic_share_error_and_session_ids(
     # This ``OSError`` has no numeric errno (single-arg constructor), so the
     # structured cause is the class name only.
     assert "(OSError)" in payload["message"]
+
+
+@pytest.mark.parametrize("failure", ["signed-out", "mismatch", "unknown"])
+def test_account_refusal_response_preserves_details_but_shared_events_do_not(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str
+) -> None:
+    from omnigent.harnesses.claude_native.account import (
+        ensure_claude_account_signed_in,
+        ensure_session_account_selected,
+    )
+    from omnigent.onboarding.claude_accounts import AccountUnavailableError
+    from omnigent.server.routes._sessions.helpers import (
+        _native_terminal_failure_from_runner_response,
+    )
+
+    config = {
+        "host": {"name": "mac-mini"},
+        "providers": {
+            "claude-private-work": {
+                "kind": "subscription",
+                "cli": "claude",
+                "config_dir": "/accounts/work",
+            }
+        },
+    }
+    monkeypatch.setattr("omnigent.config.load_global_config", lambda: config)
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.account.claude_auth_status", lambda *a, **k: False
+    )
+    with pytest.raises(AccountUnavailableError) as caught:
+        if failure == "signed-out":
+            ensure_claude_account_signed_in(
+                "claude",
+                "/accounts/work",
+                env={"CLAUDE_CONFIG_DIR": "/accounts/work"},
+                cwd=tmp_path,
+            )
+        elif failure == "mismatch":
+            ensure_session_account_selected("private-work", None, config=config)
+        else:
+            raise AccountUnavailableError(
+                "Could not confirm this session's Claude account; retry."
+            )
+    response = _native_terminal_start_error_response(caught.value, "Claude", session_id="conv_1")
+    error = json.loads(response.body)["error"]
+    assert response.status_code == 412
+    assert error["code"] == AccountUnavailableError.code
+    assert error["message"] == str(caught.value)
+    if failure == "unknown":
+        assert "retry" in error["message"]
+    else:
+        assert "private-work" in error["message"]
+        assert "mac-mini" in error["message"]
+        assert "setup" in error["message"] or "new runner" in error["message"]
+    events = []
+    _publish_native_terminal_start_error(
+        lambda session_id, event: events.append(event), "conv_1", "Claude", caught.value
+    )
+    assert events[0]["error"]["message"] == "Claude account unavailable"
+    transcript = _native_terminal_failure_from_runner_response(
+        httpx.Response(412, json={"error": error}), display_name="Claude"
+    )
+    assert transcript.error is not None
+    assert transcript.error.message == "Claude account unavailable"

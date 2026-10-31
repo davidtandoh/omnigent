@@ -415,6 +415,13 @@ def create_builtin_agents_router(
                     412, "precondition_failed", "Agent changed; reload before saving"
                 )
         bundle, spec, location = await asyncio.to_thread(configuration, agent, body)
+        from omnigent.server.routes._session_create_validation import (
+            validate_agent_account_sessions,
+        )
+
+        await asyncio.to_thread(
+            validate_agent_account_sessions, conversation_store, agent.id, spec
+        )
         if len(bundle) > MAX_INSTALL_BUNDLE_BYTES:
             raise _too_large()
         assert artifact_store is not None
@@ -547,6 +554,16 @@ def create_builtin_agents_router(
         )
         if spec.name is None:  # validate_agent_bundle rejects this; narrows the type
             raise OmnigentError("agent spec has no name", code=ErrorCode.INVALID_INPUT)
+        from omnigent.server.routes._session_create_validation import (
+            validate_agent_account_sessions,
+        )
+
+        await asyncio.to_thread(
+            validate_agent_account_sessions,
+            conversation_store,
+            installed_agent_id(user_id, spec.name),
+            spec,
+        )
         agent = await asyncio.to_thread(
             install_user_agent,
             agent_store,
