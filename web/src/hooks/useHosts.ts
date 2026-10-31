@@ -8,6 +8,7 @@ import {
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { authenticatedFetch } from "@/lib/identity";
 import { ApiError, apiErrorFromResponse } from "@/lib/sessionsApi";
+import type { ClaudeAccountQuota } from "@/lib/claudeAccounts";
 import type { NativeModelOption } from "@/lib/types";
 
 export interface Host {
@@ -434,5 +435,27 @@ export function useHarnessStartup(hostId: string, harness: string) {
     },
     retry: false,
     staleTime: 30_000,
+  });
+}
+
+/**
+ * Owner-only Claude quota snapshots for each account on a host. Each fetch
+ * asks the host to read every account, so poll gently and refresh on focus
+ * (a phone waking up) rather than on a tight interval.
+ */
+export function useHostClaudeQuotas(hostId: string, enabled = true) {
+  return useQuery({
+    queryKey: ["claude-quotas", hostId],
+    queryFn: async (): Promise<ClaudeAccountQuota[]> => {
+      const res = await authenticatedFetch(`/v1/hosts/${encodeURIComponent(hostId)}/claude-quotas`);
+      if (!res.ok) throw new ApiError("Couldn't load Claude quotas", res.status, null);
+      const body = (await res.json()) as { quotas?: ClaudeAccountQuota[] };
+      return Array.isArray(body.quotas) ? body.quotas : [];
+    },
+    enabled,
+    retry: false,
+    staleTime: 60_000,
+    refetchInterval: 5 * 60_000,
+    refetchOnWindowFocus: true,
   });
 }

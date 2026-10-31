@@ -408,8 +408,18 @@ calling user's daily costs across accounts.
 `omnigent usage` and `omnigent host status` also show each host owner's Claude
 accounts with their 5-hour and 7-day usage percentages and reset times.
 These readings require `quota-axi` on the host. Omnigent reads it without
-refreshing credentials. Missing tools, failed reads, or incomplete quota windows
-show `unavailable`. Usage reports also mark offline hosts as unavailable.
+refreshing credentials. Missing tools or reads without a usable snapshot show
+`unavailable`. A fresh reading must contain both account-level windows. When a
+fresh read fails and `quota-axi` serves its last reading instead, the CLI shows
+`stale`; that snapshot can contain only one account-level window. Usage reports
+also mark offline hosts as unavailable.
+
+In the web UI, **Settings → Harnesses → Claude → Settings** shows the same
+readings under each account in the Claude accounts list, on desktop and mobile.
+Each account shows its 5-hour, weekly, and any per-model weekly window, with
+percent used, reset time, and the age of the reading. A reading that is older
+than 15 minutes, or that `quota-axi` marked stale after a failed read, is marked
+stale. A window whose reset time has passed shows no percentage.
 Quota readings are separate from estimated session costs. Only the host owner
 receives these readings.
 

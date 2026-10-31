@@ -7394,6 +7394,8 @@ def _render_claude_quotas(console: Console, quotas: list[dict[str, Any]]) -> Non
                 Text(
                     f"{window['percent_used']:g}% / {window['resets_at']}"
                     if quota.get("status") == "available" and window
+                    else "stale"
+                    if quota.get("status") == "stale"
                     else "unavailable"
                 )
             )
