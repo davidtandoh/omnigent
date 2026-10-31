@@ -916,6 +916,39 @@ def test_launch_runner_account_round_trips_and_is_absent_by_default() -> None:
     assert isinstance(decoded_plain, HostLaunchRunnerFrame) and decoded_plain.account is None
 
 
+def test_claude_account_readiness_round_trips_on_hello_and_refresh() -> None:
+    """Only names and readiness travel; an older host's frames decode as unknown."""
+    accounts = {"work": True, "client-a": "needs-auth"}
+    hello = decode_host_frame(
+        encode_host_frame(
+            HostHelloFrame(
+                version="1", frame_protocol_version=1, name="mac", claude_accounts=accounts
+            )
+        )
+    )
+    assert isinstance(hello, HostHelloFrame) and hello.claude_accounts == accounts
+    refresh = decode_host_frame(
+        encode_host_frame(
+            HostHarnessReadinessFrame(
+                configured_harnesses={"claude-native": True}, claude_accounts=accounts
+            )
+        )
+    )
+    assert isinstance(refresh, HostHarnessReadinessFrame)
+    assert refresh.claude_accounts == accounts
+    legacy = decode_host_frame(
+        json.dumps({"kind": "host.harness_readiness", "configured_harnesses": {"codex": True}})
+    )
+    assert isinstance(legacy, HostHarnessReadinessFrame) and legacy.claude_accounts is None
+
+
+def test_model_options_account_round_trips_and_is_absent_by_default() -> None:
+    frame = HostModelOptionsFrame(request_id="r", harness="claude-native", account="work")
+    assert decode_host_frame(encode_host_frame(frame)) == frame
+    plain = HostModelOptionsFrame(request_id="r", harness="claude-native")
+    assert "account" not in json.loads(encode_host_frame(plain))
+
+
 def test_host_advertises_claude_account_support() -> None:
     from omnigent.host.frames import CAP_CLAUDE_ACCOUNT, HOST_CAPABILITIES
 

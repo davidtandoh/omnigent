@@ -131,7 +131,6 @@ import {
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { HarnessSetupDialog } from "@/shell/HarnessSetupDialog";
 import {
-  harnessReadinessOnHost,
   harnessUnavailableReasonOnHost,
   harnessUnconfiguredOnHost,
   harnessWarningBadgeText,
@@ -270,6 +269,11 @@ import {
   DEVIN_NATIVE_PERMISSION_MODES,
 } from "@/lib/nativeHarnessModes";
 import { fetchHosts, useHostModelOptions, useHosts, type Host } from "@/hooks/useHosts";
+import {
+  CLAUDE_DEFAULT_ACCOUNT_LABEL,
+  hostClaudeAccountNames,
+  pickerHarnessReadinessOnHost,
+} from "@/lib/claudeAccounts";
 import {
   previewIsUnsupported,
   sandboxModelOptionsKey,
@@ -1545,7 +1549,7 @@ export function AgentHarnessPicker({
   const selectedEntry = [...harnessEntries, ...agentEntries].find(
     (agent) => agent.id === effectiveAgentId,
   );
-  const selectedReadiness = harnessReadinessOnHost(selectedEntry?.harness, host);
+  const selectedReadiness = pickerHarnessReadinessOnHost(selectedEntry?.harness, host);
   const selectedUnavailable =
     selectedEntry != null && !selectedReadiness.selectable && selectedReadiness.fallbackRelevant;
   const selectedWarningMessage = selectedUnavailable
@@ -1680,7 +1684,7 @@ export function AgentHarnessPicker({
       : "";
     const summary = details || entrySummaries?.[agent.id] || "Default";
     const editable = selectedConfigContent !== undefined && (isEntryConfigurable?.(agent) ?? true);
-    const readiness = harnessReadinessOnHost(agent.harness, host);
+    const readiness = pickerHarnessReadinessOnHost(agent.harness, host);
     const blockedReason = blockedReasons?.get(agent.id);
     const unavailable =
       blockedReason !== undefined || (!readiness.selectable && readiness.fallbackRelevant);
@@ -1750,7 +1754,7 @@ export function AgentHarnessPicker({
     const secondaryOrder = ["opencode", "pi"];
     for (const agent of harnessEntries) {
       const selected = agent.id === effectiveAgentId;
-      const readiness = harnessReadinessOnHost(agent.harness, host);
+      const readiness = pickerHarnessReadinessOnHost(agent.harness, host);
       const unavailable = !readiness.selectable && readiness.fallbackRelevant;
       if (!selected && hideUnconfigured && unavailable) continue;
       const key = nativeCodingAgentForAvailableAgent(agent)?.iconKind ?? "";
@@ -3154,7 +3158,7 @@ export function NewChatLandingScreen() {
       resolveHarnessPreference(
         harnessEntries.map((agent) => ({
           harness: nativeCodingAgentForAvailableAgent(agent)?.harness ?? agent.harness ?? "",
-          readiness: harnessReadinessOnHost(agent.harness, harnessWarningHost),
+          readiness: pickerHarnessReadinessOnHost(agent.harness, harnessWarningHost),
           value: agent,
         })),
         rememberedNativeAgent?.harness,
@@ -3198,19 +3202,34 @@ export function NewChatLandingScreen() {
   // The selected native harness persists and restores harness-specific model,
   // effort, and permission knobs.
   const selectedNativeHarness = nativeCodingAgentForAvailableAgent(selectedAgent)?.harness ?? null;
+  // Extra Claude accounts on the selected host. With none, the picker shows no
+  // Account section and the session uses the host's default login.
+  const hostClaudeAccounts = hostClaudeAccountNames(harnessWarningHost);
+  const [pickedClaudeAccount, setPickedClaudeAccount] = useState<string | null>(null);
+  const claudeAccount = selectedNativeHarness === "claude-native" ? pickedClaudeAccount : null;
+  const hostHasClaudeAccounts = hostClaudeAccounts.length > 0 || claudeAccount !== null;
+  const claudeAccountError =
+    !sandboxSelected &&
+    claudeAccount !== null &&
+    harnessWarningHost?.claude_accounts?.[claudeAccount] !== true
+      ? `Claude account '${claudeAccount}' is unavailable on ${harnessWarningHost?.name ?? "this machine"}. Choose an available account to continue.`
+      : null;
   // Probe only the selected, available harness. Older hosts without readiness
   // metadata remain eligible, matching the picker's setup warnings.
   const canLoadHostModels = (harness: string) =>
     selectedNativeHarness === harness &&
     hostSelected &&
     selectedHost?.status === "online" &&
-    !harnessUnconfiguredOnHost(harness, selectedHost);
+    (harness === "claude-native" && claudeAccount !== null
+      ? selectedHost.claude_accounts?.[claudeAccount] === true
+      : !harnessUnconfiguredOnHost(harness, selectedHost));
   const {
     data: hostClaudeModelOptions,
     isLoading: hostClaudeModelsLoading,
     error: hostClaudeModelsError,
   } = useHostModelOptions(selectedHostId, "claude-native", canLoadHostModels("claude-native"), {
     poll: selectedNativeHarness === "claude-native",
+    account: claudeAccount ?? undefined,
   });
   const {
     data: hostCodexModelOptions,
@@ -3255,7 +3274,7 @@ export function NewChatLandingScreen() {
     "claude-native",
     hostClaudeModelOptions,
     hostClaudeModelsLoading,
-    cachedHostModels?.claude,
+    hostHasClaudeAccounts ? undefined : cachedHostModels?.claude,
   );
   const availableCodexModels = availableHostModels(
     "codex-native",
@@ -3541,7 +3560,9 @@ export function NewChatLandingScreen() {
         { label: "Model", value: modelValue },
         ...(effortValue ? [{ label: "Effort", value: effortValue }] : []),
         { label: "Permission mode", value: permissionValue },
-        ...sourceRows(claudeModelOptions),
+        ...(selectedNativeHarness === "claude-native" && hostHasClaudeAccounts
+          ? [{ label: "Account", value: claudeAccount ?? CLAUDE_DEFAULT_ACCOUNT_LABEL }]
+          : sourceRows(claudeModelOptions)),
       ];
     }
     // Codex folds routing into its Model row, so report it the same way Claude
@@ -3637,6 +3658,8 @@ export function NewChatLandingScreen() {
     agySkipMode,
     pickedHarness,
     selectedNativeHarness,
+    hostHasClaudeAccounts,
+    claudeAccount,
   ]);
   const harnessTriggerDetails = configSummary.filter(
     (row) =>
@@ -3749,7 +3772,7 @@ export function NewChatLandingScreen() {
             sandboxSelected,
             model: pickedModel,
             models: {
-              claude: availableClaudeModels,
+              claude: hostHasClaudeAccounts ? undefined : availableClaudeModels,
               codex: availableCodexModels,
               pi: availablePiModels,
             },
@@ -3761,6 +3784,7 @@ export function NewChatLandingScreen() {
       selectedHostId,
       sandboxSelected,
       pickedModel,
+      hostHasClaudeAccounts,
       availableClaudeModels,
       availableCodexModels,
       availablePiModels,
@@ -4019,6 +4043,48 @@ export function NewChatLandingScreen() {
           ],
         }
       : undefined;
+  const selectClaudeAccount = (account: string | null) => {
+    if (account === claudeAccount) return;
+    agentExplicitlySelectedRef.current = true;
+    setPickedClaudeAccount(account);
+    selectPickerModel(MODEL_SELECT_DEFAULT);
+  };
+  const accountSection: ComposerConfigSection | undefined =
+    !sandboxSelected && selectedNativeHarness === "claude-native" && hostHasClaudeAccounts
+      ? {
+          testId: "new-chat-landing-agent-accounts",
+          header: "Account",
+          choices: [
+            null,
+            ...new Set([...hostClaudeAccounts, ...(claudeAccount !== null ? [claudeAccount] : [])]),
+          ].map((account) => {
+            const missing = account !== null && !hostClaudeAccounts.includes(account);
+            const signedOut =
+              account !== null && harnessWarningHost?.claude_accounts?.[account] !== true;
+            return {
+              key: account ?? "__default__",
+              label: (
+                <span className="flex min-w-0 items-center gap-2">
+                  <span className="truncate">{account ?? CLAUDE_DEFAULT_ACCOUNT_LABEL}</span>
+                  {signedOut && (
+                    <Badge
+                      variant="outline"
+                      className="border-amber-300 bg-amber-50 text-sm text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-400"
+                      data-testid={`new-chat-landing-account-warning-${account}`}
+                    >
+                      {missing ? "Unavailable" : "Signed out"}
+                    </Badge>
+                  )}
+                </span>
+              ),
+              checked: claudeAccount === account,
+              onSelect: () => selectClaudeAccount(account),
+              testId: `new-chat-landing-account-${account ?? "default"}`,
+              className: "whitespace-normal [&>span:last-child]:min-w-0",
+            };
+          }),
+        }
+      : undefined;
   const effortSection: ComposerConfigSection | undefined =
     pickerEffortOptions.length > 0
       ? {
@@ -4121,6 +4187,7 @@ export function NewChatLandingScreen() {
                 }
               : undefined
           }
+          account={accountSection}
           models={
             modelSection && {
               ...modelSection,
@@ -4535,10 +4602,10 @@ export function NewChatLandingScreen() {
   }, [pickedHarness]);
   // Native harnesses receive skill invocations as plain text for their CLI to interpret.
   const isNativeTerminalAgent = isNativeCodingAgent(selectedAgent);
-  const selectedAgentUnconfigured = harnessUnconfiguredOnHost(
-    selectedAgent?.harness,
-    harnessWarningHost,
-  );
+  const selectedAgentUnconfigured =
+    selectedNativeHarness === "claude-native" && claudeAccount !== null
+      ? harnessWarningHost?.claude_accounts?.[claudeAccount] !== true
+      : harnessUnconfiguredOnHost(selectedAgent?.harness, harnessWarningHost);
   // Smart Routing routes between native Claude Code and Codex, so both wrapper
   // agents must be registered and both CLIs ready on the target host — a router
   // with one arm is just that arm. The Claude wrapper is the placeholder the
@@ -5180,6 +5247,7 @@ export function NewChatLandingScreen() {
     (message.trim().length > 0 || files.length > 0) &&
     !mcpAuthorizing &&
     mcpSelectionError === null &&
+    claudeAccountError === null &&
     !pickerLoading &&
     !workspaceStartLoading &&
     !worktreeRequestPending &&
@@ -5193,29 +5261,31 @@ export function NewChatLandingScreen() {
   // Name the next missing input in the submit tooltip.
   const submitDisabledReason = canSubmit
     ? null
-    : mcpAuthorizing || mcpSelectionError
-      ? (mcpSelectionError ?? "Finish signing in to the MCP service…")
-      : pendingSkillCompletion
-        ? "Loading skills…"
-        : pickerLoading || workspaceStartLoading || worktreeRequestPending
-          ? "Loading session configuration…"
-          : pickerSelectionError || sandboxCatalogError
-            ? (pickerSelectionError ?? sandboxCatalogError)
-            : sandboxSelected && sandboxRepoOverCap
-              ? `This sandbox provider clones at most ${maxSandboxRepos} ${
-                  maxSandboxRepos === 1 ? "repository" : "repositories"
-                } — remove the extras`
-              : sandboxSelected && !sandboxRepoValid
-                ? "Please enter a valid repository URL"
-                : !sandboxSelected && selectedHostId && selectedHost?.status !== "online"
-                  ? "Selected host is unavailable. Reconnect it or choose another host."
-                  : !sandboxSelected && (!selectedHostId || !workspaceValid)
-                    ? "Please choose a host and working directory"
-                    : configuredAgentUnavailable && selectedAgent == null
-                      ? "This project's configured agent is unavailable — pick an agent to continue"
-                      : message.trim().length === 0 && files.length === 0
-                        ? "Enter a message to get started"
-                        : null;
+    : claudeAccountError !== null
+      ? claudeAccountError
+      : mcpAuthorizing || mcpSelectionError
+        ? (mcpSelectionError ?? "Finish signing in to the MCP service…")
+        : pendingSkillCompletion
+          ? "Loading skills…"
+          : pickerLoading || workspaceStartLoading || worktreeRequestPending
+            ? "Loading session configuration…"
+            : pickerSelectionError || sandboxCatalogError
+              ? (pickerSelectionError ?? sandboxCatalogError)
+              : sandboxSelected && sandboxRepoOverCap
+                ? `This sandbox provider clones at most ${maxSandboxRepos} ${
+                    maxSandboxRepos === 1 ? "repository" : "repositories"
+                  } — remove the extras`
+                : sandboxSelected && !sandboxRepoValid
+                  ? "Please enter a valid repository URL"
+                  : !sandboxSelected && selectedHostId && selectedHost?.status !== "online"
+                    ? "Selected host is unavailable. Reconnect it or choose another host."
+                    : !sandboxSelected && (!selectedHostId || !workspaceValid)
+                      ? "Please choose a host and working directory"
+                      : configuredAgentUnavailable && selectedAgent == null
+                        ? "This project's configured agent is unavailable — pick an agent to continue"
+                        : message.trim().length === 0 && files.length === 0
+                          ? "Enter a message to get started"
+                          : null;
   useLayoutEffect(() => {
     if (submitDisabledReason !== null) return;
     setSubmitTooltipState("closed");
@@ -5321,7 +5391,9 @@ export function NewChatLandingScreen() {
   const harnessTriggerTooltipRows = [
     { label: selectedAgentHasAdvancedSettings ? "Agent" : "Harness", value: agentLabel },
     ...harnessTriggerDetails,
-    ...configSummary.filter((detail) => detail.label === "Connection"),
+    ...configSummary.filter(
+      (detail) => detail.label === "Connection" || detail.label === "Account",
+    ),
   ];
 
   // Pick top-level Smart Routing. The create call needs a concrete agent_id, so
@@ -5971,6 +6043,11 @@ export function NewChatLandingScreen() {
           // harness keeps its own configured/default value.
           model_override: normalizedModelOverride ?? undefined,
           reasoning_effort: normalizedReasoningEffort ?? undefined,
+          // The chosen extra Claude account; omitted for the default login.
+          account:
+            !sandboxSelected && !smartRoutingHarnessSelected && claudeAccount !== null
+              ? claudeAccount
+              : undefined,
           cost_control_mode_override: costControlOverride,
           // Top-level Smart Routing sends the same "auto" sentinel the bundle
           // path does; the server tells them apart by the bound agent being a
@@ -7478,7 +7555,16 @@ export function NewChatLandingScreen() {
               launch, so submitting surfaces a specific error if it
               really can't run. Normal-flow directly under the composer
               (like the createError line below) so it reads as part of it. */}
-          {selectedAgentUnconfigured && (
+          {claudeAccountError && (
+            <p
+              role="alert"
+              className="pl-2 text-xs text-amber-600 dark:text-amber-500"
+              data-testid="new-chat-landing-account-error"
+            >
+              {claudeAccountError}
+            </p>
+          )}
+          {selectedAgentUnconfigured && !claudeAccountError && (
             <HarnessSetupNotice
               agentName={selectedAgent?.display_name}
               hostName={harnessWarningHost?.name}

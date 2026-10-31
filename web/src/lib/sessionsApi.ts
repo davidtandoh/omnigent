@@ -181,6 +181,8 @@ interface SessionResponseWire {
   subagent_routing_override?: "on" | "off" | null;
   /** Owner opt-in: view-level collaborators may browse workspace files. */
   share_workspace_files?: boolean;
+  /** Extra Claude account name; sent only to the session owner. */
+  account?: string | null;
   context_window?: number | null;
   last_total_tokens?: number | null;
   usage_included?: boolean;
@@ -348,6 +350,7 @@ function sessionFromWire(wire: SessionResponseWire): Session {
     costControlModeOverride: wire.cost_control_mode_override,
     subagentRoutingOverride: wire.subagent_routing_override,
     shareWorkspaceFiles: wire.share_workspace_files ?? false,
+    account: wire.account ?? null,
     contextWindow: wire.context_window,
     lastTotalTokens: wire.last_total_tokens,
     usageIncluded: wire.usage_included ?? true,

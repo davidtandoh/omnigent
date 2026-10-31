@@ -401,6 +401,8 @@ export interface Session {
    * file surfaces for a view-only viewer.
    */
   shareWorkspaceFiles?: boolean;
+  /** Extra Claude account the session runs on, e.g. `"work"`; owners only, `null` for the default login. */
+  account?: string | null;
   /** Model context window size in tokens as looked up server-side. */
   contextWindow?: number | null;
   /**

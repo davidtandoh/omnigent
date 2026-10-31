@@ -1297,6 +1297,7 @@ class HostProcess:
         # refresh task keeps it current.
         self._configured_harnesses: dict[str, HarnessAvailability] | None = None
         self._gateway_inference: dict[str, bool] | None = None
+        self._claude_accounts: dict[str, HarnessAvailability] | None = None
         self._capabilities_initialized = False
         # Invalidates deferred probe results when an install or credential
         # write has already produced a fresher snapshot. Capability state is
@@ -3753,7 +3754,9 @@ class HostProcess:
         routable = [row["id"] for row in rows if isinstance(row.get("id"), str) and row["id"]]
         return ModelOptionsResult(models=rows, routable_models=routable)
 
-    async def _probed_claude_model_options(self) -> ModelOptionsResult | None:
+    async def _probed_claude_model_options(
+        self, *, account: str | None = None
+    ) -> ModelOptionsResult | None:
         """
         Store-backed harness-truth Claude listing, or ``None`` on failure.
 
@@ -3770,7 +3773,11 @@ class HostProcess:
         )
 
         try:
-            config = await asyncio.to_thread(resolve_native_claude_config, spec=None)
+            config = (
+                await asyncio.to_thread(resolve_native_claude_config, spec=None)
+                if account is None
+                else None
+            )
             rows = await claude_launch_catalog(config)
         except Exception:  # no catalog, never a crash
             _logger.warning("Claude model catalog unavailable", exc_info=True)
@@ -3779,6 +3786,61 @@ class HostProcess:
             return None
         routable = list(config.routable_models) if config is not None else []
         return ModelOptionsResult(models=rows, routable_models=routable)
+
+    async def _account_model_options(
+        self,
+        frame: HostModelOptionsFrame,
+        harness: str,
+    ) -> HostModelOptionsResultFrame:
+        """List the Claude catalog as *frame*'s extra account would see it.
+
+        The account resolves against this machine's own config, exactly as a
+        launch does, and is never replaced by the default login.
+        """
+        from omnigent.native.launch_environment import native_launch_environment_scope
+        from omnigent.onboarding.claude_accounts import (
+            AccountUnavailableError,
+            account_launch_environment,
+        )
+
+        assert frame.account is not None
+        if harness != "claude-native":
+            return HostModelOptionsResultFrame(
+                request_id=frame.request_id,
+                status="failed",
+                error="Claude accounts are supported only for claude-native sessions",
+            )
+        try:
+            launch_env = await asyncio.to_thread(
+                account_launch_environment,
+                frame.account,
+                None,
+                host_name=self._identity.name,
+            )
+        except AccountUnavailableError as exc:
+            return HostModelOptionsResultFrame(
+                request_id=frame.request_id, status="failed", error=str(exc)
+            )
+        with native_launch_environment_scope(launch_env):
+            probed = await self._probed_claude_model_options(account=frame.account)
+        if probed is None:
+            return HostModelOptionsResultFrame(
+                request_id=frame.request_id,
+                status="failed",
+                error=f"the claude model probe for account {frame.account!r} failed",
+            )
+        return HostModelOptionsResultFrame(
+            request_id=frame.request_id,
+            status="ok",
+            models=[
+                {
+                    **model,
+                    "source": {"kind": "subscription", "label": "Subscription", "name": "claude"},
+                }
+                for model in probed.models
+            ],
+            routable_models=probed.routable_models,
+        )
 
     async def _handle_model_options(
         self,
@@ -3794,6 +3856,8 @@ class HostProcess:
         """
         harness = canonicalize_harness(frame.harness) or frame.harness
         with_source = functools.partial(_with_model_configuration_source, harness=harness)
+        if frame.account is not None:
+            return await self._account_model_options(frame, harness)
         if harness == "codex-native":
             # Harness-truth lane: every launch shape is answered from the
             # shared catalog, probed from the configured Codex binary itself.
@@ -4299,21 +4363,32 @@ class HostProcess:
                 )
             return None
 
+    async def _probe_claude_accounts(self) -> dict[str, HarnessAvailability] | None:
+        """Collect per-account Claude sign-in readiness; ``None`` when the probe fails."""
+        from omnigent.onboarding.claude_accounts import claude_account_readiness
+
+        try:
+            return await self._run_host_subprocess_in_thread(claude_account_readiness)
+        except Exception:
+            _logger.exception("Host Claude account readiness probe failed")
+            return None
+
     async def _initialize_capabilities(self) -> None:
         """Collect startup metadata before registration, with bounded fallback."""
         if self._capabilities_initialized:
             return
         generation = self._capability_generation
         try:
-            configured, gateway = await asyncio.wait_for(
+            configured, gateway, accounts = await asyncio.wait_for(
                 asyncio.gather(
                     self._probe_configured_harnesses(startup=True),
                     self._probe_gateway_inference(startup=True),
+                    self._probe_claude_accounts(),
                 ),
                 timeout=_HOST_CAPABILITY_INIT_TIMEOUT_S,
             )
         except TimeoutError:
-            configured = gateway = None
+            configured = gateway = accounts = None
             _logger.error(
                 "Host capability discovery exceeded %.0fs; continuing with unknown metadata",
                 _HOST_CAPABILITY_INIT_TIMEOUT_S,
@@ -4325,6 +4400,7 @@ class HostProcess:
             )
         if self._capability_generation == generation:
             self._replace_capabilities(configured, gateway)
+            self._claude_accounts = accounts
         self._capabilities_initialized = True
 
     def _replace_capabilities(
@@ -5181,6 +5257,7 @@ class HostProcess:
             runners=self._alive_runner_ids(),
             configured_harnesses=self._configured_harnesses,
             gateway_inference=self._gateway_inference,
+            claude_accounts=self._claude_accounts,
             interactive_shells=self._interactive_shells,
             telemetry_opt_out=_tel_opt_out,
             installation_id=_tel_install_id,
@@ -5253,6 +5330,7 @@ class HostProcess:
         """Refresh advisory capabilities without endangering the tunnel."""
         published_configured = self._configured_harnesses
         published_gateway = self._gateway_inference
+        published_accounts = self._claude_accounts
         loop = asyncio.get_running_loop()
         next_quick = loop.time() + HARNESS_READINESS_REFRESH_INTERVAL_S
         next_full = loop.time() + HARNESS_READINESS_FULL_REFRESH_INTERVAL_S
@@ -5275,6 +5353,9 @@ class HostProcess:
             if refresh_full:
                 latest = await self._probe_configured_harnesses(startup=False)
                 latest_gateway = await self._probe_gateway_inference(startup=False)
+                latest_accounts = await self._probe_claude_accounts()
+                if latest_accounts is not None:
+                    self._claude_accounts = latest_accounts
                 next_full = now + HARNESS_READINESS_FULL_REFRESH_INTERVAL_S
                 new_configured = latest if latest is not None else configured
                 new_gateway = latest_gateway if latest_gateway is not None else gateway
@@ -5284,8 +5365,11 @@ class HostProcess:
                     self._replace_capabilities(new_configured, new_gateway)
             configured = self._configured_harnesses
             gateway = self._gateway_inference
+            accounts = self._claude_accounts
             if configured is not None and (
-                configured != published_configured or gateway != published_gateway
+                configured != published_configured
+                or gateway != published_gateway
+                or (accounts or {}) != (published_accounts or {})
             ):
                 await self._send_text(
                     ws,
@@ -5293,11 +5377,13 @@ class HostProcess:
                         HostHarnessReadinessFrame(
                             configured_harnesses=configured,
                             gateway_inference=gateway,
+                            claude_accounts=accounts,
                         )
                     ),
                 )
                 published_configured = configured
                 published_gateway = gateway
+                published_accounts = accounts
 
     def _raise_connection_error(self, frame: HostConnectionErrorFrame) -> None:
         """Raise the lifecycle exception requested by a server error frame."""

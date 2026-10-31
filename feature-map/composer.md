@@ -18,7 +18,8 @@ and steers messages while the agent is busy.
   revealing five at a time in server recency order in a scrollable list. The selected
   offline host and desktop reconnect action stay visible. Closing the menu resets it.
 - `pill-tooltip`: hovering the pill shows one tooltip with Harness, Model, and
-  Connection rows (plus effort when the harness has it).
+  Connection or Account rows (plus effort when the harness has it). See the
+  [Claude account usage](../README.md#2-start-your-first-agent) for account selection.
 - `pill-tooltip-suppressed`: the tooltip stays hidden while the model picker is
   open and does not reappear when the picker closes.
 - `pill-opens-config`: clicking anywhere on the highlighted pill label opens the

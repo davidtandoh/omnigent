@@ -2156,6 +2156,35 @@ describe("NewChatLandingScreen cached picker preview", () => {
     expect(readNewChatPickerOptionsCache(snapshot.key)?.models.claude).toEqual(cachedModels);
   });
 
+  it("does not restore an unscoped Claude catalog for a host with extra accounts", () => {
+    mockModelQueries(() => ({
+      ...SUCCESS_QUERY_STATE,
+      data: [{ id: "work-model", displayName: "Work model" }],
+    }));
+    const first = renderLanding();
+    const key = getNewChatPickerCacheKey("");
+    expect(readNewChatPickerOptionsCache(key)?.models.claude?.[0].id).toBe("work-model");
+    first.unmount();
+    resetLandingDraft();
+
+    mockHosts([
+      {
+        ...host("online"),
+        configured_harnesses: { "claude-native": "needs-auth" },
+        claude_accounts: { default: "needs-auth", work: true },
+      },
+    ]);
+    mockModelQueries(() => ({ ...SUCCESS_QUERY_STATE, data: undefined }));
+    renderLanding();
+    openAgentModels("a1");
+    expect(screen.getByTestId("new-chat-landing-account-default")).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    expect(screen.queryByTestId("new-chat-landing-agent-model-work-model")).toBeNull();
+    expect(readNewChatPickerOptionsCache(key)?.models.claude).toBeUndefined();
+  });
+
   it("keeps the named preview when a populated catalog becomes offline", () => {
     const snapshot = seedResolvedPicker();
     mockHosts([host("offline")]);
@@ -9637,6 +9666,166 @@ describe("NewChatLandingScreen agent picker + Edit settings", () => {
     fireEvent.blur(picker);
   });
 
+  it("keeps the Connection row when the host has only the default Claude login", () => {
+    mockHosts([{ ...host("online"), claude_accounts: { default: true } }]);
+    renderLanding();
+    openAgentModels("a1");
+    expect(screen.getByTestId("new-chat-landing-agent-models")).toBeVisible();
+    expect(screen.queryByTestId("new-chat-landing-agent-accounts")).toBeNull();
+  });
+
+  it("turns Connection into an Account chooser that drives models and the create", async () => {
+    mockHosts([{ ...host("online"), claude_accounts: { work: true, "client-a": "needs-auth" } }]);
+    authenticatedFetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "conv_new" }),
+    } as unknown as Response);
+    renderLanding();
+    openAgentModels("a1");
+
+    const accounts = screen.getByTestId("new-chat-landing-agent-accounts");
+    expect(
+      within(accounts)
+        .getAllByRole("menuitemcheckbox")
+        .map((item) => [item.textContent, item.getAttribute("aria-checked")]),
+    ).toEqual([
+      ["Default login", "true"],
+      ["client-aSigned out", "false"],
+      ["work", "false"],
+    ]);
+    fireEvent.click(screen.getByTestId("new-chat-landing-account-work"));
+    expect(screen.getByTestId("new-chat-landing-account-work")).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    // The model list follows the chosen account.
+    expect(
+      useHostModelOptionsMock.mock.calls.filter(([, h]) => h === "claude-native").at(-1)?.[3],
+    ).toEqual({ poll: true, account: "work" });
+    closePrimaryPicker();
+
+    fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+      target: { value: "run the build" },
+    });
+    fireEvent.submit(screen.getByTestId("new-chat-landing-composer"));
+    await waitFor(() => expect(authenticatedFetchMock).toHaveBeenCalledTimes(1));
+    const [, init] = authenticatedFetchMock.mock.calls[0];
+    const body = JSON.parse((init as RequestInit).body as string) as Record<string, unknown>;
+    expect(body.account).toBe("work");
+  });
+
+  it("opens the account chooser while the default login needs auth", () => {
+    mockHosts([
+      {
+        ...host("online"),
+        configured_harnesses: { "claude-native": "needs-auth" },
+        claude_accounts: { default: "needs-auth", work: true },
+      },
+    ]);
+    renderLanding();
+    openAgentModels("a1");
+    expect(screen.getByTestId("new-chat-landing-agent-accounts")).toBeVisible();
+    expect(
+      useHostModelOptionsMock.mock.calls.filter(([, h]) => h === "claude-native").at(-1)?.[2],
+    ).toBe(false);
+    fireEvent.click(screen.getByTestId("new-chat-landing-account-work"));
+    expect(
+      useHostModelOptionsMock.mock.calls.filter(([, h]) => h === "claude-native").at(-1)?.[2],
+    ).toBe(true);
+  });
+
+  it.each(["removed", "signed-out"])(
+    "preserves an explicitly selected account when it becomes %s",
+    async (state) => {
+      mockHosts([{ ...host("online"), claude_accounts: { default: true, work: true } }]);
+      authenticatedFetchMock.mockResolvedValue({
+        ok: true,
+        json: async () => ({ id: "conv_new" }),
+      } as unknown as Response);
+      renderLanding();
+      openAgentModels("a1");
+      fireEvent.click(screen.getByTestId("new-chat-landing-account-work"));
+      closePrimaryPicker();
+
+      mockHosts([
+        {
+          ...host("online"),
+          claude_accounts:
+            state === "removed" ? { default: true } : { default: true, work: "needs-auth" },
+        },
+      ]);
+      fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+        target: { value: "run the build" },
+      });
+      expect(screen.getByTestId("new-chat-landing-account-error")).toHaveTextContent(
+        "Claude account 'work' is unavailable",
+      );
+      expect(screen.getByTestId("new-chat-landing-submit")).toBeDisabled();
+      fireEvent.submit(screen.getByTestId("new-chat-landing-composer"));
+      expect(authenticatedFetchMock).not.toHaveBeenCalled();
+      openAgentModels("a1");
+      expect(screen.getByTestId("new-chat-landing-account-work")).toHaveAttribute(
+        "aria-checked",
+        "true",
+      );
+      expect(screen.getByTestId("new-chat-landing-account-warning-work")).toHaveTextContent(
+        state === "removed" ? "Unavailable" : "Signed out",
+      );
+      expect(
+        useHostModelOptionsMock.mock.calls.filter(([, h]) => h === "claude-native").at(-1),
+      ).toEqual(["host_1", "claude-native", false, { poll: true, account: "work" }]);
+      fireEvent.click(screen.getByTestId("new-chat-landing-account-default"));
+      closePrimaryPicker();
+      expect(screen.queryByTestId("new-chat-landing-account-error")).toBeNull();
+      expect(screen.getByTestId("new-chat-landing-submit")).toBeEnabled();
+      fireEvent.submit(screen.getByTestId("new-chat-landing-composer"));
+      await waitFor(() => expect(authenticatedFetchMock).toHaveBeenCalledTimes(1));
+      const [, init] = authenticatedFetchMock.mock.calls[0];
+      expect(JSON.parse((init as RequestInit).body as string)).not.toHaveProperty("account");
+    },
+  );
+
+  it("clears a remembered model when changing accounts", () => {
+    const workCatalog = {
+      ...CLAUDE_MODEL_OPTIONS_RESULT,
+      data: CLAUDE_MODEL_OPTIONS_RESULT.data.map((model) => ({ ...model })),
+    };
+    useHostModelOptionsMock.mockImplementation(
+      (_id, harness, _enabled, options) =>
+        (harness === "claude-native"
+          ? options?.account === "work"
+            ? workCatalog
+            : CLAUDE_MODEL_OPTIONS_RESULT
+          : CODEX_MODEL_OPTIONS_RESULT) as ReturnType<typeof useHostModelOptions>,
+    );
+    mockHosts([{ ...host("online"), claude_accounts: { default: true, work: true } }]);
+    renderLanding();
+    openAgentModels("a1");
+    fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "Opus 4.8" }));
+    fireEvent.click(screen.getByTestId("new-chat-landing-account-work"));
+    expect(screen.getByTestId("new-chat-landing-agent-model-value")).toHaveTextContent("Default");
+  });
+
+  it("sends no account for the default login or a non-Claude harness", async () => {
+    mockHosts([{ ...host("online"), claude_accounts: { work: true } }]);
+    authenticatedFetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "conv_new" }),
+    } as unknown as Response);
+    renderLanding();
+    selectAgent("a2");
+    openAgentModels("a2");
+    expect(screen.queryByTestId("new-chat-landing-agent-accounts")).toBeNull();
+    closePrimaryPicker();
+    fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+      target: { value: "run the build" },
+    });
+    fireEvent.submit(screen.getByTestId("new-chat-landing-composer"));
+    await waitFor(() => expect(authenticatedFetchMock).toHaveBeenCalledTimes(1));
+    const [, init] = authenticatedFetchMock.mock.calls[0];
+    expect(JSON.parse((init as RequestInit).body as string)).not.toHaveProperty("account");
+  });
+
   it("reflects an armed Codex bypass in the anchored Approval control", () => {
     renderLanding();
     selectAgent("a2");
@@ -9970,6 +10159,20 @@ describe("NewChatLandingScreen agent picker (mobile drill-in)", () => {
       expect(screen.queryByText("Advanced settings")).toBeNull();
     },
   );
+
+  it("shows the Claude Account section in the mobile config page", () => {
+    mockHosts([{ ...host("online"), claude_accounts: { work: true } }]);
+    renderLanding();
+    openPicker();
+    clickAgentConfig("a1");
+    expect(screen.getAllByRole("menu")).toHaveLength(1);
+    expect(screen.getByTestId("new-chat-landing-agent-accounts")).toBeVisible();
+    fireEvent.click(screen.getByTestId("new-chat-landing-account-work"));
+    expect(screen.getByTestId("new-chat-landing-account-work")).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+  });
 
   it("promotes a secondary harness after returning from mobile configuration", () => {
     mockAgents(

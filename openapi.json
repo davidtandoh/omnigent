@@ -11259,7 +11259,7 @@
     },
     "/v1/hosts": {
       "get": {
-        "description": "List all hosts owned by the authenticated user.\n\nReturns both online and offline hosts, with live runner\ninformation for online hosts.\n\n**Returns:** `{\"hosts\": [...]}` with host details \u2014 `host_id`, `name`, `owner`, `status`, `sandbox_provider`, `configured_harnesses`, and `gateway_inference` (`None` when no connected host has reported it to this replica).",
+        "description": "List all hosts owned by the authenticated user.\n\nReturns both online and offline hosts, with live runner\ninformation for online hosts.\n\n**Returns:** `{\"hosts\": [...]}` with host details \u2014 `host_id`, `name`, `owner`, `status`, `sandbox_provider`, `configured_harnesses`, `gateway_inference` and `claude_accounts` (`None` when no connected host has reported it to this replica).",
         "operationId": "list_hosts_v1_hosts_get",
         "responses": {
           "200": {
@@ -11919,7 +11919,7 @@
     },
     "/v1/hosts/{host_id}/harnesses/{harness}/model-options": {
       "get": {
-        "description": "Return pre-launch model choices resolved by the selected host.\n\nA preview of the host's ambient default catalog, not a binding\nsnapshot: launch re-resolves with the session's agent spec, and the\nin-session picker reflects that launch snapshot once the runner is up.\n\n**Raises**\n\n- `HTTPException` \u2014 404 when the host is unknown, 403 when not the owner, 409 when offline or the host daemon is too old to list model options, 502 on host-side failure, 504 on timeout.",
+        "description": "Return pre-launch model choices resolved by the selected host.\n\nA preview of the host's ambient default catalog, not a binding\nsnapshot: launch re-resolves with the session's agent spec, and the\nin-session picker reflects that launch snapshot once the runner is up.\n\n**Raises**\n\n- `HTTPException` \u2014 404 when the host is unknown, 403 when not the owner, 409 when offline or the host daemon is too old to list model options or select accounts, 400 for a malformed account or a non-Claude harness, 502 on host-side failure, 504 on timeout.",
         "operationId": "get_host_model_options_v1_hosts__host_id__harnesses__harness__model_options_get",
         "parameters": [
           {
@@ -11938,6 +11938,23 @@
             "schema": {
               "title": "Harness",
               "type": "string"
+            }
+          },
+          {
+            "description": "Extra Claude account short name, e.g. `\"work\"`, to list `claude-native` models for; `None` lists the default login's.",
+            "in": "query",
+            "name": "account",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Account"
             }
           }
         ],

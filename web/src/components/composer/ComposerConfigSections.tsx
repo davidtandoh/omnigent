@@ -61,11 +61,14 @@ function ConfigChoices({ choices }: { choices: readonly ComposerConfigChoice[] }
  */
 export function ComposerConfigSections({
   sdk,
+  account,
   models,
   efforts,
   extra,
 }: {
   sdk?: ComposerConfigSection;
+  // The Claude account comes before Models because the model list follows it.
+  account?: ComposerConfigSection;
   models?: ComposerConfigSection;
   efforts?: ComposerConfigSection;
   // Additional sections rendered after Models/Effort — e.g. Devin Fusion's
@@ -74,6 +77,7 @@ export function ComposerConfigSections({
 }) {
   const sections = [
     ...(sdk ? [sdk] : []),
+    ...(account ? [account] : []),
     ...(models ? [models] : []),
     ...(efforts ? [efforts] : []),
     ...(extra ?? []),

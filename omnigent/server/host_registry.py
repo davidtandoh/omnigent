@@ -38,6 +38,7 @@ from omnigent.db.account_authority import (
     current_account_user,
 )
 from omnigent.db.db_models import InvalidUuidError, current_workspace_id, uuid_to_bytes
+from omnigent.harness_availability import HarnessAvailability
 from omnigent.host.frames import (
     CAP_CODEX_SIDE_CHAT,
     HostClaudeQuotasResultFrame,
@@ -552,6 +553,9 @@ class HostRegistry:
         # server re-learns it from the reconnect handshake.
         self._gateway_inference: dict[str, dict[str, bool]] = {}
         self._interactive_shells: dict[str, list[str]] = {}
+        # Claude subscription readiness per host, delivered like the
+        # gateway-inference map above. Holds account names, never folders.
+        self._claude_accounts: dict[str, dict[str, HarnessAvailability]] = {}
         self.launch_authorizer: (
             Callable[[str, str, str | None, str | None, bool, str | None], None] | None
         ) = None
@@ -804,6 +808,33 @@ class HostRegistry:
         """
         with self._lock:
             reported = self._gateway_inference.get(_canonical_host_id(host_id))
+        return dict(reported) if reported is not None else None
+
+    def record_claude_accounts(
+        self,
+        host_id: str,
+        claude_accounts: Mapping[str, HarnessAvailability] | None,
+    ) -> None:
+        """Store the Claude subscription readiness a host just reported.
+
+        :param host_id: Host identifier, in any accepted spelling.
+        :param claude_accounts: Account name → readiness, e.g.
+            ``{"work": True}``, or ``None`` to clear back to unknown.
+        """
+        key = _canonical_host_id(host_id)
+        with self._lock:
+            if claude_accounts is None:
+                self._claude_accounts.pop(key, None)
+            else:
+                self._claude_accounts[key] = dict(claude_accounts)
+
+    def claude_accounts(self, host_id: str) -> dict[str, HarnessAvailability] | None:
+        """Return the Claude subscription readiness *host_id* last reported here.
+
+        :returns: A copy of the map, or ``None`` when this replica has no report.
+        """
+        with self._lock:
+            reported = self._claude_accounts.get(_canonical_host_id(host_id))
         return dict(reported) if reported is not None else None
 
     def interactive_shells(self, host_id: str) -> list[str] | None:

@@ -26,6 +26,8 @@ from httpx import ASGITransport, AsyncClient
 
 from omnigent.errors import OmnigentError
 from omnigent.host.frames import (
+    CAP_CLAUDE_ACCOUNT,
+    HostHarnessReadinessFrame,
     HostHelloFrame,
     HostListDirFrame,
     HostListDirResultFrame,
@@ -191,7 +193,8 @@ async def fs_setup(
                 )
                 continue
             if isinstance(frame, HostModelOptionsFrame):
-                reply = replies.get(f"model:{frame.harness}", {})
+                account_key = f":{frame.account}" if frame.account is not None else ""
+                reply = replies.get(f"model:{frame.harness}{account_key}", {})
                 await comm.send_input(
                     {
                         "type": "websocket.receive",
@@ -414,6 +417,79 @@ async def test_host_model_options_returns_prelaunch_catalog(
         # A healthy catalog has no reason to report.
         "error": None,
     }
+
+
+async def test_host_model_options_lists_the_chosen_claude_account(
+    fs_setup: tuple[
+        FastAPI,
+        HostRegistry,
+        ApplicationCommunicator,
+        dict[str, dict[str, Any]],
+        asyncio.Task[None],
+    ],
+) -> None:
+    """The account reaches the host, so the model list follows the chosen account."""
+    app, registry, _comm, replies, _drain = fs_setup
+    replies["model:claude-native"] = {"models": [{"id": "default-login-model"}]}
+    replies["model:claude-native:work"] = {"models": [{"id": "work-model"}]}
+    url = f"/v1/hosts/{_HOST_ID}/harnesses/claude-native/model-options"
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        # The test host's hello advertises no account support yet.
+        older_host = await client.get(url, params={"account": "work"})
+        conn = registry.get(_HOST_ID)
+        assert conn is not None
+        conn.hello.capabilities.append(CAP_CLAUDE_ACCOUNT)
+        work = await client.get(url, params={"account": "work"})
+        default = await client.get(url)
+        malformed = await client.get(url, params={"account": "../work"})
+        other_harness = await client.get(
+            f"/v1/hosts/{_HOST_ID}/harnesses/codex-native/model-options",
+            params={"account": "work"},
+        )
+
+    assert older_host.status_code == 409
+    assert "cannot select Claude accounts" in older_host.json()["detail"]
+    assert work.status_code == 200
+    assert [model["id"] for model in work.json()["models"]] == ["work-model"]
+    assert [model["id"] for model in default.json()["models"]] == ["default-login-model"]
+    assert malformed.status_code == 400
+    assert other_harness.status_code == 400
+
+
+async def test_host_listing_reports_claude_account_readiness(
+    fs_setup: tuple[
+        FastAPI,
+        HostRegistry,
+        ApplicationCommunicator,
+        dict[str, dict[str, Any]],
+        asyncio.Task[None],
+    ],
+) -> None:
+    """A readiness refresh updates each account's sign-in status in ``/v1/hosts``."""
+    app, registry, comm, _replies, _drain = fs_setup
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        before = (await client.get("/v1/hosts")).json()["hosts"]
+        await comm.send_input(
+            {
+                "type": "websocket.receive",
+                "text": encode_host_frame(
+                    HostHarnessReadinessFrame(
+                        configured_harnesses={"claude-native": True},
+                        claude_accounts={"work": True, "client-a": "needs-auth"},
+                    )
+                ),
+            }
+        )
+        while registry.claude_accounts(_HOST_ID) is None:
+            await asyncio.sleep(0.01)
+        after = (await client.get("/v1/hosts")).json()["hosts"]
+        detail = (await client.get(f"/v1/hosts/{_HOST_ID}")).json()
+
+    assert [host["claude_accounts"] for host in before] == [None]
+    expected = {"work": True, "client-a": "needs-auth"}
+    assert [host["claude_accounts"] for host in after] == [expected]
+    assert detail["claude_accounts"] == expected
 
 
 async def test_host_model_options_probe_failure_returns_bad_gateway(

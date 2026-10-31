@@ -76,7 +76,11 @@ from omnigent.server.background_session_titles import (
 from omnigent.server.bundles import agent_needs_own_copy, copy_agent_bundle, validate_agent_bundle
 from omnigent.server.creation_logging import creation_metadata, creation_stage, session_created
 from omnigent.server.host_registry import HostRegistry, RunnerExitReports
-from omnigent.server.permissions import check_session_access, session_account_for_viewer
+from omnigent.server.permissions import (
+    check_session_access,
+    session_account_for_fork,
+    session_account_for_viewer,
+)
 from omnigent.server.routes._auth_helpers import (
     get_permission_level as _get_permission_level,
 )
@@ -3943,7 +3947,7 @@ def register_core_routes(
             else await asyncio.to_thread(_agent_harness, base_agent)
         )
         source_account = await asyncio.to_thread(
-            session_account_for_viewer, user_id, source, permission_store, conversation_store
+            session_account_for_fork, user_id, source, permission_store, conversation_store
         )
         copy_account = fork_harness == "claude-native" and source_account is not None
         resume_source_native_session = (

@@ -132,6 +132,8 @@ def _isolated_provider_resolution(
 ) -> None:
     """Keep model-options frames independent of the developer's provider setup."""
     isolate_provider_resolution(monkeypatch, tmp_path_factory.mktemp("config_home"))
+    # Readiness must not inspect the developer's subscription login or keychain.
+    monkeypatch.setattr("omnigent.onboarding.claude_accounts.claude_account_readiness", dict)
 
 
 @pytest.fixture(autouse=True)
@@ -501,6 +503,79 @@ async def test_handle_model_options_serves_the_claude_catalog(
     )
     assert second.models == first.models
     assert probe_calls == [1]
+    _cleanup_host(host)
+
+
+async def test_handle_model_options_lists_the_chosen_claude_account(
+    monkeypatch: pytest.MonkeyPatch,
+    claude_subscription_source: None,
+    tmp_path: Path,
+) -> None:
+    """An account's catalog is probed in that account's folder and cached apart."""
+    from omnigent.harnesses.claude_native import main as claude_native
+    from omnigent.native.launch_environment import native_launch_environment
+    from omnigent.onboarding import claude_accounts
+
+    work_dir = str(tmp_path / "work")
+
+    def _account_env(account: str, native_env: object, *, host_name: str) -> dict[str, str]:
+        if account != "work":
+            raise claude_accounts.AccountUnavailableError(f"{account!r} is not set up")
+        return {"CLAUDE_CONFIG_DIR": work_dir}
+
+    monkeypatch.setattr(claude_accounts, "account_launch_environment", _account_env)
+    monkeypatch.setattr(
+        claude_native, "resolve_native_claude_config", lambda *, spec, refresh_models=True: None
+    )
+    probed_dirs: list[str | None] = []
+
+    async def _fake_probe(_config: object) -> claude_native.ClaudeModelProbe:
+        config_dir = native_launch_environment().get("CLAUDE_CONFIG_DIR")
+        probed_dirs.append(config_dir)
+        model = "work-model" if config_dir == work_dir else "default-model"
+        return claude_native.ClaudeModelProbe(
+            alias_rows=[{"id": model, "model": model, "displayName": model}],
+            default_model=model,
+            default_label=model,
+        )
+
+    monkeypatch.setattr(claude_native, "probe_claude_model_options", _fake_probe)
+    host = _make_host_process()
+
+    default = await host._handle_model_options(
+        HostModelOptionsFrame(request_id="req_1", harness="claude-native")
+    )
+
+    def reject_default_provider(*args: object, **kwargs: object) -> None:
+        raise AssertionError("Explicit accounts must not resolve the default provider")
+
+    monkeypatch.setattr(claude_native, "resolve_native_claude_config", reject_default_provider)
+    monkeypatch.setattr(
+        "omnigent.host.connect._model_configuration_source_for_harness", reject_default_provider
+    )
+    work = await host._handle_model_options(
+        HostModelOptionsFrame(request_id="req_2", harness="claude-native", account="work")
+    )
+    assert work.status == "ok"
+    assert work.models[0]["source"] == {
+        "kind": "subscription",
+        "label": "Subscription",
+        "name": "claude",
+    }
+    missing = await host._handle_model_options(
+        HostModelOptionsFrame(request_id="req_3", harness="claude-native", account="gone")
+    )
+    codex = await host._handle_model_options(
+        HostModelOptionsFrame(request_id="req_4", harness="codex-native", account="work")
+    )
+
+    assert [row["id"] for row in default.models] == ["default-model"]
+    assert [row["id"] for row in work.models] == ["work-model"]
+    assert probed_dirs == [None, work_dir]
+    # The scope ends with the request: other requests see the default login.
+    assert "CLAUDE_CONFIG_DIR" not in native_launch_environment()
+    assert missing.status == "failed" and "'gone' is not set up" in (missing.error or "")
+    assert codex.status == "failed"
     _cleanup_host(host)
 
 
@@ -1607,6 +1682,34 @@ async def test_live_host_full_refresh_detects_auth_completion(
     refresh = decode_host_frame(ws.sent[0])
     assert isinstance(refresh, HostHarnessReadinessFrame)
     assert refresh.configured_harnesses == {"codex": True}
+    _cleanup_host(host)
+
+
+async def test_live_host_pushes_claude_account_sign_in_without_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An extra account signing in later is reported even when harnesses are unchanged."""
+    monkeypatch.setattr("omnigent.host.connect.gateway_inference_map", lambda: {"codex": True})
+    monkeypatch.setattr("omnigent.host.connect.configured_harness_map", lambda: {"codex": True})
+    monkeypatch.setattr(
+        "omnigent.onboarding.claude_accounts.claude_account_readiness", lambda: {"work": True}
+    )
+    monkeypatch.setattr("omnigent.host.connect.HARNESS_READINESS_FULL_REFRESH_INTERVAL_S", 0.01)
+    host = _make_host_process()
+    host._configured_harnesses = {"codex": True}
+    host._gateway_inference = {"codex": True}
+    host._claude_accounts = {"work": "needs-auth"}
+    ws = _RecordingWS()
+
+    task = asyncio.create_task(host._harness_readiness_loop(ws))
+    try:
+        await asyncio.wait_for(ws.first_send.wait(), timeout=2.0)
+    finally:
+        await _cancel(task)
+
+    refresh = decode_host_frame(ws.sent[0])
+    assert isinstance(refresh, HostHarnessReadinessFrame)
+    assert refresh.claude_accounts == {"work": True}
     _cleanup_host(host)
 
 
@@ -2907,6 +3010,8 @@ async def test_capability_result_publishes_without_full_refresh(
             HostHarnessReadinessFrame(
                 configured_harnesses={"codex-native": True},
                 gateway_inference={"codex-native": True},
+                # Startup discovery found no extra Claude accounts.
+                claude_accounts={},
             ),
         ]
         assert configured_probes == [True]

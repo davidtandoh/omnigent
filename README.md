@@ -381,8 +381,17 @@ continue to use normal provider routing. A Claude-native agent whose resolved
 provider has an account folder requires that account to be selected for the
 runner. Start the session with `omnigent claude --account NAME`; an unselected
 or different account is refused. Only Claude
-Code (`claude-native`) sessions can use an extra account. The web UI does not
-expose this account selector yet. An extra account cannot be a default. Setup
+Code (`claude-native`) sessions can use an extra account. In the web UI, when
+the chosen machine has an extra account, the Claude Code picker shows an
+**Account** section on desktop and mobile web. It starts on **Default login**,
+and changing the account resets the model selection and reloads its model list.
+If the selected account becomes unavailable, the picker keeps the selection and
+blocks creation until you choose an available account. Agent info shows a
+session's account to its owner.
+**Settings → Harnesses → Claude Code** lists each machine's accounts with their
+sign-in status. **Add account** shows the `omni setup` command to run on that
+machine, because sign-in is interactive and uses that machine's keychain. An
+extra account cannot be a default. Setup
 lists each account as **Subscription (claude-work)**. When an account's
 sign-in expires, select it and choose **Sign in again**, which runs
 `claude auth login --claudeai` for that account only. Removing an account

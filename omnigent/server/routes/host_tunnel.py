@@ -402,6 +402,7 @@ def create_host_tunnel_router(
             # started learns the host's gateway backing here, so a server
             # restart converges as soon as each host reconnects.
             host_registry.record_gateway_inference(host_id, frame.gateway_inference)
+            host_registry.record_claude_accounts(host_id, frame.claude_accounts)
             stage = "connected"
             conn.diagnostics.settings.update(
                 tunnel_side="server",
@@ -816,6 +817,10 @@ async def _receive_loop(
                 dict(frame.gateway_inference) if frame.gateway_inference is not None else None
             )
             host_registry.record_gateway_inference(host_id, frame.gateway_inference)
+            conn.hello.claude_accounts = (
+                dict(frame.claude_accounts) if frame.claude_accounts is not None else None
+            )
+            host_registry.record_claude_accounts(host_id, frame.claude_accounts)
             if on_host_update is not None:
                 try:
                     await on_host_update(host_id, conn.owner)

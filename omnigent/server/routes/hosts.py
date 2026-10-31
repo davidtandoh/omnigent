@@ -195,6 +195,7 @@ async def _proxy_model_options(
     host_registry: HostRegistry,
     host_conn: HostConnection,
     harness: str,
+    account: str | None = None,
 ) -> dict[str, Any]:
     """Ask a host for the model catalog it would use for a new session."""
     from omnigent.server.routes._host_model_options import request_host_model_options
@@ -205,6 +206,7 @@ async def _proxy_model_options(
             host_conn=host_conn,
             harness=harness,
             timeout_s=_MODEL_OPTIONS_TIMEOUT_S,
+            account=account,
         )
     except ConnectionError as exc:
         raise HTTPException(
@@ -722,8 +724,9 @@ def create_hosts_router(
         :param request: The incoming request (for auth).
         :returns: ``{"hosts": [...]}`` with host details — ``host_id``,
             ``name``, ``owner``, ``status``, ``sandbox_provider``,
-            ``configured_harnesses``, and ``gateway_inference`` (``None`` when
-            no connected host has reported it to this replica).
+            ``configured_harnesses``, ``gateway_inference`` and
+            ``claude_accounts`` (``None`` when no connected host has reported
+            it to this replica).
         """
         # require_user: unauthenticated callers 401. user_id is None
         # only when auth is disabled entirely — there the single-user
@@ -767,6 +770,9 @@ def create_hosts_router(
                     # gateway-backed".
                     "gateway_inference": host_registry.gateway_inference(host.host_id),
                     "interactive_shells": host_registry.interactive_shells(host.host_id),
+                    # Claude account name → sign-in readiness; owner-only
+                    # like the rest of this listing. ``None`` is unreported.
+                    "claude_accounts": host_registry.claude_accounts(host.host_id),
                 }
             )
         return {"hosts": result}
@@ -810,6 +816,7 @@ def create_hosts_router(
             # memory, so ``None`` is "no report on this replica yet".
             "gateway_inference": host_registry.gateway_inference(host.host_id),
             "interactive_shells": host_registry.interactive_shells(host.host_id),
+            "claude_accounts": host_registry.claude_accounts(host.host_id),
             "runners": [],
         }
 
@@ -818,6 +825,7 @@ def create_hosts_router(
         request: Request,
         host_id: str,
         harness: str,
+        account: str | None = Query(default=None),
     ) -> HostModelOptionsResponse:
         """Return pre-launch model choices resolved by the selected host.
 
@@ -825,10 +833,26 @@ def create_hosts_router(
         snapshot: launch re-resolves with the session's agent spec, and the
         in-session picker reflects that launch snapshot once the runner is up.
 
+        :param account: Extra Claude account short name, e.g. ``"work"``, to
+            list ``claude-native`` models for; ``None`` lists the default login's.
         :raises HTTPException: 404 when the host is unknown, 403 when not the
             owner, 409 when offline or the host daemon is too old to list model
-            options, 502 on host-side failure, 504 on timeout.
+            options or select accounts, 400 for a malformed account or a
+            non-Claude harness, 502 on host-side failure, 504 on timeout.
         """
+        canonical_harness = canonicalize_harness(harness) or harness
+        if account is not None:
+            from omnigent.onboarding.claude_accounts import account_name_format_error
+
+            if (format_error := account_name_format_error(account)) is not None:
+                raise HTTPException(
+                    status_code=400, detail=f"invalid Claude account name: {format_error}"
+                )
+            if canonical_harness != "claude-native":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Claude accounts are supported only for claude-native sessions",
+                )
         user_id = require_user(request, auth_provider)
         host = await asyncio.to_thread(host_store.get_host, host_id)
         if host is None:
@@ -839,11 +863,14 @@ def create_hosts_router(
         if conn is None:
             raise _host_absent_error(host)
         _require_harness_setup_support(conn, "pre-launch model listing")
+        if (refusal := account_launch_refusal(account, conn)) is not None:
+            raise HTTPException(status_code=409, detail=refusal)
 
         result = await _proxy_model_options(
             host_registry=host_registry,
             host_conn=conn,
-            harness=canonicalize_harness(harness) or harness,
+            harness=canonical_harness,
+            account=account,
         )
         if result.get("status") != "ok":
             raise HTTPException(
