@@ -54,9 +54,16 @@ def mcp_app(db_uri: str) -> tuple[FastAPI, HostRegistry, HostStore]:
     registry = HostRegistry()
     hosts = HostStore(db_uri)
     hosts.upsert_on_connect(_HOST_ID, "laptop", "owner")
+    from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+
+    conversations = SqlAlchemyConversationStore(db_uri)
     app = FastAPI()
+    app.state.conversations = conversations
     app.include_router(
-        create_mcp_servers_router(registry, hosts, auth_provider=_Auth()), prefix="/v1"
+        create_mcp_servers_router(
+            registry, hosts, auth_provider=_Auth(), conversation_store=conversations
+        ),
+        prefix="/v1",
     )
 
     @app.exception_handler(OmnigentError)
@@ -198,3 +205,51 @@ async def test_proxy_cleans_up_unanswered_requests(
         await request_host_mcp_servers(host_registry=registry, host_conn=conn)
     assert exc_info.value.status_code == status
     assert conn.pending_mcp_servers == {}
+
+
+async def test_session_mcp_inventory_sends_recorded_account(mcp_app):
+    from omnigent.host.frames import CAP_ACCOUNT_INVENTORY
+
+    app, registry, _ = mcp_app
+    conv = app.state.conversations.create_conversation(
+        host_id=_HOST_ID, workspace="/workspace", account="work"
+    )
+    app.state.conversations.get_session_owner = lambda *a, **k: "owner"
+    conn = _register(registry, CAP_MCP_INVENTORY, CAP_ACCOUNT_INVENTORY)
+    async with _client(app) as client:
+        task = asyncio.create_task(
+            client.get(
+                f"/v1/hosts/{_HOST_ID}/mcp-servers",
+                params={"session_id": conv.id},
+                headers={"x-test-user": "owner"},
+            )
+        )
+        frame = decode_host_frame((await asyncio.wait_for(conn.outbound_queue.get(), 2)).data)
+        assert isinstance(frame, HostMcpServersFrame) and frame.account == "work"
+        conn.pending_mcp_servers[frame.request_id].set_result(
+            HostMcpServersResultFrame(frame.request_id, "ok")
+        )
+        assert (await task).status_code == 200
+
+
+@pytest.mark.parametrize(
+    "owner, capabilities, expected",
+    [("collaborator", [CAP_MCP_INVENTORY], 403), ("owner", [CAP_MCP_INVENTORY], 501)],
+)
+async def test_account_inventory_refuses_unauthorized_or_old_host(
+    mcp_app, owner, capabilities, expected
+):
+    app, registry, _ = mcp_app
+    conv = app.state.conversations.create_conversation(
+        host_id=_HOST_ID, workspace="/workspace", account="work"
+    )
+    app.state.conversations.get_session_owner = lambda *a, **k: owner
+    conn = _register(registry, *capabilities)
+    async with _client(app) as client:
+        response = await client.get(
+            f"/v1/hosts/{_HOST_ID}/mcp-servers",
+            params={"session_id": conv.id},
+            headers={"x-test-user": "owner"},
+        )
+    assert response.status_code == expected
+    assert conn.outbound_queue.empty()

@@ -101,6 +101,14 @@ The status-line wrapper, native skill discovery, and MCP inventory use
 The explicit runner selection takes precedence over the ambient environment.
 Account folder paths stay on the host.
 
-Omnigent has no quota-axi integration. Per-account 5-hour and 7-day quota
-windows and reset times remain follow-up work; session costs are estimates,
-not provider quota measurements.
+The host reads each Claude account's 5-hour and 7-day usage and reset times
+with the installed `quota-axi --provider claude --json --no-credential-refresh`,
+using that account's local `CLAUDE_CONFIG_DIR` and a short timeout. Usage and
+host status expose only the sanitized readings to the host owner. Missing tools,
+failed reads, or incomplete windows show unavailable. Session costs remain
+separate estimates.
+
+For session skill and MCP discovery, the server authorizes the host and session
+owner before sending the recorded account name. The host resolves the folder
+locally and scopes its cache by account. Account folder paths never cross the
+tunnel.

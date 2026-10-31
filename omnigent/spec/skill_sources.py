@@ -124,11 +124,12 @@ def skill_source_context_from_env(
     harness: str | None,
     skills_filter: str | list[str] = "all",
     bundle_dir: Path | None = None,
+    launch_env: Mapping[str, str] | None = None,
 ) -> SkillSourceContext:
     """Use the same ambient harness configuration for host and runner discovery."""
     from omnigent.harnesses.claude_native.account import selected_claude_config_dir
 
-    configured_claude_dir = selected_claude_config_dir()
+    configured_claude_dir = selected_claude_config_dir(launch_env)
     codex_home: Path | None = None
     if _harness_family(harness) == "codex":
         from omnigent.inner.codex_executor import _codex_home_config_source_from_env
@@ -271,7 +272,11 @@ def resolve_harness_skills(ctx: SkillSourceContext, harness: str | None) -> list
 
 
 def resolve_session_skills(
-    spec: AgentSpec, roots: tuple[Path, ...], bundle_dir: Path | None
+    spec: AgentSpec,
+    roots: tuple[Path, ...],
+    bundle_dir: Path | None,
+    *,
+    launch_env: Mapping[str, str] | None = None,
 ) -> list[SkillSpec]:
     """Use identical precedence and filters for menu discovery and invocation."""
     from omnigent.harness_aliases import canonicalize_harness
@@ -281,7 +286,11 @@ def resolve_session_skills(
     seen_dirs = {s.skill_dir.resolve() for s in spec.skills if s.skill_dir is not None}
     harness = canonicalize_harness(spec.executor.harness_kind)
     ctx = skill_source_context_from_env(
-        roots=roots, harness=harness, skills_filter=spec.skills_filter, bundle_dir=bundle_dir
+        roots=roots,
+        harness=harness,
+        skills_filter=spec.skills_filter,
+        bundle_dir=bundle_dir,
+        launch_env=launch_env,
     )
     for skill in resolve_harness_skills(ctx, harness):
         if skill.name in seen:

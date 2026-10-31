@@ -11,6 +11,7 @@ delineator further down:
 
 from __future__ import annotations
 
+
 import re
 from typing import Annotated, Any, Literal, Self, get_args
 
@@ -26,6 +27,7 @@ from pydantic import (
 )
 from pydantic.json_schema import SkipJsonSchema
 
+from omnigent.host.claude_quotas import ClaudeAccountQuota
 from omnigent.entities import (
     DEFAULT_GENERATED_TITLE_MAX_CHARS,
     USER_SESSION_TITLE_MAX_CHARS,
@@ -3150,8 +3152,9 @@ class SessionUsage(BaseModel):
     other_harnesses: list[str] | None = None
     llm_model: str | None = None
     agent_name: str | None = None
-    # Owner-only Claude account name; None also represents the default login.
+    # Owner-only Claude account name; account_visible distinguishes withheld values.
     account: str | None = None
+    account_visible: bool = False
 
 
 class DailyCost(BaseModel):
@@ -3159,6 +3162,12 @@ class DailyCost(BaseModel):
 
     day: str
     cost_usd: float = 0.0
+
+
+class HostClaudeQuota(BaseModel):
+    host_id: str
+    host_name: str
+    quotas: list[ClaudeAccountQuota]
 
 
 class UsageReport(BaseModel):
@@ -3193,6 +3202,7 @@ class UsageReport(BaseModel):
     total_cost_usd: float = 0.0
     daily_costs: list[DailyCost] = Field(default_factory=list)
     sessions: list[SessionUsage] = Field(default_factory=list)
+    claude_quotas: list[HostClaudeQuota] = Field(default_factory=list)
 
 
 # ── Permissions ────────────────────────────────────────────────────

@@ -275,3 +275,4 @@ def test_usage_account_is_owner_only(db_uri, monkeypatch, owner, expected):
     report = _build_usage_report(store, "owner")
     assert report.sessions[0].id == conv.id
     assert report.sessions[0].account == expected
+    assert report.sessions[0].account_visible is (owner == "owner")

@@ -103,10 +103,17 @@ export interface HostMcpServer {
   sign_in_url?: string | null;
 }
 
-async function fetchMcpServers(hostId: string, signal: AbortSignal): Promise<HostMcpServer[]> {
-  const response = await authenticatedFetch(`/v1/hosts/${encodeURIComponent(hostId)}/mcp-servers`, {
-    signal,
-  });
+async function fetchMcpServers(
+  hostId: string,
+  signal: AbortSignal,
+  sessionId?: string | null,
+): Promise<HostMcpServer[]> {
+  const response = await authenticatedFetch(
+    `/v1/hosts/${encodeURIComponent(hostId)}/mcp-servers${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`,
+    {
+      signal,
+    },
+  );
   if (!response.ok) {
     throw new ApiError(`${response.status} ${response.statusText}`, response.status, null);
   }
@@ -209,11 +216,14 @@ export function useHostMcpServers(
   enabled = true,
   /** Re-read while this says so, judged from the servers last read (default: never). */
   refetchInterval: (servers: HostMcpServer[] | undefined) => number | false = () => false,
+  sessionId?: string | null,
 ) {
   return useQuery({
-    queryKey: ["host-mcp-servers", hostId],
+    queryKey: ["host-mcp-servers", hostId, sessionId],
     queryFn:
-      enabled && hostId !== null ? ({ signal }) => fetchMcpServers(hostId, signal) : skipToken,
+      enabled && hostId !== null
+        ? ({ signal }) => fetchMcpServers(hostId, signal, sessionId)
+        : skipToken,
     staleTime: 30_000,
     refetchInterval: (query) => refetchInterval(query.state.data),
   });

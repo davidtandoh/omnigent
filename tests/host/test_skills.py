@@ -234,3 +234,35 @@ def test_directory_catalog_never_downloads_a_session_bundle(tmp_path: Path) -> N
         HostSkillsFrame("request", "claude-native", str(tmp_path)), tmp_path
     ) == [{"name": "local", "description": "local description"}]
     fetch.assert_not_called()
+
+
+def test_session_account_catalog_is_resolved_and_cached_separately(tmp_path, monkeypatch):
+    account_dir = tmp_path / "work-account"
+    for root, name in [(Path.home() / ".claude", "default-only"), (account_dir, "work-only")]:
+        directory = root / "skills" / name
+        directory.mkdir(parents=True)
+        (directory / "SKILL.md").write_text(_skill(name))
+    monkeypatch.setattr(
+        "omnigent.config.load_global_config",
+        lambda: {
+            "providers": {
+                "claude-work": {
+                    "kind": "subscription",
+                    "cli": "claude",
+                    "config_dir": str(account_dir),
+                }
+            }
+        },
+    )
+    bundle = _bundle({}, executor={"config": {"harness": "claude-native"}})
+    discovery = HostSkillDiscovery(lambda _: _response(bundle))
+    frame = HostSkillsFrame("request", "session", str(tmp_path), "session", "agent", "1")
+    from omnigent.host.frames import decode_host_frame, encode_host_frame
+
+    selected = decode_host_frame(encode_host_frame(replace(frame, account="work")))
+    assert [s["name"] for s in discovery.discover(selected, tmp_path)] == ["work-only"]
+    assert [s["name"] for s in discovery.discover(frame, tmp_path)] == ["default-only"]
+    assert [s["name"] for s in discovery.discover(selected, tmp_path)] == ["work-only"]
+    monkeypatch.setattr("omnigent.config.load_global_config", lambda: {})
+    with pytest.raises(RuntimeError):
+        discovery.discover(selected, tmp_path)

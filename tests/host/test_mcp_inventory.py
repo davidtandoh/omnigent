@@ -545,3 +545,27 @@ def test_runner_account_overrides_ambient_mcp(home, tmp_path, monkeypatch):
     _write_json(home / ".claude.json", {"mcpServers": {"wrong": _stdio()}})
     _write_json(account / ".claude.json", {"mcpServers": {"chosen": _stdio()}})
     assert [s["name"] for s in discover_mcp_servers()] == ["chosen"]
+
+
+def test_inventory_cache_is_scoped_by_account(home, monkeypatch):
+    account = home / "work"
+    _write_json(home / ".claude.json", {"mcpServers": {"default-only": _stdio()}})
+    _write_json(account / ".claude.json", {"mcpServers": {"work-only": _stdio()}})
+    monkeypatch.setattr(
+        "omnigent.config.load_global_config",
+        lambda: {
+            "providers": {
+                "claude-work": {
+                    "kind": "subscription",
+                    "cli": "claude",
+                    "config_dir": str(account),
+                }
+            }
+        },
+    )
+    inventory = HostMcpInventory()
+    assert [s["name"] for s in inventory.discover("work")] == ["work-only"]
+    assert [s["name"] for s in inventory.discover()] == ["default-only"]
+    assert [s["name"] for s in inventory.discover("work")] == ["work-only"]
+    with pytest.raises(RuntimeError):
+        inventory.discover("missing")

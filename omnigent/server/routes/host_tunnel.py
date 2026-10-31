@@ -41,6 +41,7 @@ from omnigent.host.frames import (
     HostFsResultFrame,
     HostHarnessReadinessFrame,
     HostHarnessStartupResultFrame,
+    HostClaudeQuotasResultFrame,
     HostHelloFrame,
     HostImportedLocalSession,
     HostImportLocalDoneFrame,
@@ -1030,6 +1031,11 @@ async def _receive_loop(
             skills_future = conn.pending_skills.pop(frame.request_id, None)
             if skills_future is not None and not skills_future.done():
                 skills_future.set_result(frame)
+            continue
+        if isinstance(frame, HostClaudeQuotasResultFrame):
+            quota_future = conn.pending_claude_quotas.pop(frame.request_id, None)
+            if quota_future is not None and not quota_future.done():
+                quota_future.set_result(frame)
             continue
         if isinstance(frame, HostHarnessStartupResultFrame):
             startup_future = conn.pending_harness_startup.pop(frame.request_id, None)

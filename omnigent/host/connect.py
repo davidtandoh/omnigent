@@ -98,6 +98,8 @@ from omnigent.host.frames import (
     HostListWorktreesFrame,
     HostListWorktreesResultFrame,
     HostMcpServersFrame,
+    HostClaudeQuotasFrame,
+    HostClaudeQuotasResultFrame,
     HostMcpServersResultFrame,
     HostMcpToolsFrame,
     HostMcpToolsResultFrame,
@@ -3630,7 +3632,7 @@ class HostProcess:
     def _handle_mcp_servers(self, frame: HostMcpServersFrame) -> HostMcpServersResultFrame:
         """List user-level MCP servers in a worker thread."""
         try:
-            servers = self._mcp_inventory.discover()
+            servers = self._mcp_inventory.discover(frame.account)
         except Exception:
             _logger.exception("MCP inventory failed")
             return HostMcpServersResultFrame(
@@ -5571,6 +5573,16 @@ class HostProcess:
         elif isinstance(frame, HostHarnessStartupFrame):
             startup_result = await asyncio.to_thread(self._handle_harness_startup, frame)
             await self._send_text(ws, encode_host_frame(startup_result))
+        elif isinstance(frame, HostClaudeQuotasFrame):
+            from omnigent.host.claude_quotas import read_claude_quotas
+
+            try:
+                quotas = await asyncio.to_thread(read_claude_quotas)
+            except Exception:
+                quotas = []
+            await self._send_text(
+                ws, encode_host_frame(HostClaudeQuotasResultFrame(frame.request_id, quotas))
+            )
         elif isinstance(frame, HostMcpServersFrame):
             mcp_result = await asyncio.to_thread(self._handle_mcp_servers, frame)
             await self._send_text(ws, encode_host_frame(mcp_result))

@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from omnigent.host.frames import (
     CAP_MCP_INVENTORY,
+    CAP_ACCOUNT_INVENTORY,
     HostMcpServersFrame,
     HostMcpServersResultFrame,
     encode_host_frame,
@@ -20,6 +21,7 @@ from omnigent.server.host_registry import HostConnection, HostRegistry
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._host_launch import host_absent_error, resolve_host_owner
 from omnigent.stores.host_store import HostStore
+from omnigent.stores import ConversationStore
 
 _MCP_SERVERS_TIMEOUT_S = 15.0
 
@@ -64,12 +66,15 @@ def create_mcp_servers_router(
     host_store: HostStore,
     *,
     auth_provider: AuthProvider | None = None,
+    conversation_store: ConversationStore | None = None,
 ) -> APIRouter:
     """Build the MCP inventory route, mounted under ``/v1``."""
     router = APIRouter()
 
     @router.get("/hosts/{host_id}/mcp-servers")
-    async def get_mcp_servers(request: Request, host_id: str) -> McpServersResponse:
+    async def get_mcp_servers(
+        request: Request, host_id: str, session_id: str | None = None
+    ) -> McpServersResponse:
         """List the user-level MCP servers configured for each harness on a host.
 
         Returns names and non-secret metadata only; the caller must own the host.
@@ -78,12 +83,34 @@ def create_mcp_servers_router(
         host = await asyncio.to_thread(
             resolve_host_owner, user_id=user_id, host_id=host_id, host_store=host_store
         )
+        account = None
+        if session_id is not None:
+            conv = (
+                await asyncio.to_thread(conversation_store.get_conversation, session_id)
+                if conversation_store
+                else None
+            )
+            if conv is None or conv.host_id != host_id:
+                raise HTTPException(404, "session not found on host")
+            if (
+                user_id is not None
+                and await asyncio.to_thread(
+                    conversation_store.get_session_owner, session_id, owner_only=True
+                )
+                != user_id
+            ):
+                raise HTTPException(403, "session account discovery requires ownership")
+            account = conv.account
         conn = host_registry.get(host_id)
         if conn is None:
             raise host_absent_error(host)
         if CAP_MCP_INVENTORY not in conn.hello.capabilities:
             raise HTTPException(status_code=501, detail="update the host to list its MCP servers")
-        result = await request_host_mcp_servers(host_registry=host_registry, host_conn=conn)
+        if account is not None and CAP_ACCOUNT_INVENTORY not in conn.hello.capabilities:
+            raise HTTPException(501, "update the host to discover account MCP servers")
+        result = await request_host_mcp_servers(
+            host_registry=host_registry, host_conn=conn, account=account
+        )
         if result.status != "ok":
             raise HTTPException(
                 status_code=502, detail=result.error or "host MCP inventory failed"
@@ -96,7 +123,7 @@ def create_mcp_servers_router(
 
 
 async def request_host_mcp_servers(
-    *, host_registry: HostRegistry, host_conn: HostConnection
+    *, host_registry: HostRegistry, host_conn: HostConnection, account: str | None = None
 ) -> HostMcpServersResultFrame:
     """Request the MCP inventory over the host tunnel, with bounded waiting and cleanup."""
     request_id = secrets.token_hex(8)
@@ -104,7 +131,8 @@ async def request_host_mcp_servers(
     host_conn.pending_mcp_servers[request_id] = future
     try:
         host_registry.send_text(
-            host_conn, encode_host_frame(HostMcpServersFrame(request_id=request_id))
+            host_conn,
+            encode_host_frame(HostMcpServersFrame(request_id=request_id, account=account)),
         )
         return await asyncio.wait_for(future, timeout=_MCP_SERVERS_TIMEOUT_S)
     except ConnectionError as exc:

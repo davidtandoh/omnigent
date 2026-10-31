@@ -10,6 +10,7 @@ from fastapi import APIRouter, Request
 
 from omnigent._wrapper_labels import WRAPPER_LABEL_KEY
 from omnigent.entities import Conversation
+from omnigent.stores.host_store import Host
 from omnigent.errors import restart_on_stale_cursor
 from omnigent.runtime.policies.builder import load_session_usage_and_tree
 from omnigent.server.auth import RESERVED_USER_LOCAL, AuthProvider
@@ -19,7 +20,9 @@ from omnigent.server.routes._sessions.helpers import (
     _resolve_harness_impl,
     _resolve_llm_model,
 )
-from omnigent.server.schemas import DailyCost, SessionUsage, UsageReport
+from omnigent.server.schemas import DailyCost, SessionUsage, UsageReport, HostClaudeQuota
+from omnigent.server.host_registry import HostRegistry
+from omnigent.stores.host_store import HostStore
 from omnigent.stores import ConversationStore
 
 # The daily rollup floor for an "all-time" sum: earlier than any real row, so
@@ -190,15 +193,14 @@ def _build_usage_report(
                 if include_page_details
                 else None
             )
+            account_visible = (
+                user_id is None
+                or conversation_store.get_session_owner(conv.id, owner_only=True) == user_id
+            )
             sessions.append(
                 SessionUsage(
-                    account=(
-                        conv.account
-                        if user_id is None
-                        or conversation_store.get_session_owner(conv.id, owner_only=True)
-                        == user_id
-                        else None
-                    ),
+                    account_visible=account_visible,
+                    account=conv.account if account_visible else None,
                     id=conv.id,
                     created_at=conv.created_at,
                     updated_at=conv.updated_at,
@@ -240,6 +242,8 @@ def create_usage_router(
     *,
     auth_provider: AuthProvider | None = None,
     feature_flags: FeatureFlags | None = None,
+    host_registry: HostRegistry | None = None,
+    host_store: HostStore | None = None,
 ) -> APIRouter:
     """
     Create the per-user usage-report router.
@@ -268,11 +272,28 @@ def create_usage_router(
         ``None`` only when auth is disabled — the single-user / local case).
         """
         user_id = require_user(request, auth_provider)
-        return await asyncio.to_thread(
+        report = await asyncio.to_thread(
             _build_usage_report,
             conversation_store,
             user_id,
             include_page_details=flags.enabled(Feature.USAGE_PAGE),
         )
+        if host_registry is not None and host_store is not None:
+            from omnigent.server.routes.claude_quotas import request_host_claude_quotas
+            from omnigent.host.claude_quotas import ClaudeAccountQuota
+
+            hosts = await asyncio.to_thread(host_store.list_hosts, user_id or RESERVED_USER_LOCAL)
+
+            async def read_host(host: Host) -> HostClaudeQuota:
+                conn = host_registry.get(host.host_id)
+                quotas = (
+                    await request_host_claude_quotas(host_registry, conn)
+                    if conn
+                    else [ClaudeAccountQuota(account="default")]
+                )
+                return HostClaudeQuota(host_id=host.host_id, host_name=host.name, quotas=quotas)
+
+            report.claude_quotas = await asyncio.gather(*(read_host(host) for host in hosts))
+        return report
 
     return router

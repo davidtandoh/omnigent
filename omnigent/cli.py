@@ -7379,6 +7379,28 @@ def import_session_command(
         raise click.ClickException(f"{failed_count} session(s) failed to import")
 
 
+def _render_claude_quotas(console: Console, quotas: list[dict[str, Any]]) -> None:
+    from rich.text import Text
+
+    table = Table(box=box.SIMPLE_HEAVY, show_edge=False)
+    table.add_column("Claude account")
+    table.add_column("5-hour used / reset")
+    table.add_column("7-day used / reset")
+    for quota in quotas:
+        cells = []
+        for key in ("five_hour", "seven_day"):
+            window = quota.get(key)
+            cells.append(
+                Text(
+                    f"{window['percent_used']:g}% / {window['resets_at']}"
+                    if quota.get("status") == "available" and window
+                    else "unavailable"
+                )
+            )
+        table.add_row(Text(str(quota.get("account", "unspecified"))), *cells)
+    console.print(table)
+
+
 def _render_usage(report: dict[str, Any], limit: int) -> None:  # type: ignore[explicit-any]
     """
     Print the usage report: a daily-rollup cost summary plus per-session detail.
@@ -7423,6 +7445,10 @@ def _render_usage(report: dict[str, Any], limit: int) -> None:  # type: ignore[e
     ui.kv("  All time", money(report.get("total_cost_usd", 0.0)), label_width=15)
     ui.console.print()
 
+    for host_quota in report.get("claude_quotas", []):
+        ui.console.print(Text(f"Claude quotas: {host_quota['host_name']}"))
+        _render_claude_quotas(ui.console, host_quota["quotas"])
+
     all_sessions = report.get("sessions", [])
     shown = all_sessions[:limit]
     # Empty base Text so the muted count hint doesn't inherit the accent.
@@ -7451,7 +7477,9 @@ def _render_usage(report: dict[str, Any], limit: int) -> None:  # type: ignore[e
     tbl.add_column("Cost", justify="right", no_wrap=True)
     for s in shown:
         sid = escape(str(s.get("id", "")))
-        account = escape(str(s.get("account") or "default"))
+        account = escape(
+            str(s.get("account") or ("default" if s.get("account_visible") else "unspecified"))
+        )
         total = f"[bold]{money(s.get('cost_usd', 0.0))}[/bold]"
         # Dominant model first, so the biggest spend leads (cost desc).
         models = sorted((s.get("models") or {}).items(), key=lambda kv: kv[1], reverse=True)
@@ -10986,6 +11014,8 @@ def _echo_daemon_payloads(payloads: list[_HostPayload]) -> None:
                 max_chars=max(24, console.width - 10),
             )
             console.print(f"  [red]error={_host_markup(message)}[/red]")
+        if isinstance(payload.get("claude_quotas"), list):
+            _render_claude_quotas(console, payload["claude_quotas"])
         _add_host_payload_sessions_table(console, payload)
 
 
@@ -11112,6 +11142,22 @@ def host_status(
             include_sessions=sessions,
             connected_sessions_only=True,
         )
+        if (
+            payload.get("host_status") == "online"
+            and isinstance(payload.get("host_id"), str)
+            and isinstance(payload.get("server_url"), str)
+        ):
+            quota_result = _host_http_json(
+                base_url=payload["server_url"],
+                method="GET",
+                path=f"/v1/hosts/{payload['host_id']}/claude-quotas",
+                host_id=payload["host_id"],
+            )
+            payload["claude_quotas"] = (
+                quota_result.body
+                if quota_result.status_code == 200 and isinstance(quota_result.body, list)
+                else [{"account": "default", "status": "unavailable"}]
+            )
         if (
             requested_target is not None
             and record.mode == "server"
