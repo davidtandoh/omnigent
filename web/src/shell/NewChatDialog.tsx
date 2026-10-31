@@ -131,7 +131,6 @@ import {
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { HarnessSetupDialog } from "@/shell/HarnessSetupDialog";
 import {
-  harnessReadinessOnHost,
   harnessUnavailableReasonOnHost,
   harnessUnconfiguredOnHost,
   harnessWarningBadgeText,
@@ -270,7 +269,11 @@ import {
   DEVIN_NATIVE_PERMISSION_MODES,
 } from "@/lib/nativeHarnessModes";
 import { fetchHosts, useHostModelOptions, useHosts, type Host } from "@/hooks/useHosts";
-import { CLAUDE_DEFAULT_ACCOUNT_LABEL, hostClaudeAccountNames } from "@/lib/claudeAccounts";
+import {
+  CLAUDE_DEFAULT_ACCOUNT_LABEL,
+  hostClaudeAccountNames,
+  pickerHarnessReadinessOnHost,
+} from "@/lib/claudeAccounts";
 import {
   previewIsUnsupported,
   sandboxModelOptionsKey,
@@ -1546,7 +1549,7 @@ export function AgentHarnessPicker({
   const selectedEntry = [...harnessEntries, ...agentEntries].find(
     (agent) => agent.id === effectiveAgentId,
   );
-  const selectedReadiness = harnessReadinessOnHost(selectedEntry?.harness, host);
+  const selectedReadiness = pickerHarnessReadinessOnHost(selectedEntry?.harness, host);
   const selectedUnavailable =
     selectedEntry != null && !selectedReadiness.selectable && selectedReadiness.fallbackRelevant;
   const selectedWarningMessage = selectedUnavailable
@@ -1681,7 +1684,7 @@ export function AgentHarnessPicker({
       : "";
     const summary = details || entrySummaries?.[agent.id] || "Default";
     const editable = selectedConfigContent !== undefined && (isEntryConfigurable?.(agent) ?? true);
-    const readiness = harnessReadinessOnHost(agent.harness, host);
+    const readiness = pickerHarnessReadinessOnHost(agent.harness, host);
     const blockedReason = blockedReasons?.get(agent.id);
     const unavailable =
       blockedReason !== undefined || (!readiness.selectable && readiness.fallbackRelevant);
@@ -1751,7 +1754,7 @@ export function AgentHarnessPicker({
     const secondaryOrder = ["opencode", "pi"];
     for (const agent of harnessEntries) {
       const selected = agent.id === effectiveAgentId;
-      const readiness = harnessReadinessOnHost(agent.harness, host);
+      const readiness = pickerHarnessReadinessOnHost(agent.harness, host);
       const unavailable = !readiness.selectable && readiness.fallbackRelevant;
       if (!selected && hideUnconfigured && unavailable) continue;
       const key = nativeCodingAgentForAvailableAgent(agent)?.iconKind ?? "";
@@ -3155,7 +3158,7 @@ export function NewChatLandingScreen() {
       resolveHarnessPreference(
         harnessEntries.map((agent) => ({
           harness: nativeCodingAgentForAvailableAgent(agent)?.harness ?? agent.harness ?? "",
-          readiness: harnessReadinessOnHost(agent.harness, harnessWarningHost),
+          readiness: pickerHarnessReadinessOnHost(agent.harness, harnessWarningHost),
           value: agent,
         })),
         rememberedNativeAgent?.harness,
@@ -3217,7 +3220,9 @@ export function NewChatLandingScreen() {
     selectedNativeHarness === harness &&
     hostSelected &&
     selectedHost?.status === "online" &&
-    !harnessUnconfiguredOnHost(harness, selectedHost);
+    (harness === "claude-native" && claudeAccount !== null
+      ? selectedHost.claude_accounts?.[claudeAccount] === true
+      : !harnessUnconfiguredOnHost(harness, selectedHost));
   const {
     data: hostClaudeModelOptions,
     isLoading: hostClaudeModelsLoading,
@@ -4040,9 +4045,7 @@ export function NewChatLandingScreen() {
   const selectClaudeAccount = (account: string | null) => {
     if (account === claudeAccount) return;
     setPickedClaudeAccount(account);
-    // The model list follows the account, so a model picked for another
-    // account falls back to the new account's default.
-    setPickedModel("");
+    selectPickerModel(MODEL_SELECT_DEFAULT);
   };
   const accountSection: ComposerConfigSection | undefined =
     !sandboxSelected && selectedNativeHarness === "claude-native" && hostHasClaudeAccounts
@@ -4593,10 +4596,10 @@ export function NewChatLandingScreen() {
   }, [pickedHarness]);
   // Native harnesses receive skill invocations as plain text for their CLI to interpret.
   const isNativeTerminalAgent = isNativeCodingAgent(selectedAgent);
-  const selectedAgentUnconfigured = harnessUnconfiguredOnHost(
-    selectedAgent?.harness,
-    harnessWarningHost,
-  );
+  const selectedAgentUnconfigured =
+    selectedNativeHarness === "claude-native" && claudeAccount !== null
+      ? harnessWarningHost?.claude_accounts?.[claudeAccount] !== true
+      : harnessUnconfiguredOnHost(selectedAgent?.harness, harnessWarningHost);
   // Smart Routing routes between native Claude Code and Codex, so both wrapper
   // agents must be registered and both CLIs ready on the target host — a router
   // with one arm is just that arm. The Claude wrapper is the placeholder the

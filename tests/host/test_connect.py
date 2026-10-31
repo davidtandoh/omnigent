@@ -543,9 +543,23 @@ async def test_handle_model_options_lists_the_chosen_claude_account(
     default = await host._handle_model_options(
         HostModelOptionsFrame(request_id="req_1", harness="claude-native")
     )
+
+    def reject_default_provider(*args: object, **kwargs: object) -> None:
+        raise AssertionError("Explicit accounts must not resolve the default provider")
+
+    monkeypatch.setattr(claude_native, "resolve_native_claude_config", reject_default_provider)
+    monkeypatch.setattr(
+        "omnigent.host.connect._model_configuration_source_for_harness", reject_default_provider
+    )
     work = await host._handle_model_options(
         HostModelOptionsFrame(request_id="req_2", harness="claude-native", account="work")
     )
+    assert work.status == "ok"
+    assert work.models[0]["source"] == {
+        "kind": "subscription",
+        "label": "Subscription",
+        "name": "claude",
+    }
     missing = await host._handle_model_options(
         HostModelOptionsFrame(request_id="req_3", harness="claude-native", account="gone")
     )

@@ -9638,6 +9638,7 @@ describe("NewChatLandingScreen agent picker + Edit settings", () => {
   });
 
   it("keeps the Connection row when the host has only the default Claude login", () => {
+    mockHosts([{ ...host("online"), claude_accounts: { default: true } }]);
     renderLanding();
     openAgentModels("a1");
     expect(screen.getByTestId("new-chat-landing-agent-models")).toBeVisible();
@@ -9682,6 +9683,47 @@ describe("NewChatLandingScreen agent picker + Edit settings", () => {
     const [, init] = authenticatedFetchMock.mock.calls[0];
     const body = JSON.parse((init as RequestInit).body as string) as Record<string, unknown>;
     expect(body.account).toBe("work");
+  });
+
+  it("opens the account chooser while the default login needs auth", () => {
+    mockHosts([
+      {
+        ...host("online"),
+        configured_harnesses: { "claude-native": "needs-auth" },
+        claude_accounts: { default: "needs-auth", work: true },
+      },
+    ]);
+    renderLanding();
+    openAgentModels("a1");
+    expect(screen.getByTestId("new-chat-landing-agent-accounts")).toBeVisible();
+    expect(
+      useHostModelOptionsMock.mock.calls.filter(([, h]) => h === "claude-native").at(-1)?.[2],
+    ).toBe(false);
+    fireEvent.click(screen.getByTestId("new-chat-landing-account-work"));
+    expect(
+      useHostModelOptionsMock.mock.calls.filter(([, h]) => h === "claude-native").at(-1)?.[2],
+    ).toBe(true);
+  });
+
+  it("clears a remembered model when changing accounts", () => {
+    const workCatalog = {
+      ...CLAUDE_MODEL_OPTIONS_RESULT,
+      data: CLAUDE_MODEL_OPTIONS_RESULT.data.map((model) => ({ ...model })),
+    };
+    useHostModelOptionsMock.mockImplementation(
+      (_id, harness, _enabled, options) =>
+        (harness === "claude-native"
+          ? options?.account === "work"
+            ? workCatalog
+            : CLAUDE_MODEL_OPTIONS_RESULT
+          : CODEX_MODEL_OPTIONS_RESULT) as ReturnType<typeof useHostModelOptions>,
+    );
+    mockHosts([{ ...host("online"), claude_accounts: { default: true, work: true } }]);
+    renderLanding();
+    openAgentModels("a1");
+    fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "Opus 4.8" }));
+    fireEvent.click(screen.getByTestId("new-chat-landing-account-work"));
+    expect(screen.getByTestId("new-chat-landing-agent-model-value")).toHaveTextContent("Default");
   });
 
   it("sends no account for the default login or a non-Claude harness", async () => {

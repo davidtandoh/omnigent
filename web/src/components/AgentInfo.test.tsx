@@ -582,6 +582,13 @@ describe("AgentInfoButton Claude account row", () => {
     expect(screen.getByTestId("agent-info-session-account")).toHaveTextContent("work");
   });
 
+  it("hides the account from a manager even if supplied by the server", () => {
+    sessionAccountData.current = "work";
+    renderButtonWithSession(AGENT_WITH_BOTH, "conv_account", 3);
+    fireEvent.click(screen.getByTestId("agent-info-trigger"));
+    expect(screen.queryByTestId("agent-info-session-account")).toBeNull();
+  });
+
   it("omits the row for the default login or a viewer who cannot manage the session", () => {
     renderButtonWithSession(AGENT_WITH_BOTH, "conv_account");
     fireEvent.click(screen.getByTestId("agent-info-trigger"));

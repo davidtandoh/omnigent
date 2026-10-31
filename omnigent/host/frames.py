@@ -234,11 +234,12 @@ class HostHelloFrame:
         supported" without a version check.
     :param connection_id: Host-minted identifier for this socket, shared with
         server diagnostics. Absent from older hosts.
-    :param claude_accounts: Sign-in readiness of each extra Claude account set
+    :param claude_accounts: Sign-in readiness of each Claude account set
         up on this machine, keyed by short name, e.g.
         ``{"work": True, "client-a": "needs-auth"}``. Names only; folders never
-        leave the host. The default login is the ``claude-native`` readiness
-        entry. ``None`` means unknown (an older host, or a failed probe).
+        leave the host. The reserved ``default`` key reports the default
+        subscription login; an absent key means its status is unknown.
+        ``None`` means unknown (an older host, or a failed probe).
     """
 
     version: str

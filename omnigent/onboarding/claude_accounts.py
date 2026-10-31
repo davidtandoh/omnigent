@@ -199,11 +199,11 @@ def configured_account_names(config: dict[str, object]) -> list[str]:
 def claude_account_readiness(
     config: dict[str, object] | None = None,
 ) -> dict[str, HarnessAvailability]:
-    """Return each extra Claude account's sign-in readiness on this machine.
+    """Return Claude subscription sign-in readiness on this machine.
 
     Each account is checked with ``claude auth status`` in its own folder.
-    An inconclusive probe counts as ``"needs-auth"``. The default login is
-    not listed: its readiness is the ``claude-native`` harness entry.
+    The reserved ``default`` key reports the default login separately from
+    general harness readiness. Inconclusive default status is omitted.
 
     :param config: Parsed user config; ``None`` reads the global config.
     :returns: Account name to readiness, e.g.
@@ -215,10 +215,16 @@ def claude_account_readiness(
 
         config = load_global_config()
     names = configured_account_names(config)
-    if not names:
-        return {}
     command = claude_command()
     readiness: dict[str, HarnessAvailability] = {}
+    if command is None:
+        readiness["default"] = HARNESS_BINARY_MISSING
+    else:
+        from omnigent.harnesses.claude_native.account import claude_auth_status
+
+        signed_in = claude_auth_status(command, env=os.environ, cwd=Path.home())
+        if signed_in is not None:
+            readiness["default"] = True if signed_in else HARNESS_NEEDS_AUTH
     for name in names:
         entry = find_account(config, name)
         if command is None:

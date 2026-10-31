@@ -3752,7 +3752,9 @@ class HostProcess:
         routable = [row["id"] for row in rows if isinstance(row.get("id"), str) and row["id"]]
         return ModelOptionsResult(models=rows, routable_models=routable)
 
-    async def _probed_claude_model_options(self) -> ModelOptionsResult | None:
+    async def _probed_claude_model_options(
+        self, *, account: str | None = None
+    ) -> ModelOptionsResult | None:
         """
         Store-backed harness-truth Claude listing, or ``None`` on failure.
 
@@ -3769,7 +3771,11 @@ class HostProcess:
         )
 
         try:
-            config = await asyncio.to_thread(resolve_native_claude_config, spec=None)
+            config = (
+                await asyncio.to_thread(resolve_native_claude_config, spec=None)
+                if account is None
+                else None
+            )
             rows = await claude_launch_catalog(config)
         except Exception:  # no catalog, never a crash
             _logger.warning("Claude model catalog unavailable", exc_info=True)
@@ -3814,7 +3820,7 @@ class HostProcess:
                 request_id=frame.request_id, status="failed", error=str(exc)
             )
         with native_launch_environment_scope(launch_env):
-            probed = await self._probed_claude_model_options()
+            probed = await self._probed_claude_model_options(account=frame.account)
         if probed is None:
             return HostModelOptionsResultFrame(
                 request_id=frame.request_id,
@@ -3824,7 +3830,13 @@ class HostProcess:
         return HostModelOptionsResultFrame(
             request_id=frame.request_id,
             status="ok",
-            models=_with_model_configuration_source(probed.models, harness=harness),
+            models=[
+                {
+                    **model,
+                    "source": {"kind": "subscription", "label": "Subscription", "name": "claude"},
+                }
+                for model in probed.models
+            ],
             routable_models=probed.routable_models,
         )
 

@@ -1426,7 +1426,7 @@ export function AgentInfoContent({
           </span>
         </div>
       )}
-      {sessionId && sessionAccount && (
+      {sessionId && isOwnerLevel(permissionLevel) && sessionAccount && (
         <div className="flex items-baseline justify-between gap-3 py-3">
           <SectionLabel>Claude account</SectionLabel>
           <span

@@ -802,7 +802,7 @@ class HostRegistry:
         host_id: str,
         claude_accounts: Mapping[str, HarnessAvailability] | None,
     ) -> None:
-        """Store the extra Claude account readiness a host just reported.
+        """Store the Claude subscription readiness a host just reported.
 
         :param host_id: Host identifier, in any accepted spelling.
         :param claude_accounts: Account name → readiness, e.g.
@@ -816,7 +816,7 @@ class HostRegistry:
                 self._claude_accounts[key] = dict(claude_accounts)
 
     def claude_accounts(self, host_id: str) -> dict[str, HarnessAvailability] | None:
-        """Return the extra Claude account readiness *host_id* last reported here.
+        """Return the Claude subscription readiness *host_id* last reported here.
 
         :returns: A copy of the map, or ``None`` when this replica has no report.
         """

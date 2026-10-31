@@ -74,11 +74,11 @@ def session_account_for_viewer(
     permission_store: PermissionStore | None,
     conversation_store: ConversationStore,
 ) -> str | None:
-    """Show the account only to managers of its owning top-level session."""
+    """Show the account only to owners of its top-level session."""
     if permission_store is None or check_session_access(
         user_id,
         conversation.id,
-        LEVEL_MANAGE,
+        LEVEL_OWNER,
         permission_store,
         conversation_store,
         conversation=conversation,

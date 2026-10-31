@@ -37,9 +37,10 @@ export interface Host {
    */
   gateway_inference?: Record<string, boolean> | null;
   /**
-   * Sign-in readiness of each extra Claude account set up on the host, keyed
+   * Sign-in readiness of each Claude account set up on the host, keyed
    * by short name, e.g. `{"work": true, "client-a": "needs-auth"}`. The
-   * default login is the `claude-native` readiness entry and is not listed.
+   * reserved `default` key reports the default subscription login.
+   * An absent `default` key means that login's status is unknown.
    * `null`/absent means unreported (an older host or server).
    */
   claude_accounts?: Record<string, boolean | string> | null;

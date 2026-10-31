@@ -39,6 +39,7 @@ from omnigent.server.permissions import (
     check_session_access,
     resolved_allows,
     resolved_level,
+    session_account_for_viewer,
 )
 
 # ── In-memory store stubs ────────────────────────────────────────
@@ -961,3 +962,16 @@ def test_resolved_level_none_when_no_access() -> None:
     access = ResolvedAccess(is_admin=False, user_grant_level=None, public_grant_level=None)
     assert resolved_level(access) is None
     assert resolved_allows(access, LEVEL_READ) is False
+
+
+@pytest.mark.parametrize("level", [LEVEL_READ, LEVEL_EDIT, LEVEL_MANAGE, LEVEL_OWNER])
+def test_session_account_requires_owner_level(level: int) -> None:
+    permissions = _StubPermissionStore()
+    conversations = _StubConversationStore()
+    conversation = _make_conversation("account-session")
+    conversation.account = "work"
+    conversations.add(conversation)
+    permissions.add_grant("viewer", conversation.id, level)
+    assert session_account_for_viewer("viewer", conversation, permissions, conversations) == (
+        "work" if level == LEVEL_OWNER else None
+    )

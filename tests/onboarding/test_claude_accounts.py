@@ -280,6 +280,7 @@ def test_account_readiness_checks_each_account_folder(
     (work / "signed-in").touch()
     _write_fake_claude(tmp_path / "bin")
     monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(client))
     config = {
         "providers": {
             "claude-work": {**_WORK, "config_dir": str(work)},
@@ -288,7 +289,11 @@ def test_account_readiness_checks_each_account_folder(
         }
     }
 
-    assert claude_account_readiness(config) == {"client-a": "needs-auth", "work": True}
+    assert claude_account_readiness(config) == {
+        "default": "needs-auth",
+        "client-a": "needs-auth",
+        "work": True,
+    }
 
 
 def test_account_readiness_without_claude_reports_binary_missing(
@@ -296,5 +301,21 @@ def test_account_readiness_without_claude_reports_binary_missing(
 ) -> None:
     monkeypatch.setenv("PATH", str(tmp_path))
     config = {"providers": {"claude-work": _WORK}}
-    assert claude_account_readiness(config) == {"work": "binary-missing"}
-    assert claude_account_readiness({"providers": {}}) == {}
+    assert claude_account_readiness(config) == {
+        "default": "binary-missing",
+        "work": "binary-missing",
+    }
+    assert claude_account_readiness({"providers": {}}) == {"default": "binary-missing"}
+
+
+@pytest.mark.parametrize("signed_in", [True, False, None])
+def test_default_account_readiness_uses_subscription_status(monkeypatch, signed_in) -> None:
+    monkeypatch.setattr("omnigent.onboarding.claude_accounts.claude_command", lambda: "claude")
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.account.claude_auth_status",
+        lambda *args, **kwargs: signed_in,
+    )
+    result = claude_account_readiness({"providers": {}})
+    assert result.get("default") == (
+        True if signed_in is True else "needs-auth" if signed_in is False else None
+    )

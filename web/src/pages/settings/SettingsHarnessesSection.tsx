@@ -636,7 +636,7 @@ function HarnessDetail({
         onReconfigure={credentialProblem && canFix ? () => onFix(mode) : undefined}
       />
       {entry.harness === "claude-native" && host && !host.sandbox_provider && (
-        <ClaudeAccountsCard host={host} defaultReady={status.ready} />
+        <ClaudeAccountsCard host={host} />
       )}
     </>
   );
@@ -714,15 +714,15 @@ function HarnessDetail({
  * interactive and stored in that machine's keychain, so "Add account" shows the
  * command to run there instead of signing in from the browser.
  */
-function ClaudeAccountsCard({ host, defaultReady }: { host: Host; defaultReady: boolean }) {
+function ClaudeAccountsCard({ host }: { host: Host }) {
   const [showAddCommand, setShowAddCommand] = useState(false);
   const reported = host.claude_accounts != null;
   const rows = [
-    { name: CLAUDE_DEFAULT_ACCOUNT_LABEL, testId: "default", ready: defaultReady },
+    { name: CLAUDE_DEFAULT_ACCOUNT_LABEL, testId: "default", ready: host.claude_accounts?.default },
     ...hostClaudeAccountNames(host).map((name) => ({
       name,
       testId: name,
-      ready: host.claude_accounts?.[name] === true,
+      ready: host.claude_accounts?.[name],
     })),
   ];
   return (
@@ -755,12 +755,12 @@ function ClaudeAccountsCard({ host, defaultReady }: { host: Host; defaultReady: 
             <span
               className={cn(
                 "shrink-0 text-xs",
-                row.ready
+                row.ready === true
                   ? "text-green-600 dark:text-green-400"
                   : "text-amber-600 dark:text-amber-500",
               )}
             >
-              {row.ready ? "Signed in" : "Signed out"}
+              {row.ready === true ? "Signed in" : row.ready == null ? "Unknown" : "Signed out"}
             </span>
           </li>
         ))}

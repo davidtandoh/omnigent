@@ -604,13 +604,18 @@ describe("Harness details", () => {
   });
 
   it("lists each Claude account on the machine with its own sign-in status", () => {
-    hosts = [{ ...ONLINE, claude_accounts: { work: true, "client-a": "needs-auth" } }];
+    hosts = [
+      {
+        ...ONLINE,
+        claude_accounts: { default: "needs-auth", work: true, "client-a": "needs-auth" },
+      },
+    ];
     renderHarnesses("claude-native", "?tab=settings");
 
     const accounts = screen.getByTestId("claude-accounts");
     const rowText = (id: string) =>
       within(accounts).getByTestId(`claude-account-${id}`).textContent;
-    expect(rowText("default")).toBe("Default loginSigned in");
+    expect(rowText("default")).toBe("Default loginSigned out");
     expect(rowText("client-a")).toBe("client-aSigned out");
     expect(rowText("work")).toBe("workSigned in");
     expect(screen.queryByTestId("claude-accounts-unreported")).toBeNull();
@@ -626,7 +631,7 @@ describe("Harness details", () => {
     hosts = [ONLINE];
     renderHarnesses("claude-native", "?tab=settings");
 
-    expect(screen.getByTestId("claude-account-default")).toBeTruthy();
+    expect(screen.getByTestId("claude-account-default").textContent).toBe("Default loginUnknown");
     expect(screen.getByTestId("claude-accounts-unreported").textContent).toContain(
       "my-laptop has not reported extra Claude accounts",
     );
