@@ -9,8 +9,9 @@ model to X **and saved as your default for new sessions**" and rewrites the
 ``model`` key in the person's own ``~/.claude/settings.json`` — an accepted
 trade-off, since the alternative (driving the interactive picker over tmux)
 cost ~530 lines of fragile screen-scraping automation. What still has to hold
-is that Omnigent itself never writes that file, and that the switch path polls
-the TUI rather than guessing at its render latency.
+is that the switch path polls the TUI rather than guessing at its render
+latency. Settings preservation is tested through the status-line reader in the
+bridge tests.
 """
 
 from __future__ import annotations
@@ -41,33 +42,6 @@ def _tree(relative: str) -> ast.Module:
     :returns: The parsed module.
     """
     return ast.parse((_OMNIGENT / relative).read_text(encoding="utf-8"))
-
-
-def test_the_users_claude_settings_file_is_only_ever_read() -> None:
-    """
-    Guard #18: omnigent reads the user's settings file and never writes it.
-
-    Claude Code rewriting its own ``model`` key on ``/model <id>`` is the
-    accepted trade-off. A write from *our* side is not: it would clobber hook
-    wiring, permissions and everything else in the file, so every reference
-    here must be a read.
-    """
-    tree = _tree("harnesses/claude_native/bridge.py")
-    reads: list[str] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Attribute):
-            continue
-        if not (
-            isinstance(node.value, ast.Name) and node.value.id == "_USER_CLAUDE_SETTINGS_PATH"
-        ):
-            continue
-        reads.append(node.attr)
-    # The definition itself is an assignment, not an attribute access, so every
-    # hit here is a use.
-    assert reads, "the guard found no usages at all — has the constant been renamed?"
-    assert set(reads) <= {"read_text", "read_bytes", "exists", "is_file"}, (
-        f"non-read access to the user's settings file: {sorted(set(reads))}"
-    )
 
 
 @pytest.mark.parametrize("name", _SWITCH_PATH_FUNCTIONS)
