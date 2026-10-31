@@ -409,12 +409,13 @@ calling user's daily costs across accounts.
 accounts with their 5-hour and 7-day usage percentages and reset times.
 These readings require `quota-axi` on the host. Omnigent reads it without
 refreshing credentials. Each account read has a 20-second timeout, and accounts
-are read in parallel. Omnigent passes `--max-age 60s` so repeated loads can reuse
-quota-axi's recent reading, with its original observation time. Missing tools or
-reads without a usable snapshot show `unavailable`. A fresh reading must contain both account-level windows. When a
-fresh read fails and `quota-axi` serves its last reading instead, the CLI shows
-`stale`; that snapshot can contain only one account-level window. Usage reports
-also mark offline hosts as unavailable.
+are read in parallel. The server waits up to 25 seconds for the host reply.
+Omnigent passes `--max-age 60s` so repeated loads can reuse quota-axi's recent
+reading, with its original observation time. Missing tools or reads without a
+usable snapshot show `unavailable`. A fresh reading must contain
+both account-level windows. When a fresh read fails and `quota-axi` serves its
+last reading instead, the CLI shows `stale`; that snapshot can contain only one
+account-level window. Usage reports also mark offline hosts as unavailable.
 
 In the web UI, **Settings → Harnesses → Claude → Settings** shows the same
 readings under each account in the Claude accounts list, on desktop and mobile.

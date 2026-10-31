@@ -100,13 +100,10 @@ The status-line wrapper and runner skill discovery use
 `selected_claude_config_dir`. The explicit runner selection takes precedence
 over the ambient environment.
 
-The host reads each Claude account's 5-hour and 7-day usage and reset times
-with the installed `quota-axi --provider claude --json --no-credential-refresh --max-age 60s`,
-using that account's local `CLAUDE_CONFIG_DIR` and a 20-second timeout per
-read. Accounts run in parallel, and the server allows 25 seconds for the host
-reply. Repeated loads reuse quota-axi's recent readings without changing their
-observation times or stale states. `GET /v1/hosts/{host_id}/claude-quotas` returns
-a `quotas` object field;
+The host scopes quota reads to each account's local `CLAUDE_CONFIG_DIR`.
+See the [native launch usage](../../../README.md#2-start-your-first-agent)
+for quota timeouts, parallel reads, and cache behavior.
+`GET /v1/hosts/{host_id}/claude-quotas` returns a `quotas` object field;
 `GET /v1/usage` groups these readings by host in `claude_quotas`.
 
 For session skill and MCP discovery, the server authorizes the host and session
