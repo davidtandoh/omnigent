@@ -132,6 +132,10 @@ def _isolated_provider_resolution(
 ) -> None:
     """Keep model-options frames independent of the developer's provider setup."""
     isolate_provider_resolution(monkeypatch, tmp_path_factory.mktemp("config_home"))
+    # Readiness must not inspect the developer's subscription login or keychain.
+    monkeypatch.setattr(
+        "omnigent.onboarding.claude_accounts.claude_account_readiness", lambda: {}
+    )
 
 
 @pytest.fixture(autouse=True)

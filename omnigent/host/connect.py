@@ -5367,7 +5367,6 @@ class HostProcess:
             if configured is not None and (
                 configured != published_configured
                 or gateway != published_gateway
-                # Unknown and "no extra accounts" look the same to clients.
                 or (accounts or {}) != (published_accounts or {})
             ):
                 await self._send_text(

@@ -542,7 +542,7 @@ class HostRegistry:
         # server re-learns it from the reconnect handshake.
         self._gateway_inference: dict[str, dict[str, bool]] = {}
         self._interactive_shells: dict[str, list[str]] = {}
-        # Extra Claude account readiness per host, delivered like the
+        # Claude subscription readiness per host, delivered like the
         # gateway-inference map above. Holds account names, never folders.
         self._claude_accounts: dict[str, dict[str, HarnessAvailability]] = {}
         self.launch_authorizer: (

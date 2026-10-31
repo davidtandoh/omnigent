@@ -1371,7 +1371,7 @@ export function AgentInfoContent({
   // undefined when permissions are off (single-user) or still loading, in
   // which case the row is omitted rather than showing a placeholder.
   const { data: owner } = useSessionOwner(sessionId ?? null);
-  // The server sends the account name only to viewers who can manage the session.
+  // The server sends the account name only to the session owner.
   const { session } = useSession(sessionId ?? null);
   const sessionAccount = session?.account ?? null;
   const viewerId = getCurrentUserId();

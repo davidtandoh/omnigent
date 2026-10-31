@@ -383,8 +383,11 @@ runner. Start the session with `omnigent claude --account NAME`; an unselected
 or different account is refused. Only Claude
 Code (`claude-native`) sessions can use an extra account. In the web UI, when
 the chosen machine has an extra account, the Claude Code picker shows an
-**Account** section. It starts on **Default login**, and the model list follows
-the chosen account. Agent info shows a session's account to its owner.
+**Account** section on desktop and mobile web. It starts on **Default login**,
+and changing the account resets the model selection and reloads its model list.
+If the selected account becomes unavailable, the picker keeps the selection and
+blocks creation until you choose an available account. Agent info shows a
+session's account to its owner.
 **Settings → Harnesses → Claude Code** lists each machine's accounts with their
 sign-in status. **Add account** shows the `omni setup` command to run on that
 machine, because sign-in is interactive and uses that machine's keychain. An

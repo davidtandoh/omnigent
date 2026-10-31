@@ -126,7 +126,7 @@ def install_native_launch_environment_from_process() -> None:
 
 
 def native_launch_environment() -> dict[str, str]:
-    """Return a copy of the explicit environment installed for this runner."""
+    """Return a copy of this task's explicit native launch environment."""
     scoped = _scoped_native_launch_environment.get()
     return dict(_installed_native_launch_environment if scoped is None else scoped)
 

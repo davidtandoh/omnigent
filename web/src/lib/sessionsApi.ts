@@ -181,7 +181,7 @@ interface SessionResponseWire {
   subagent_routing_override?: "on" | "off" | null;
   /** Owner opt-in: view-level collaborators may browse workspace files. */
   share_workspace_files?: boolean;
-  /** Extra Claude account name; sent only to viewers who can manage the session. */
+  /** Extra Claude account name; sent only to the session owner. */
   account?: string | null;
   context_window?: number | null;
   last_total_tokens?: number | null;

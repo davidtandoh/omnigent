@@ -770,7 +770,7 @@ def create_hosts_router(
                     # gateway-backed".
                     "gateway_inference": host_registry.gateway_inference(host.host_id),
                     "interactive_shells": host_registry.interactive_shells(host.host_id),
-                    # Extra Claude account name → sign-in readiness; owner-only
+                    # Claude account name → sign-in readiness; owner-only
                     # like the rest of this listing. ``None`` is unreported.
                     "claude_accounts": host_registry.claude_accounts(host.host_id),
                 }
