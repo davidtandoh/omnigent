@@ -1976,13 +1976,19 @@ def test_foreground_connect_remote_omits_local_server_prompt(
     assert "Stop it too?" not in result.output
 
 
+@pytest.mark.parametrize("as_json", [True, False])
 def test_host_status_json_reports_daemon_host_and_sessions(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, as_json: bool
 ) -> None:
-    """``host status --json`` includes daemon, host, runner, and sessions."""
+    """Host status consumes management HTTP responses in JSON and terminal output."""
+    import httpx
+
     monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
     monkeypatch.setattr(cli, "_pid_is_recorded_daemon", lambda record: cli._pid_alive(record.pid))
     monkeypatch.setattr(cli, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(cli, "_host_http_headers_cache", {})
+    monkeypatch.setattr("omnigent.chat._remote_headers", lambda **kwargs: {})
+    monkeypatch.setattr(cli, "_host_console", lambda: Console(width=160))
     _write_daemon_registry_record(
         tmp_path,
         pid=4242,
@@ -1991,18 +1997,29 @@ def test_host_status_json_reports_daemon_host_and_sessions(
         server_url="https://server.example.com",
         log_path="/tmp/daemon.log",
     )
-
+    quotas = [
+        {
+            "account": account,
+            "status": "available",
+            "five_hour": {"percent_used": used, "resets_at": "2026-11-01T01:00:00Z"},
+            "seven_day": {"percent_used": used, "resets_at": "2026-11-07T01:00:00Z"},
+        }
+        for account, used in [("default", 25), ("work", 75)]
+    ]
     runner_status_calls: list[str] = []
+    quota_calls: list[str] = []
 
-    def _fake_http_json(**kwargs: object) -> cli._HostHttpResult:
-        """Return host/session fixtures keyed by request path."""
-        path = kwargs["path"]
+    def respond(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
         if path == "/v1/hosts/host_abc":
-            return cli._HostHttpResult(status_code=200, body={"status": "online"})
+            return httpx.Response(200, json={"status": "online"})
+        if path == "/v1/hosts/host_abc/claude-quotas":
+            quota_calls.append(path)
+            return httpx.Response(200, json={"quotas": quotas})
         if path == "/v1/sessions":
-            return cli._HostHttpResult(
-                status_code=200,
-                body={
+            return httpx.Response(
+                200,
+                json={
                     "data": [
                         {
                             "id": "conv_owned",
@@ -2011,32 +2028,37 @@ def test_host_status_json_reports_daemon_host_and_sessions(
                             "runner_id": "runner_abc",
                             "title": "owned",
                         },
-                        {
-                            "id": "conv_other",
-                            "host_id": "host_other",
-                            "status": "idle",
-                        },
+                        {"id": "conv_other", "host_id": "host_other", "status": "idle"},
                     ]
                 },
             )
         if path == "/v1/runners/runner_abc/status":
             runner_status_calls.append("runner_abc")
-            return cli._HostHttpResult(
-                status_code=200,
-                body={"runner_id": "runner_abc", "online": True},
-            )
+            return httpx.Response(200, json={"runner_id": "runner_abc", "online": True})
         raise AssertionError(f"unexpected path: {path}")
 
-    monkeypatch.setattr(cli, "_host_http_json", _fake_http_json)
-
-    result = CliRunner().invoke(cli_group, ["host", "status", "--json", "--sessions"])
-
+    client = httpx.Client
+    monkeypatch.setattr(
+        httpx, "Client", lambda **kwargs: client(transport=httpx.MockTransport(respond), **kwargs)
+    )
+    args = ["host", "status", "--sessions"] + (["--json"] if as_json else [])
+    result = CliRunner().invoke(cli_group, args)
     assert result.exit_code == 0, result.output
-    assert '"target": "https://server.example.com"' in result.output
-    assert '"host_status": "online"' in result.output
-    assert '"id": "conv_owned"' in result.output
-    assert '"runner_online": true' in result.output
-    assert '"id": "conv_other"' not in result.output
+    if as_json:
+        daemon = json.loads(result.output)["daemons"][0]
+        assert daemon["target"] == "https://server.example.com"
+        assert daemon["host_status"] == "online"
+        assert daemon["claude_quotas"] == quotas
+        assert [(session["id"], session["runner_online"]) for session in daemon["sessions"]] == [
+            ("conv_owned", True)
+        ]
+    else:
+        assert "default" in result.output and "work" in result.output
+        assert "25%" in result.output and "75%" in result.output
+        assert "2026-11-01T01:00:00Z" in result.output and "2026-11-07T01:00:00Z" in result.output
+        assert "unavailable" not in result.output
+        assert "conv_owned" in result.output and "conv_other" not in result.output
+    assert quota_calls == ["/v1/hosts/host_abc/claude-quotas"]
     assert runner_status_calls == ["runner_abc"]
 
 

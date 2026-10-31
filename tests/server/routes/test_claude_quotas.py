@@ -81,7 +81,9 @@ async def test_owner_receives_account_quota_readings(quota_app, path):
         response = await task
     assert response.status_code == 200
     readings = (
-        response.json() if path != "/usage" else response.json()["claude_quotas"][0]["quotas"]
+        response.json()["quotas"]
+        if path != "/usage"
+        else response.json()["claude_quotas"][0]["quotas"]
     )
     assert readings[0]["account"] == "work"
     assert readings[0]["status"] == "unavailable"

@@ -372,4 +372,7 @@ class HostMcpInventory:
                     result,
                 )
                 servers = [dict(server) for server in result]
-        return apply_auth_status(servers, _auth_status_overlay())
+        overlay = _auth_status_overlay()
+        if account is not None:
+            overlay = {key: fields for key, fields in overlay.items() if key[0] != "claude"}
+        return apply_auth_status(servers, overlay)

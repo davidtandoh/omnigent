@@ -11153,9 +11153,12 @@ def host_status(
                 path=f"/v1/hosts/{payload['host_id']}/claude-quotas",
                 host_id=payload["host_id"],
             )
+            quotas = (
+                quota_result.body.get("quotas") if isinstance(quota_result.body, dict) else None
+            )
             payload["claude_quotas"] = (
-                quota_result.body
-                if quota_result.status_code == 200 and isinstance(quota_result.body, list)
+                quotas
+                if quota_result.status_code == 200 and isinstance(quotas, list)
                 else [{"account": "default", "status": "unavailable"}]
             )
         if (

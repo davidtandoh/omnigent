@@ -49,16 +49,17 @@ def create_claude_quotas_router(
     router = APIRouter()
 
     @router.get("/hosts/{host_id}/claude-quotas")
-    async def get_quotas(request: Request, host_id: str) -> list[ClaudeAccountQuota]:
+    async def get_quotas(request: Request, host_id: str) -> dict[str, list[ClaudeAccountQuota]]:
         user = require_user(request, auth_provider)
         await asyncio.to_thread(
             resolve_host_owner, user_id=user, host_id=host_id, host_store=hosts
         )
         conn = registry.get(host_id)
-        return (
+        quotas = (
             await request_host_claude_quotas(registry, conn)
             if conn
             else [ClaudeAccountQuota(account="default")]
         )
+        return {"quotas": quotas}
 
     return router

@@ -569,3 +569,41 @@ def test_inventory_cache_is_scoped_by_account(home, monkeypatch):
     assert [s["name"] for s in inventory.discover("work")] == ["work-only"]
     with pytest.raises(RuntimeError):
         inventory.discover("missing")
+
+
+@pytest.mark.parametrize("status", ["connected", "sign_in_required"])
+def test_named_account_omits_unscoped_claude_auth(home, monkeypatch, status):
+    account = home / "work"
+    _write_json(
+        home / ".claude.json", {"mcpServers": {"linear": {"url": "https://default.example/mcp"}}}
+    )
+    _write_json(
+        account / ".claude.json", {"mcpServers": {"linear": {"url": "https://work.example/mcp"}}}
+    )
+    _write_json(home / ".cursor" / "mcp.json", {"mcpServers": {"linear": _stdio()}})
+    monkeypatch.setattr(
+        "omnigent.config.load_global_config",
+        lambda: {
+            "providers": {
+                "claude-work": {
+                    "kind": "subscription",
+                    "cli": "claude",
+                    "config_dir": str(account),
+                }
+            }
+        },
+    )
+    auth = {"harness": "claude", "name": "linear", "status": status}
+    if status == "sign_in_required":
+        auth["sign_in_url"] = "https://default.example/sign-in"
+    _write_auth_status(
+        home, [auth, {"harness": "cursor", "name": "linear", "status": "connected"}]
+    )
+    inventory = HostMcpInventory()
+    for selected in (None, "work", None, "work"):
+        servers = {server["harness"]: server for server in inventory.discover(selected)}
+        claude = servers["claude"]
+        assert claude["url_host"] == ("work.example" if selected else "default.example")
+        assert claude.get("auth_status") == (None if selected else status)
+        assert claude.get("sign_in_url") == (auth.get("sign_in_url") if selected is None else None)
+        assert servers["cursor"]["auth_status"] == "connected"
