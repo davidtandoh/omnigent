@@ -603,6 +603,41 @@ describe("Harness details", () => {
     expect(screen.queryByText(/No Claude subscription or API key/)).toBeNull();
   });
 
+  it("lists each Claude account on the machine with its own sign-in status", () => {
+    hosts = [{ ...ONLINE, claude_accounts: { work: true, "client-a": "needs-auth" } }];
+    renderHarnesses("claude-native", "?tab=settings");
+
+    const accounts = screen.getByTestId("claude-accounts");
+    const rowText = (id: string) =>
+      within(accounts).getByTestId(`claude-account-${id}`).textContent;
+    expect(rowText("default")).toBe("Default loginSigned in");
+    expect(rowText("client-a")).toBe("client-aSigned out");
+    expect(rowText("work")).toBe("workSigned in");
+    expect(screen.queryByTestId("claude-accounts-unreported")).toBeNull();
+
+    // Sign-in is interactive on that machine, so Add account shows the command.
+    expect(screen.queryByTestId("claude-accounts-add-command")).toBeNull();
+    fireEvent.click(screen.getByTestId("claude-accounts-add"));
+    expect(screen.getByTestId("claude-accounts-add-command").textContent).toBe("omni setup");
+    expect(within(accounts).getByText(/Run this on my-laptop/)).toBeTruthy();
+  });
+
+  it("explains when an older machine does not report Claude accounts", () => {
+    hosts = [ONLINE];
+    renderHarnesses("claude-native", "?tab=settings");
+
+    expect(screen.getByTestId("claude-account-default")).toBeTruthy();
+    expect(screen.getByTestId("claude-accounts-unreported").textContent).toContain(
+      "my-laptop has not reported extra Claude accounts",
+    );
+  });
+
+  it("shows no Claude accounts list for other harnesses", () => {
+    hosts = [{ ...ONLINE, claude_accounts: { work: true } }];
+    renderHarnesses("codex-native");
+    expect(screen.queryByTestId("claude-accounts")).toBeNull();
+  });
+
   it("uses Claude credential copy for Claude needs-auth", () => {
     hosts = [{ ...ONLINE, configured_harnesses: { "claude-native": "needs-auth" } }];
     renderHarnesses("claude-native");
@@ -787,7 +822,10 @@ describe("Launch settings compatibility", () => {
     selectTab("Settings");
     expect(screen.getByText(/Cannot separate environment values/)).toBeTruthy();
     expect(screen.getByText("/usr/bin/env")).toBeTruthy();
-    expect(screen.getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+    const startupArgs = screen
+      .getAllByRole("listitem")
+      .filter((item) => !item.closest('[data-testid="claude-accounts"]'));
+    expect(startupArgs.map((item) => item.textContent)).toEqual([
       "-S",
       "TOKEN=synthetic-secret isaac codex --",
     ]);
@@ -819,7 +857,8 @@ describe("Launch settings compatibility", () => {
     startupError = new ApiError("unavailable", status, null);
     renderHarnesses("claude-native");
     selectTab("Settings");
-    expect(screen.getByText("Signed in")).toBeTruthy();
+    const credential = screen.getByRole("heading", { name: "Credential" }).parentElement!;
+    expect(within(credential).getByText("Signed in")).toBeTruthy();
     expect(screen.queryByText("Startup configuration")).toBeNull();
     if (status === 501)
       expect(screen.getByText("Update my-laptop to see launch settings.")).toBeTruthy();

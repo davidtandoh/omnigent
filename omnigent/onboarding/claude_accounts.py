@@ -18,6 +18,11 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from omnigent.errors import ErrorCode
+from omnigent.harness_availability import (
+    HARNESS_BINARY_MISSING,
+    HARNESS_NEEDS_AUTH,
+    HarnessAvailability,
+)
 from omnigent.onboarding.provider_config import SUBSCRIPTION_KIND, ProviderEntry, load_providers
 
 _logger = logging.getLogger(__name__)
@@ -172,6 +177,56 @@ def sign_out_account(command: str, config_dir: str) -> bool:
 def claude_command() -> str | None:
     """Return the ``claude`` executable on ``PATH``, or ``None`` when missing."""
     return shutil.which("claude")
+
+
+def configured_account_names(config: dict[str, object]) -> list[str]:
+    """Return the extra Claude account names set up in *config*, sorted.
+
+    :param config: Parsed user config.
+    :returns: Short names, e.g. ``["client-a", "work"]``; the default login
+        is never listed.
+    """
+    return sorted(
+        account_name
+        for provider_name, entry in load_providers(config).items()
+        if entry.kind == SUBSCRIPTION_KIND
+        and entry.cli == "claude"
+        and entry.config_dir is not None
+        and (account_name := account_name_from_provider(provider_name)) is not None
+    )
+
+
+def claude_account_readiness(
+    config: dict[str, object] | None = None,
+) -> dict[str, HarnessAvailability]:
+    """Return each extra Claude account's sign-in readiness on this machine.
+
+    Each account is checked with ``claude auth status`` in its own folder.
+    An inconclusive probe counts as ``"needs-auth"``. The default login is
+    not listed: its readiness is the ``claude-native`` harness entry.
+
+    :param config: Parsed user config; ``None`` reads the global config.
+    :returns: Account name to readiness, e.g.
+        ``{"work": True, "client-a": "needs-auth"}``. Every account reports
+        ``"binary-missing"`` when ``claude`` is not on ``PATH``.
+    """
+    if config is None:
+        from omnigent.config import load_global_config
+
+        config = load_global_config()
+    names = configured_account_names(config)
+    if not names:
+        return {}
+    command = claude_command()
+    readiness: dict[str, HarnessAvailability] = {}
+    for name in names:
+        entry = find_account(config, name)
+        if command is None:
+            readiness[name] = HARNESS_BINARY_MISSING
+        elif entry is not None and entry.config_dir is not None:
+            signed_in = account_signed_in(command, entry.config_dir)
+            readiness[name] = True if signed_in else HARNESS_NEEDS_AUTH
+    return readiness
 
 
 def find_account(config: dict[str, object], selector: str) -> ProviderEntry | None:

@@ -434,6 +434,20 @@ describe("useHostModelOptions", () => {
     expect(result.current.data?.map((model) => model.displayName)).toEqual(["Sonnet 4.6"]);
   });
 
+  it("lists the chosen Claude account's catalog under its own cache key", async () => {
+    fetchMock.mockResolvedValue(mockResponse({ models: [{ id: "opus", displayName: "Opus" }] }));
+
+    const { result } = renderHook(
+      () => useHostModelOptions("host_1", "claude-native", true, { account: "client-a" }),
+      { wrapper },
+    );
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/v1/hosts/host_1/harnesses/claude-native/model-options?account=client-a",
+    );
+  });
+
   it("does not fetch without a selected host", async () => {
     renderHook(() => useHostModelOptions(null, "claude-native"), { wrapper });
     await Promise.resolve();

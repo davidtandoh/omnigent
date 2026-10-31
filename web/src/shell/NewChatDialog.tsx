@@ -270,6 +270,7 @@ import {
   DEVIN_NATIVE_PERMISSION_MODES,
 } from "@/lib/nativeHarnessModes";
 import { fetchHosts, useHostModelOptions, useHosts, type Host } from "@/hooks/useHosts";
+import { CLAUDE_DEFAULT_ACCOUNT_LABEL, hostClaudeAccountNames } from "@/lib/claudeAccounts";
 import {
   previewIsUnsupported,
   sandboxModelOptionsKey,
@@ -3198,6 +3199,18 @@ export function NewChatLandingScreen() {
   // The selected native harness persists and restores harness-specific model,
   // effort, and permission knobs.
   const selectedNativeHarness = nativeCodingAgentForAvailableAgent(selectedAgent)?.harness ?? null;
+  // Extra Claude accounts on the selected host. With none, the picker shows no
+  // Account section and the session uses the host's default login.
+  const hostClaudeAccounts = hostClaudeAccountNames(harnessWarningHost);
+  const hostHasClaudeAccounts = hostClaudeAccounts.length > 0;
+  const [pickedClaudeAccount, setPickedClaudeAccount] = useState<string | null>(null);
+  // A pick the selected host does not list falls back to the default login.
+  const claudeAccount =
+    selectedNativeHarness === "claude-native" &&
+    pickedClaudeAccount !== null &&
+    hostClaudeAccounts.includes(pickedClaudeAccount)
+      ? pickedClaudeAccount
+      : null;
   // Probe only the selected, available harness. Older hosts without readiness
   // metadata remain eligible, matching the picker's setup warnings.
   const canLoadHostModels = (harness: string) =>
@@ -3211,6 +3224,7 @@ export function NewChatLandingScreen() {
     error: hostClaudeModelsError,
   } = useHostModelOptions(selectedHostId, "claude-native", canLoadHostModels("claude-native"), {
     poll: selectedNativeHarness === "claude-native",
+    account: claudeAccount ?? undefined,
   });
   const {
     data: hostCodexModelOptions,
@@ -3541,7 +3555,9 @@ export function NewChatLandingScreen() {
         { label: "Model", value: modelValue },
         ...(effortValue ? [{ label: "Effort", value: effortValue }] : []),
         { label: "Permission mode", value: permissionValue },
-        ...sourceRows(claudeModelOptions),
+        ...(selectedNativeHarness === "claude-native" && hostHasClaudeAccounts
+          ? [{ label: "Account", value: claudeAccount ?? CLAUDE_DEFAULT_ACCOUNT_LABEL }]
+          : sourceRows(claudeModelOptions)),
       ];
     }
     // Codex folds routing into its Model row, so report it the same way Claude
@@ -3637,6 +3653,8 @@ export function NewChatLandingScreen() {
     agySkipMode,
     pickedHarness,
     selectedNativeHarness,
+    hostHasClaudeAccounts,
+    claudeAccount,
   ]);
   const harnessTriggerDetails = configSummary.filter(
     (row) =>
@@ -4019,6 +4037,45 @@ export function NewChatLandingScreen() {
           ],
         }
       : undefined;
+  const selectClaudeAccount = (account: string | null) => {
+    if (account === claudeAccount) return;
+    setPickedClaudeAccount(account);
+    // The model list follows the account, so a model picked for another
+    // account falls back to the new account's default.
+    setPickedModel("");
+  };
+  const accountSection: ComposerConfigSection | undefined =
+    !sandboxSelected && selectedNativeHarness === "claude-native" && hostHasClaudeAccounts
+      ? {
+          testId: "new-chat-landing-agent-accounts",
+          header: "Account",
+          choices: [null, ...hostClaudeAccounts].map((account) => {
+            const signedOut =
+              account !== null && harnessWarningHost?.claude_accounts?.[account] !== true;
+            return {
+              key: account ?? "__default__",
+              label: (
+                <span className="flex min-w-0 items-center gap-2">
+                  <span className="truncate">{account ?? CLAUDE_DEFAULT_ACCOUNT_LABEL}</span>
+                  {signedOut && (
+                    <Badge
+                      variant="outline"
+                      className="border-amber-300 bg-amber-50 text-sm text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-400"
+                      data-testid={`new-chat-landing-account-warning-${account}`}
+                    >
+                      Signed out
+                    </Badge>
+                  )}
+                </span>
+              ),
+              checked: claudeAccount === account,
+              onSelect: () => selectClaudeAccount(account),
+              testId: `new-chat-landing-account-${account ?? "default"}`,
+              className: "whitespace-normal [&>span:last-child]:min-w-0",
+            };
+          }),
+        }
+      : undefined;
   const effortSection: ComposerConfigSection | undefined =
     pickerEffortOptions.length > 0
       ? {
@@ -4121,6 +4178,7 @@ export function NewChatLandingScreen() {
                 }
               : undefined
           }
+          account={accountSection}
           models={
             modelSection && {
               ...modelSection,
@@ -5321,7 +5379,9 @@ export function NewChatLandingScreen() {
   const harnessTriggerTooltipRows = [
     { label: selectedAgentHasAdvancedSettings ? "Agent" : "Harness", value: agentLabel },
     ...harnessTriggerDetails,
-    ...configSummary.filter((detail) => detail.label === "Connection"),
+    ...configSummary.filter(
+      (detail) => detail.label === "Connection" || detail.label === "Account",
+    ),
   ];
 
   // Pick top-level Smart Routing. The create call needs a concrete agent_id, so
@@ -5971,6 +6031,11 @@ export function NewChatLandingScreen() {
           // harness keeps its own configured/default value.
           model_override: normalizedModelOverride ?? undefined,
           reasoning_effort: normalizedReasoningEffort ?? undefined,
+          // The chosen extra Claude account; omitted for the default login.
+          account:
+            !sandboxSelected && !smartRoutingHarnessSelected && claudeAccount !== null
+              ? claudeAccount
+              : undefined,
           cost_control_mode_override: costControlOverride,
           // Top-level Smart Routing sends the same "auto" sentinel the bundle
           // path does; the server tells them apart by the bound agent being a

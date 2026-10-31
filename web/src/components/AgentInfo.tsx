@@ -35,6 +35,7 @@ import {
   type PolicyRegistryEntry,
 } from "@/hooks/usePolicies";
 import { usePermissions, useSessionOwner } from "@/hooks/usePermissions";
+import { useSession } from "@/hooks/useSession";
 import { isOwnerLevel, isSessionSharedWithOthers } from "@/lib/permissionsApi";
 import { getCurrentUserId } from "@/lib/identity";
 import { Button } from "@/components/ui/button";
@@ -1370,6 +1371,9 @@ export function AgentInfoContent({
   // undefined when permissions are off (single-user) or still loading, in
   // which case the row is omitted rather than showing a placeholder.
   const { data: owner } = useSessionOwner(sessionId ?? null);
+  // The server sends the account name only to viewers who can manage the session.
+  const { session } = useSession(sessionId ?? null);
+  const sessionAccount = session?.account ?? null;
   const viewerId = getCurrentUserId();
   // Only surface the owner once the session is actually shared — a private
   // solo session has no "owner" worth showing. A non-owner viewer already
@@ -1419,6 +1423,18 @@ export function AgentInfoContent({
           >
             {owner}
             {owner === viewerId && <span className="ml-1 text-muted-foreground/60">(you)</span>}
+          </span>
+        </div>
+      )}
+      {sessionId && sessionAccount && (
+        <div className="flex items-baseline justify-between gap-3 py-3">
+          <SectionLabel>Claude account</SectionLabel>
+          <span
+            className="truncate font-mono text-sm text-muted-foreground"
+            data-testid="agent-info-session-account"
+            title={sessionAccount}
+          >
+            {sessionAccount}
           </span>
         </div>
       )}

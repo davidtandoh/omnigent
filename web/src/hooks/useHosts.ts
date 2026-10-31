@@ -36,6 +36,13 @@ export interface Host {
    * or server — and must not gate anything away; only an explicit `false` does.
    */
   gateway_inference?: Record<string, boolean> | null;
+  /**
+   * Sign-in readiness of each extra Claude account set up on the host, keyed
+   * by short name, e.g. `{"work": true, "client-a": "needs-auth"}`. The
+   * default login is the `claude-native` readiness entry and is not listed.
+   * `null`/absent means unreported (an older host or server).
+   */
+  claude_accounts?: Record<string, boolean | string> | null;
 }
 
 interface HostsResponse {
@@ -96,9 +103,11 @@ export function useHosts(options: UseHostsOptions = {}) {
 async function fetchHostModelOptions(
   hostId: string,
   harness: string,
+  account: string | null,
 ): Promise<NativeModelOption[]> {
+  const query = account ? `?account=${encodeURIComponent(account)}` : "";
   const res = await authenticatedFetch(
-    `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(harness)}/model-options`,
+    `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(harness)}/model-options${query}`,
   );
   if (!res.ok) {
     let detail = `${res.status} ${res.statusText}`;
@@ -125,11 +134,18 @@ export function useHostModelOptions(
   hostId: string | null,
   harness: string,
   enabled = true,
-  { poll = true }: { poll?: boolean } = {},
+  {
+    poll = true,
+    account = null,
+  }: {
+    poll?: boolean;
+    /** Extra Claude account whose catalog to list; `null` for the default login. */
+    account?: string | null;
+  } = {},
 ) {
   const queryClient = useQueryClient();
   const canRefresh = enabled && hostId !== null && poll;
-  const pollerKey = JSON.stringify([hostId, harness]);
+  const pollerKey = JSON.stringify([hostId, harness, account]);
   // Only committed selections participate; suspended renders leave retries alone.
   useLayoutEffect(() => {
     if (!canRefresh) return;
@@ -147,8 +163,10 @@ export function useHostModelOptions(
     };
   }, [queryClient, pollerKey, canRefresh]);
   const query = useQuery({
-    queryKey: ["host-model-options", hostId, harness],
-    queryFn: () => fetchHostModelOptions(hostId as string, harness),
+    queryKey: account
+      ? ["host-model-options", hostId, harness, account]
+      : ["host-model-options", hostId, harness],
+    queryFn: () => fetchHostModelOptions(hostId as string, harness, account),
     enabled: enabled && hostId !== null,
     // Poll the active picker for provider changes; inactive harnesses can
     // fetch eagerly without periodic refreshes or background retries.

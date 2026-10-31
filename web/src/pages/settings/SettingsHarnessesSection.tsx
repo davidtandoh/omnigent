@@ -24,6 +24,8 @@ import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { isFeatureEnabled } from "@/lib/capabilities";
 import { ComposerAgentIcon } from "@/shell/NewChatDialog";
 import { useHarnessStartup, useHosts, type Host } from "@/hooks/useHosts";
+import { CLAUDE_DEFAULT_ACCOUNT_LABEL, hostClaudeAccountNames } from "@/lib/claudeAccounts";
+import { CliCommandBlock } from "@/shell/CliCommandBlock";
 import { ApiError } from "@/lib/sessionsApi";
 import { INVENTORY_HARNESS_IDS } from "@/hooks/useHarnessInventory";
 import { BRAND_HARNESSES } from "@/components/onboarding/harnessBrand";
@@ -615,23 +617,28 @@ function HarnessDetail({
     </>
   );
   const credentialCard = (
-    <CredentialCard
-      label={credentialProblem ? "Not signed in" : credential.label}
-      description={
-        credentialProblem && host
-          ? missingHarnessCredentialCopy(entry.harness, entry.name, host.name)
-          : credential.description
-      }
-      ready={status.ready}
-      warning={credentialProblem}
-      showStatus={canSetup}
-      statusLabel={
-        status.reason === "binary-missing" || status.reason === "unconfigured"
-          ? reconfigurationReason(status.reason)
-          : "Needs reconfiguration"
-      }
-      onReconfigure={credentialProblem && canFix ? () => onFix(mode) : undefined}
-    />
+    <>
+      <CredentialCard
+        label={credentialProblem ? "Not signed in" : credential.label}
+        description={
+          credentialProblem && host
+            ? missingHarnessCredentialCopy(entry.harness, entry.name, host.name)
+            : credential.description
+        }
+        ready={status.ready}
+        warning={credentialProblem}
+        showStatus={canSetup}
+        statusLabel={
+          status.reason === "binary-missing" || status.reason === "unconfigured"
+            ? reconfigurationReason(status.reason)
+            : "Needs reconfiguration"
+        }
+        onReconfigure={credentialProblem && canFix ? () => onFix(mode) : undefined}
+      />
+      {entry.harness === "claude-native" && host && !host.sandbox_provider && (
+        <ClaudeAccountsCard host={host} defaultReady={status.ready} />
+      )}
+    </>
   );
   const settings = host ? (
     <div className="flex flex-col gap-6">
@@ -699,6 +706,83 @@ function HarnessDetail({
         )}
       </div>
     </>
+  );
+}
+
+/**
+ * Claude accounts on one machine, each with its own sign-in status. Sign-in is
+ * interactive and stored in that machine's keychain, so "Add account" shows the
+ * command to run there instead of signing in from the browser.
+ */
+function ClaudeAccountsCard({ host, defaultReady }: { host: Host; defaultReady: boolean }) {
+  const [showAddCommand, setShowAddCommand] = useState(false);
+  const reported = host.claude_accounts != null;
+  const rows = [
+    { name: CLAUDE_DEFAULT_ACCOUNT_LABEL, testId: "default", ready: defaultReady },
+    ...hostClaudeAccountNames(host).map((name) => ({
+      name,
+      testId: name,
+      ready: host.claude_accounts?.[name] === true,
+    })),
+  ];
+  return (
+    <section className="flex flex-col gap-2" data-testid="claude-accounts">
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+          Claude accounts
+        </h2>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-7 gap-1"
+          onClick={() => setShowAddCommand((shown) => !shown)}
+          aria-expanded={showAddCommand}
+          data-testid="claude-accounts-add"
+          componentId="settings.harnesses.claude-accounts.add"
+        >
+          <Plus className="size-3.5" />
+          Add account
+        </Button>
+      </div>
+      <ul className="flex flex-col divide-y divide-border rounded-xl border border-border">
+        {rows.map((row) => (
+          <li
+            key={row.testId}
+            className="flex items-center justify-between gap-3 px-3 py-2 text-ui"
+            data-testid={`claude-account-${row.testId}`}
+          >
+            <span className="min-w-0 truncate">{row.name}</span>
+            <span
+              className={cn(
+                "shrink-0 text-xs",
+                row.ready
+                  ? "text-green-600 dark:text-green-400"
+                  : "text-amber-600 dark:text-amber-500",
+              )}
+            >
+              {row.ready ? "Signed in" : "Signed out"}
+            </span>
+          </li>
+        ))}
+      </ul>
+      {!reported && (
+        <p className="text-xs text-muted-foreground" data-testid="claude-accounts-unreported">
+          {host.name} has not reported extra Claude accounts. Upgrade Omnigent on that machine to
+          list them here.
+        </p>
+      )}
+      {showAddCommand && (
+        <div className="flex flex-col gap-2 text-xs text-muted-foreground">
+          <p>
+            Run this on {host.name}, choose <strong>Claude</strong>, then{" "}
+            <strong>Claude — another subscription account</strong>. The same command signs a
+            signed-out account in again. Sign-in opens a browser on that machine and is stored in
+            its keychain, so it cannot run from this page.
+          </p>
+          <CliCommandBlock command="omni setup" testIdPrefix="claude-accounts-add" />
+        </div>
+      )}
+    </section>
   );
 }
 

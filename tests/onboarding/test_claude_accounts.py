@@ -15,6 +15,7 @@ from omnigent.onboarding.claude_accounts import (
     account_name_error,
     account_name_for_config_dir,
     account_name_from_provider,
+    claude_account_readiness,
     find_account,
     ssh_login_refusal,
 )
@@ -256,3 +257,44 @@ def test_unreadable_config_refusal_does_not_export_folder_paths(
     ]
     assert diagnostic.exc_info is not None
     assert "config.yaml" in str(diagnostic.exc_info[1])
+
+
+def _write_fake_claude(bin_dir: Path) -> None:
+    """Install a ``claude`` that reports signed in when its folder holds ``signed-in``."""
+    bin_dir.mkdir()
+    script = bin_dir / "claude"
+    script.write_text(
+        "#!/bin/sh\n"
+        'if [ -e "$CLAUDE_CONFIG_DIR/signed-in" ]; then echo \'{"loggedIn":true}\'; '
+        "else echo '{\"loggedIn\":false}'; exit 1; fi\n"
+    )
+    script.chmod(0o755)
+
+
+def test_account_readiness_checks_each_account_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    work, client = tmp_path / "work", tmp_path / "client-a"
+    work.mkdir()
+    client.mkdir()
+    (work / "signed-in").touch()
+    _write_fake_claude(tmp_path / "bin")
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    config = {
+        "providers": {
+            "claude-work": {**_WORK, "config_dir": str(work)},
+            "claude-client-a": {**_WORK, "config_dir": str(client)},
+            "claude-subscription": {"kind": "subscription", "cli": "claude"},
+        }
+    }
+
+    assert claude_account_readiness(config) == {"client-a": "needs-auth", "work": True}
+
+
+def test_account_readiness_without_claude_reports_binary_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", str(tmp_path))
+    config = {"providers": {"claude-work": _WORK}}
+    assert claude_account_readiness(config) == {"work": "binary-missing"}
+    assert claude_account_readiness({"providers": {}}) == {}

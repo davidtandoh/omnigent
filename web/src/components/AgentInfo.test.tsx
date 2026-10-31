@@ -49,6 +49,15 @@ vi.mock("@/hooks/useAgents", () => ({
   useUpdateMcpServer: () => ({ mutate: updateMcpMutate, isPending: false, error: null }),
   useDeleteMcpServer: () => ({ mutate: deleteMcpMutate, isPending: false, error: null }),
 }));
+// The session snapshot's Claude account, which the server sends only to owners.
+const sessionAccountData = { current: null as string | null };
+vi.mock("@/hooks/useSession", () => ({
+  useSession: () => ({
+    session: { account: sessionAccountData.current },
+    isLoading: false,
+    error: null,
+  }),
+}));
 vi.mock("@/hooks/usePermissions", () => ({
   useSessionOwner: () => ({ data: ownerData.current }),
   usePermissions: () => ({ data: grantsData.current }),
@@ -558,6 +567,26 @@ describe("AgentInfoButton session owner row", () => {
     fireEvent.click(screen.getByTestId("agent-info-trigger"));
     expect(screen.getByText("Databricks_coding_agent")).toBeInTheDocument();
     expect(screen.queryByTestId("agent-info-session-owner")).toBeNull();
+  });
+});
+
+describe("AgentInfoButton Claude account row", () => {
+  afterEach(() => {
+    sessionAccountData.current = null;
+  });
+
+  it("shows the session's Claude account when the server reports one", () => {
+    sessionAccountData.current = "work";
+    renderButtonWithSession(AGENT_WITH_BOTH, "conv_account");
+    fireEvent.click(screen.getByTestId("agent-info-trigger"));
+    expect(screen.getByTestId("agent-info-session-account")).toHaveTextContent("work");
+  });
+
+  it("omits the row for the default login or a viewer who cannot manage the session", () => {
+    renderButtonWithSession(AGENT_WITH_BOTH, "conv_account");
+    fireEvent.click(screen.getByTestId("agent-info-trigger"));
+    expect(screen.getByText("Databricks_coding_agent")).toBeInTheDocument();
+    expect(screen.queryByTestId("agent-info-session-account")).toBeNull();
   });
 });
 

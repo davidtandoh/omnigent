@@ -234,6 +234,11 @@ class HostHelloFrame:
         supported" without a version check.
     :param connection_id: Host-minted identifier for this socket, shared with
         server diagnostics. Absent from older hosts.
+    :param claude_accounts: Sign-in readiness of each extra Claude account set
+        up on this machine, keyed by short name, e.g.
+        ``{"work": True, "client-a": "needs-auth"}``. Names only; folders never
+        leave the host. The default login is the ``claude-native`` readiness
+        entry. ``None`` means unknown (an older host, or a failed probe).
     """
 
     version: str
@@ -247,6 +252,7 @@ class HostHelloFrame:
     installation_id: str | None = None
     capabilities: list[str] = field(default_factory=list)
     connection_id: str | None = None
+    claude_accounts: dict[str, HarnessAvailability] | None = None
 
 
 @dataclass
@@ -275,10 +281,13 @@ class HostHarnessReadinessFrame:
         ``omnigent.gateway_inference``). A family that could not be evaluated
         is omitted. ``None`` means unknown (an older host that doesn't report
         it) — never treat it as "nothing is gateway-backed".
+    :param claude_accounts: Same shape and meaning as
+        :attr:`HostHelloFrame.claude_accounts`.
     """
 
     configured_harnesses: dict[str, HarnessAvailability]
     gateway_inference: dict[str, bool] | None = None
+    claude_accounts: dict[str, HarnessAvailability] | None = None
 
 
 @dataclass
@@ -1067,10 +1076,16 @@ class HostFsResultFrame:
 
 @dataclass
 class HostModelOptionsFrame:
-    """Server → host: resolve pre-launch model choices for a harness."""
+    """Server → host: resolve pre-launch model choices for a harness.
+
+    :param account: Extra Claude account short name, e.g. ``"work"``, whose
+        catalog to list for ``claude-native``; ``None`` lists the default
+        login's. Sent only to hosts that advertise :data:`CAP_CLAUDE_ACCOUNT`.
+    """
 
     request_id: str
     harness: str
+    account: str | None = None
 
 
 @dataclass
@@ -1443,6 +1458,7 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "installation_id": frame.installation_id,
                 "capabilities": list(frame.capabilities),
                 "connection_id": frame.connection_id,
+                "claude_accounts": frame.claude_accounts,
             }
         )
     if isinstance(frame, HostConnectionErrorFrame):
@@ -1460,6 +1476,7 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "kind": HostFrameKind.HARNESS_READINESS.value,
                 "configured_harnesses": frame.configured_harnesses,
                 "gateway_inference": frame.gateway_inference,
+                "claude_accounts": frame.claude_accounts,
             }
         )
     if isinstance(frame, HostLaunchRunnerFrame):
@@ -1777,13 +1794,14 @@ def encode_host_frame(frame: HostFrame) -> str:
             }
         )
     if isinstance(frame, HostModelOptionsFrame):
-        return _encode_payload(
-            {
-                "kind": HostFrameKind.MODEL_OPTIONS.value,
-                "request_id": frame.request_id,
-                "harness": frame.harness,
-            }
-        )
+        payload = {
+            "kind": HostFrameKind.MODEL_OPTIONS.value,
+            "request_id": frame.request_id,
+            "harness": frame.harness,
+        }
+        if frame.account is not None:
+            payload["account"] = frame.account
+        return _encode_payload(payload)
     if isinstance(frame, HostModelOptionsResultFrame):
         return _encode_payload(
             {
@@ -2359,6 +2377,7 @@ def _decode_host_hello(msg: _JsonObject) -> HostHelloFrame:
         installation_id=_optional_nullable_str(msg, "installation_id"),
         capabilities=_optional_str_list(msg, "capabilities"),
         connection_id=_optional_nullable_str(msg, "connection_id"),
+        claude_accounts=_optional_str_availability_map(msg, "claude_accounts"),
     )
 
 
@@ -2377,6 +2396,7 @@ def _decode_harness_readiness(msg: _JsonObject) -> HostHarnessReadinessFrame:
     return HostHarnessReadinessFrame(
         configured_harnesses=configured_harnesses,
         gateway_inference=optional_str_bool_map(msg, "gateway_inference"),
+        claude_accounts=_optional_str_availability_map(msg, "claude_accounts"),
     )
 
 
@@ -2898,6 +2918,7 @@ def _decode_model_options(msg: _JsonObject) -> HostModelOptionsFrame:
     return HostModelOptionsFrame(
         request_id=_required_str(msg, "request_id"),
         harness=_required_str(msg, "harness"),
+        account=_optional_nullable_str(msg, "account"),
     )
 
 
