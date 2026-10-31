@@ -9734,6 +9734,57 @@ describe("NewChatLandingScreen agent picker + Edit settings", () => {
     ).toBe(true);
   });
 
+  it.each(["removed", "signed-out"])(
+    "preserves an explicitly selected account when it becomes %s",
+    async (state) => {
+      mockHosts([{ ...host("online"), claude_accounts: { default: true, work: true } }]);
+      authenticatedFetchMock.mockResolvedValue({
+        ok: true,
+        json: async () => ({ id: "conv_new" }),
+      } as unknown as Response);
+      renderLanding();
+      openAgentModels("a1");
+      fireEvent.click(screen.getByTestId("new-chat-landing-account-work"));
+      closePrimaryPicker();
+
+      mockHosts([
+        {
+          ...host("online"),
+          claude_accounts:
+            state === "removed" ? { default: true } : { default: true, work: "needs-auth" },
+        },
+      ]);
+      fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+        target: { value: "run the build" },
+      });
+      expect(screen.getByTestId("new-chat-landing-account-error")).toHaveTextContent(
+        "Claude account 'work' is unavailable",
+      );
+      expect(screen.getByTestId("new-chat-landing-submit")).toBeDisabled();
+      fireEvent.submit(screen.getByTestId("new-chat-landing-composer"));
+      expect(authenticatedFetchMock).not.toHaveBeenCalled();
+      openAgentModels("a1");
+      expect(screen.getByTestId("new-chat-landing-account-work")).toHaveAttribute(
+        "aria-checked",
+        "true",
+      );
+      expect(screen.getByTestId("new-chat-landing-account-warning-work")).toHaveTextContent(
+        state === "removed" ? "Unavailable" : "Signed out",
+      );
+      expect(
+        useHostModelOptionsMock.mock.calls.filter(([, h]) => h === "claude-native").at(-1),
+      ).toEqual(["host_1", "claude-native", false, { poll: true, account: "work" }]);
+      fireEvent.click(screen.getByTestId("new-chat-landing-account-default"));
+      closePrimaryPicker();
+      expect(screen.queryByTestId("new-chat-landing-account-error")).toBeNull();
+      expect(screen.getByTestId("new-chat-landing-submit")).toBeEnabled();
+      fireEvent.submit(screen.getByTestId("new-chat-landing-composer"));
+      await waitFor(() => expect(authenticatedFetchMock).toHaveBeenCalledTimes(1));
+      const [, init] = authenticatedFetchMock.mock.calls[0];
+      expect(JSON.parse((init as RequestInit).body as string)).not.toHaveProperty("account");
+    },
+  );
+
   it("clears a remembered model when changing accounts", () => {
     const workCatalog = {
       ...CLAUDE_MODEL_OPTIONS_RESULT,

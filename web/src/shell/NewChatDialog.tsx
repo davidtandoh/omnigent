@@ -3205,14 +3205,14 @@ export function NewChatLandingScreen() {
   // Extra Claude accounts on the selected host. With none, the picker shows no
   // Account section and the session uses the host's default login.
   const hostClaudeAccounts = hostClaudeAccountNames(harnessWarningHost);
-  const hostHasClaudeAccounts = hostClaudeAccounts.length > 0;
   const [pickedClaudeAccount, setPickedClaudeAccount] = useState<string | null>(null);
-  // A pick the selected host does not list falls back to the default login.
-  const claudeAccount =
-    selectedNativeHarness === "claude-native" &&
-    pickedClaudeAccount !== null &&
-    hostClaudeAccounts.includes(pickedClaudeAccount)
-      ? pickedClaudeAccount
+  const claudeAccount = selectedNativeHarness === "claude-native" ? pickedClaudeAccount : null;
+  const hostHasClaudeAccounts = hostClaudeAccounts.length > 0 || claudeAccount !== null;
+  const claudeAccountError =
+    !sandboxSelected &&
+    claudeAccount !== null &&
+    harnessWarningHost?.claude_accounts?.[claudeAccount] !== true
+      ? `Claude account '${claudeAccount}' is unavailable on ${harnessWarningHost?.name ?? "this machine"}. Choose an available account to continue.`
       : null;
   // Probe only the selected, available harness. Older hosts without readiness
   // metadata remain eligible, matching the picker's setup warnings.
@@ -4045,6 +4045,7 @@ export function NewChatLandingScreen() {
       : undefined;
   const selectClaudeAccount = (account: string | null) => {
     if (account === claudeAccount) return;
+    agentExplicitlySelectedRef.current = true;
     setPickedClaudeAccount(account);
     selectPickerModel(MODEL_SELECT_DEFAULT);
   };
@@ -4053,7 +4054,11 @@ export function NewChatLandingScreen() {
       ? {
           testId: "new-chat-landing-agent-accounts",
           header: "Account",
-          choices: [null, ...hostClaudeAccounts].map((account) => {
+          choices: [
+            null,
+            ...new Set([...hostClaudeAccounts, ...(claudeAccount !== null ? [claudeAccount] : [])]),
+          ].map((account) => {
+            const missing = account !== null && !hostClaudeAccounts.includes(account);
             const signedOut =
               account !== null && harnessWarningHost?.claude_accounts?.[account] !== true;
             return {
@@ -4067,7 +4072,7 @@ export function NewChatLandingScreen() {
                       className="border-amber-300 bg-amber-50 text-sm text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-400"
                       data-testid={`new-chat-landing-account-warning-${account}`}
                     >
-                      Signed out
+                      {missing ? "Unavailable" : "Signed out"}
                     </Badge>
                   )}
                 </span>
@@ -5242,6 +5247,7 @@ export function NewChatLandingScreen() {
     (message.trim().length > 0 || files.length > 0) &&
     !mcpAuthorizing &&
     mcpSelectionError === null &&
+    claudeAccountError === null &&
     !pickerLoading &&
     !workspaceStartLoading &&
     !worktreeRequestPending &&
@@ -5255,29 +5261,31 @@ export function NewChatLandingScreen() {
   // Name the next missing input in the submit tooltip.
   const submitDisabledReason = canSubmit
     ? null
-    : mcpAuthorizing || mcpSelectionError
-      ? (mcpSelectionError ?? "Finish signing in to the MCP service…")
-      : pendingSkillCompletion
-        ? "Loading skills…"
-        : pickerLoading || workspaceStartLoading || worktreeRequestPending
-          ? "Loading session configuration…"
-          : pickerSelectionError || sandboxCatalogError
-            ? (pickerSelectionError ?? sandboxCatalogError)
-            : sandboxSelected && sandboxRepoOverCap
-              ? `This sandbox provider clones at most ${maxSandboxRepos} ${
-                  maxSandboxRepos === 1 ? "repository" : "repositories"
-                } — remove the extras`
-              : sandboxSelected && !sandboxRepoValid
-                ? "Please enter a valid repository URL"
-                : !sandboxSelected && selectedHostId && selectedHost?.status !== "online"
-                  ? "Selected host is unavailable. Reconnect it or choose another host."
-                  : !sandboxSelected && (!selectedHostId || !workspaceValid)
-                    ? "Please choose a host and working directory"
-                    : configuredAgentUnavailable && selectedAgent == null
-                      ? "This project's configured agent is unavailable — pick an agent to continue"
-                      : message.trim().length === 0 && files.length === 0
-                        ? "Enter a message to get started"
-                        : null;
+    : claudeAccountError !== null
+      ? claudeAccountError
+      : mcpAuthorizing || mcpSelectionError
+        ? (mcpSelectionError ?? "Finish signing in to the MCP service…")
+        : pendingSkillCompletion
+          ? "Loading skills…"
+          : pickerLoading || workspaceStartLoading || worktreeRequestPending
+            ? "Loading session configuration…"
+            : pickerSelectionError || sandboxCatalogError
+              ? (pickerSelectionError ?? sandboxCatalogError)
+              : sandboxSelected && sandboxRepoOverCap
+                ? `This sandbox provider clones at most ${maxSandboxRepos} ${
+                    maxSandboxRepos === 1 ? "repository" : "repositories"
+                  } — remove the extras`
+                : sandboxSelected && !sandboxRepoValid
+                  ? "Please enter a valid repository URL"
+                  : !sandboxSelected && selectedHostId && selectedHost?.status !== "online"
+                    ? "Selected host is unavailable. Reconnect it or choose another host."
+                    : !sandboxSelected && (!selectedHostId || !workspaceValid)
+                      ? "Please choose a host and working directory"
+                      : configuredAgentUnavailable && selectedAgent == null
+                        ? "This project's configured agent is unavailable — pick an agent to continue"
+                        : message.trim().length === 0 && files.length === 0
+                          ? "Enter a message to get started"
+                          : null;
   useLayoutEffect(() => {
     if (submitDisabledReason !== null) return;
     setSubmitTooltipState("closed");
@@ -7547,7 +7555,16 @@ export function NewChatLandingScreen() {
               launch, so submitting surfaces a specific error if it
               really can't run. Normal-flow directly under the composer
               (like the createError line below) so it reads as part of it. */}
-          {selectedAgentUnconfigured && (
+          {claudeAccountError && (
+            <p
+              role="alert"
+              className="pl-2 text-xs text-amber-600 dark:text-amber-500"
+              data-testid="new-chat-landing-account-error"
+            >
+              {claudeAccountError}
+            </p>
+          )}
+          {selectedAgentUnconfigured && !claudeAccountError && (
             <HarnessSetupNotice
               agentName={selectedAgent?.display_name}
               hostName={harnessWarningHost?.name}
