@@ -1122,6 +1122,49 @@
         "title": "ChildSessionSummary",
         "type": "object"
       },
+      "ClaudeAccountQuota": {
+        "additionalProperties": false,
+        "properties": {
+          "account": {
+            "title": "Account",
+            "type": "string"
+          },
+          "five_hour": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/QuotaWindow"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "seven_day": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/QuotaWindow"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "default": "unavailable",
+            "enum": [
+              "available",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account"
+        ],
+        "title": "ClaudeAccountQuota",
+        "type": "object"
+      },
       "ClearCodexGoalResponse": {
         "description": "Response body for `DELETE /v1/sessions/{id}/codex_goal`.",
         "properties": {
@@ -3207,6 +3250,32 @@
         "title": "HeartbeatEvent",
         "type": "object"
       },
+      "HostClaudeQuota": {
+        "properties": {
+          "host_id": {
+            "title": "Host Id",
+            "type": "string"
+          },
+          "host_name": {
+            "title": "Host Name",
+            "type": "string"
+          },
+          "quotas": {
+            "items": {
+              "$ref": "#/components/schemas/ClaudeAccountQuota"
+            },
+            "title": "Quotas",
+            "type": "array"
+          }
+        },
+        "required": [
+          "host_id",
+          "host_name",
+          "quotas"
+        ],
+        "title": "HostClaudeQuota",
+        "type": "object"
+      },
       "HostModelOptionsResponse": {
         "description": "Pre-launch model choices resolved by a host harness.\n\n`error` carries the host's reason for an empty catalog \u2014 a probe that\nfailed on the host is not a transport failure, so the request still\nsucceeds and the picker can say WHY it is empty instead of a generic\n\"Models unavailable\".",
         "properties": {
@@ -5101,6 +5170,29 @@
           "response"
         ],
         "title": "QueuedEvent",
+        "type": "object"
+      },
+      "QuotaWindow": {
+        "additionalProperties": false,
+        "properties": {
+          "percent_used": {
+            "format": "double",
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Percent Used",
+            "type": "number"
+          },
+          "resets_at": {
+            "format": "date-time",
+            "title": "Resets At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "percent_used",
+          "resets_at"
+        ],
+        "title": "QuotaWindow",
         "type": "object"
       },
       "ReadStatePutRequest": {
@@ -8828,6 +8920,22 @@
       "SessionUsage": {
         "description": "One session's rolled-up LLM spend for the `GET /v1/usage` report.\n\n`cost_usd` is the subtree total \u2014 the session plus every sub-agent it\nspawned \u2014 read from `session_usage` via\n`omnigent.runtime.policies.builder.load_session_usage`. It is the\nauthoritative session figure (the same value the web session sidebar\nshows as \"Session cost\" and the daily rollup records).\n\n`models` is the per-model cost breakdown, mirroring the web session\nsidebar's per-model list. Deliberately **not guaranteed to sum to\n`cost_usd`**: native harnesses report a single cumulative session\ntotal and the server attributes it to the currently-active model, so on\na session that switched models mid-run each model's bucket is a snapshot\nof the running total rather than that model's own spend. The header\n`cost_usd` stays authoritative; the per-model values are shown\nfaithfully as recorded (same convention as the web UI).",
         "properties": {
+          "account": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account"
+          },
+          "account_visible": {
+            "default": false,
+            "title": "Account Visible",
+            "type": "boolean"
+          },
           "agent_name": {
             "anyOf": [
               {
@@ -10234,6 +10342,13 @@
       "UsageReport": {
         "description": "Aggregated LLM usage for the calling user, powering `omni usage`.\n\nThe cost summary is sourced from the per-user daily-cost rollup\n(`user_daily_cost`), which attributes spend to the UTC calendar day it\noccurred on. Windows are therefore calendar-day buckets summed back from\ntoday \u2014 `cost_today` / `cost_last_7d` / `cost_last_30d` \u2014 not\nrolling wall-clock hours, so a weeks-old session touched today is not\ncounted wholly in \"today\".\n\nThe `sessions` list is a separate detail view built from each session's\ncumulative `session_usage` (newest activity first), so the summary and\nthe per-session list come from different sources and are not guaranteed\nto tie out to the cent (the summary counts every priced turn ever\nrecorded for the user; the list only covers the user's currently-listed\ntop-level sessions).",
         "properties": {
+          "claude_quotas": {
+            "items": {
+              "$ref": "#/components/schemas/HostClaudeQuota"
+            },
+            "title": "Claude Quotas",
+            "type": "array"
+          },
           "cost_last_30d": {
             "default": 0.0,
             "description": "Total spend over the last 30 UTC days (incl. today).",
@@ -11218,6 +11333,55 @@
         ]
       }
     },
+    "/v1/hosts/{host_id}/claude-quotas": {
+      "get": {
+        "operationId": "get_quotas_v1_hosts__host_id__claude_quotas_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "host_id",
+            "required": true,
+            "schema": {
+              "title": "Host Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "items": {
+                      "$ref": "#/components/schemas/ClaudeAccountQuota"
+                    },
+                    "type": "array"
+                  },
+                  "title": "Response Get Quotas V1 Hosts  Host Id  Claude Quotas Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Quotas",
+        "tags": [
+          "hosts"
+        ]
+      }
+    },
     "/v1/hosts/{host_id}/credentials/detected": {
       "get": {
         "description": "List adoptable credentials already present on a connected host.\n\nBacks the setup dialog's \"adopt an existing credential\" affordance: the\nhost reports which UI-auth-family credentials it already has as\nNON-secret descriptors (family + source label + env var name), so the UI\ncan offer a one-click \"Use it\". Owner-scoped and flag-gated like the\ncredential-write route (404 when disabled). Never returns a secret value.\n\n**Returns:** `{\"object\": \"detected_credentials\", \"credentials\": [...]}`.\n\n**Raises**\n\n- `HTTPException` \u2014 404 when disabled or host unknown, 403 when not the owner, 409 when offline or the host daemon is too old to detect credentials, 502/504 on host failure/timeout.",
@@ -11946,6 +12110,22 @@
             "schema": {
               "title": "Host Id",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "session_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Session Id"
             }
           }
         ],

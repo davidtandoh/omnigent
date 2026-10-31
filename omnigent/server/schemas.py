@@ -11,7 +11,6 @@ delineator further down:
 
 from __future__ import annotations
 
-
 import re
 from typing import Annotated, Any, Literal, Self, get_args
 
@@ -27,12 +26,12 @@ from pydantic import (
 )
 from pydantic.json_schema import SkipJsonSchema
 
-from omnigent.host.claude_quotas import ClaudeAccountQuota
 from omnigent.entities import (
     DEFAULT_GENERATED_TITLE_MAX_CHARS,
     USER_SESSION_TITLE_MAX_CHARS,
     ConversationItem,
 )
+from omnigent.host.claude_quotas import ClaudeAccountQuota
 from omnigent.inner.native_attachments import reject_authored_framework_notices
 
 # ── Shared ──────────────────────────────────────────────────────

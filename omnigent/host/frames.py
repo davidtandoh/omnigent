@@ -19,7 +19,6 @@ see.
 
 from __future__ import annotations
 
-
 import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -30,8 +29,8 @@ from urllib.parse import urlsplit
 
 from pydantic import ValidationError
 
-from omnigent.host.claude_quotas import ClaudeAccountQuota
 from omnigent.harness_availability import HarnessAvailability, is_harness_availability
+from omnigent.host.claude_quotas import ClaudeAccountQuota
 from omnigent.host.harness_startup import HarnessStartup
 from omnigent.inner.native_attachments import (
     CAP_FILESYSTEM_ATTACHMENT_DELIVERY,

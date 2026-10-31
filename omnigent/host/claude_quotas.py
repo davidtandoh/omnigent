@@ -12,7 +12,6 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-
 QUOTA_TIMEOUT_SECONDS = 3.0
 
 

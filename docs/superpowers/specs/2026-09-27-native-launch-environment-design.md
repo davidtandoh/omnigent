@@ -90,23 +90,21 @@ Claude and reads them from each wrapped agent's tool shell.
 
 ## Account usage and configuration readers
 
-`omnigent usage` includes an Account column in the per-session table.
+See the [native launch usage](../../../README.md#2-start-your-first-agent)
+for account labels, quota output, and visibility rules.
 `GET /v1/usage` reads each session's recorded `session_overrides.account`.
-An empty account selects the default login. Only the session owner receives
-an extra account name; collaborators receive no account name.
-The summary continues to use the existing per-user daily cost rollup.
+Its `account_visible` field distinguishes a withheld account from the default
+login when `account` is null.
 
-The status-line wrapper, native skill discovery, and MCP inventory use
-`selected_claude_config_dir` to follow the runner's selected account folder.
-The explicit runner selection takes precedence over the ambient environment.
-Account folder paths stay on the host.
+The status-line wrapper and runner skill discovery use
+`selected_claude_config_dir`. The explicit runner selection takes precedence
+over the ambient environment.
 
 The host reads each Claude account's 5-hour and 7-day usage and reset times
 with the installed `quota-axi --provider claude --json --no-credential-refresh`,
-using that account's local `CLAUDE_CONFIG_DIR` and a short timeout. Usage and
-host status expose only the sanitized readings to the host owner. Missing tools,
-failed reads, or incomplete windows show unavailable. Session costs remain
-separate estimates.
+using that account's local `CLAUDE_CONFIG_DIR` and a three-second timeout per
+read. `GET /v1/hosts/{host_id}/claude-quotas` returns a `quotas` object field;
+`GET /v1/usage` groups these readings by host in `claude_quotas`.
 
 For session skill and MCP discovery, the server authorizes the host and session
 owner before sending the recorded account name. The host resolves the folder

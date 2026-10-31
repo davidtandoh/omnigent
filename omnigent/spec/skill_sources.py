@@ -126,7 +126,7 @@ def skill_source_context_from_env(
     bundle_dir: Path | None = None,
     launch_env: Mapping[str, str] | None = None,
 ) -> SkillSourceContext:
-    """Use the same ambient harness configuration for host and runner discovery."""
+    """Resolve harness configuration from the selected launch environment."""
     from omnigent.harnesses.claude_native.account import selected_claude_config_dir
 
     configured_claude_dir = selected_claude_config_dir(launch_env)

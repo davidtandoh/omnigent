@@ -10,20 +10,19 @@ from fastapi import APIRouter, Request
 
 from omnigent._wrapper_labels import WRAPPER_LABEL_KEY
 from omnigent.entities import Conversation
-from omnigent.stores.host_store import Host
 from omnigent.errors import restart_on_stale_cursor
 from omnigent.runtime.policies.builder import load_session_usage_and_tree
 from omnigent.server.auth import RESERVED_USER_LOCAL, AuthProvider
 from omnigent.server.feature_flags import Feature, FeatureFlags, resolve_feature_flags
+from omnigent.server.host_registry import HostRegistry
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._sessions.helpers import (
     _resolve_harness_impl,
     _resolve_llm_model,
 )
-from omnigent.server.schemas import DailyCost, SessionUsage, UsageReport, HostClaudeQuota
-from omnigent.server.host_registry import HostRegistry
-from omnigent.stores.host_store import HostStore
+from omnigent.server.schemas import DailyCost, HostClaudeQuota, SessionUsage, UsageReport
 from omnigent.stores import ConversationStore
+from omnigent.stores.host_store import Host, HostStore
 
 # The daily rollup floor for an "all-time" sum: earlier than any real row, so
 # ``sum_daily_cost`` with this lower bound totals every recorded day.
@@ -279,8 +278,8 @@ def create_usage_router(
             include_page_details=flags.enabled(Feature.USAGE_PAGE),
         )
         if host_registry is not None and host_store is not None:
-            from omnigent.server.routes.claude_quotas import request_host_claude_quotas
             from omnigent.host.claude_quotas import ClaudeAccountQuota
+            from omnigent.server.routes.claude_quotas import request_host_claude_quotas
 
             hosts = await asyncio.to_thread(host_store.list_hosts, user_id or RESERVED_USER_LOCAL)
 

@@ -34,6 +34,7 @@ from omnigent.debug_logging import debug_event, set_current_user_id
 from omnigent.errors import ErrorCategory, ErrorImpact, ErrorPhase
 from omnigent.host.frames import (
     IMPORT_SESSION_MAX_CONNECTION_REASSEMBLED_CHARS,
+    HostClaudeQuotasResultFrame,
     HostConnectionErrorFrame,
     HostCreateDirResultFrame,
     HostCreateWorktreeResultFrame,
@@ -41,7 +42,6 @@ from omnigent.host.frames import (
     HostFsResultFrame,
     HostHarnessReadinessFrame,
     HostHarnessStartupResultFrame,
-    HostClaudeQuotasResultFrame,
     HostHelloFrame,
     HostImportedLocalSession,
     HostImportLocalDoneFrame,

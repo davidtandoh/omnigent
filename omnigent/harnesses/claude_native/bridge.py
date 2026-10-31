@@ -8652,9 +8652,9 @@ def read_user_status_line_command() -> str | None:
     pre-existing status bar (typically claude-hud), the wrapper chains
     to whatever they had configured globally.
 
-    :returns: The command string from
-        ``~/.claude/settings.json``'s ``statusLine.command``, or
-        ``None`` when no global statusLine is configured / readable.
+    :returns: The selected account's ``settings.json`` ``statusLine.command``,
+        or the default ``~/.claude/settings.json`` command when no account folder
+        is selected. Returns ``None`` when the setting is absent or unreadable.
     """
     try:
         from omnigent.harnesses.claude_native.account import selected_claude_config_dir

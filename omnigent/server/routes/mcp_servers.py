@@ -10,8 +10,8 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from omnigent.host.frames import (
-    CAP_MCP_INVENTORY,
     CAP_ACCOUNT_INVENTORY,
+    CAP_MCP_INVENTORY,
     HostMcpServersFrame,
     HostMcpServersResultFrame,
     encode_host_frame,
@@ -20,8 +20,8 @@ from omnigent.server.auth import AuthProvider
 from omnigent.server.host_registry import HostConnection, HostRegistry
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._host_launch import host_absent_error, resolve_host_owner
-from omnigent.stores.host_store import HostStore
 from omnigent.stores import ConversationStore
+from omnigent.stores.host_store import HostStore
 
 _MCP_SERVERS_TIMEOUT_S = 15.0
 

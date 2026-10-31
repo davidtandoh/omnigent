@@ -40,8 +40,8 @@ from omnigent.db.account_authority import (
 from omnigent.db.db_models import InvalidUuidError, current_workspace_id, uuid_to_bytes
 from omnigent.host.frames import (
     CAP_CODEX_SIDE_CHAT,
-    HostHelloFrame,
     HostClaudeQuotasResultFrame,
+    HostHelloFrame,
     HostMcpServersResultFrame,
     HostMcpToolsResultFrame,
     HostPluginsResultFrame,
