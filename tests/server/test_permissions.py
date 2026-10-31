@@ -39,6 +39,7 @@ from omnigent.server.permissions import (
     check_session_access,
     resolved_allows,
     resolved_level,
+    session_account_for_fork,
     session_account_for_viewer,
 )
 
@@ -974,4 +975,7 @@ def test_session_account_requires_owner_level(level: int) -> None:
     permissions.add_grant("viewer", conversation.id, level)
     assert session_account_for_viewer("viewer", conversation, permissions, conversations) == (
         "work" if level == LEVEL_OWNER else None
+    )
+    assert session_account_for_fork("viewer", conversation, permissions, conversations) == (
+        "work" if level >= LEVEL_MANAGE else None
     )

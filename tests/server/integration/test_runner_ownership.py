@@ -536,7 +536,7 @@ async def test_child_create_keeps_account_private_from_parent_readers(
         headers={"X-Forwarded-Email": BOB},
     )
     assert response.status_code == 201, response.text
-    assert response.json()["account"] == ("private-work" if level == LEVEL_MANAGE else None)
+    assert response.json()["account"] is None
     child = SqlAlchemyConversationStore(db_uri).get_conversation(response.json()["id"])
     assert child is not None and child.account == "private-work"
 
@@ -553,7 +553,7 @@ async def test_child_create_keeps_account_private_from_parent_readers(
             headers={"X-Forwarded-Email": BOB},
         )
         assert snapshot.status_code == 200, snapshot.text
-        assert snapshot.json()["account"] == expected_account
+        assert snapshot.json()["account"] is None
         fork = await auth_client.post(
             f"/v1/sessions/{session_id}/fork",
             json={},

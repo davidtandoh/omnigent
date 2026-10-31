@@ -87,6 +87,25 @@ def session_account_for_viewer(
     return None
 
 
+def session_account_for_fork(
+    user_id: str | None,
+    conversation: Conversation,
+    permission_store: PermissionStore | None,
+    conversation_store: ConversationStore,
+) -> str | None:
+    """Inherit the source account only for managers of its top-level session."""
+    if permission_store is None or check_session_access(
+        user_id,
+        conversation.id,
+        LEVEL_MANAGE,
+        permission_store,
+        conversation_store,
+        conversation=conversation,
+    ):
+        return conversation.account
+    return None
+
+
 def resolved_allows(access: ResolvedAccess, required_level: int) -> bool:
     """Whether *access* grants *required_level*, ignoring sub-agent delegation.
 

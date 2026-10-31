@@ -2156,6 +2156,35 @@ describe("NewChatLandingScreen cached picker preview", () => {
     expect(readNewChatPickerOptionsCache(snapshot.key)?.models.claude).toEqual(cachedModels);
   });
 
+  it("does not restore an unscoped Claude catalog for a host with extra accounts", () => {
+    mockModelQueries(() => ({
+      ...SUCCESS_QUERY_STATE,
+      data: [{ id: "work-model", displayName: "Work model" }],
+    }));
+    const first = renderLanding();
+    const key = getNewChatPickerCacheKey("");
+    expect(readNewChatPickerOptionsCache(key)?.models.claude?.[0].id).toBe("work-model");
+    first.unmount();
+    resetLandingDraft();
+
+    mockHosts([
+      {
+        ...host("online"),
+        configured_harnesses: { "claude-native": "needs-auth" },
+        claude_accounts: { default: "needs-auth", work: true },
+      },
+    ]);
+    mockModelQueries(() => ({ ...SUCCESS_QUERY_STATE, data: undefined }));
+    renderLanding();
+    openAgentModels("a1");
+    expect(screen.getByTestId("new-chat-landing-account-default")).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    expect(screen.queryByTestId("new-chat-landing-agent-model-work-model")).toBeNull();
+    expect(readNewChatPickerOptionsCache(key)?.models.claude).toBeUndefined();
+  });
+
   it("keeps the named preview when a populated catalog becomes offline", () => {
     const snapshot = seedResolvedPicker();
     mockHosts([host("offline")]);

@@ -3274,7 +3274,7 @@ export function NewChatLandingScreen() {
     "claude-native",
     hostClaudeModelOptions,
     hostClaudeModelsLoading,
-    cachedHostModels?.claude,
+    hostHasClaudeAccounts ? undefined : cachedHostModels?.claude,
   );
   const availableCodexModels = availableHostModels(
     "codex-native",
@@ -3772,7 +3772,7 @@ export function NewChatLandingScreen() {
             sandboxSelected,
             model: pickedModel,
             models: {
-              claude: availableClaudeModels,
+              claude: hostHasClaudeAccounts ? undefined : availableClaudeModels,
               codex: availableCodexModels,
               pi: availablePiModels,
             },
@@ -3784,6 +3784,7 @@ export function NewChatLandingScreen() {
       selectedHostId,
       sandboxSelected,
       pickedModel,
+      hostHasClaudeAccounts,
       availableClaudeModels,
       availableCodexModels,
       availablePiModels,
