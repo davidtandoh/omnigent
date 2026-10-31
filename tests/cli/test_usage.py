@@ -167,9 +167,16 @@ def test_render_account_quota_windows(capsys):
                 "seven_day": {"percent_used": 80, "resets_at": "2026-11-07T01:00:00Z"},
             },
             {"account": "default", "status": "unavailable"},
+            {
+                "account": "spare",
+                "status": "stale",
+                "five_hour": {"percent_used": 55, "resets_at": "2026-11-01T01:00:00Z"},
+            },
         ],
     )
     output = capsys.readouterr().out
+    # A stale reading is labelled, never printed as a current percentage.
+    assert "spare" in output and "stale" in output and "55%" not in output
     assert "work" in output and "20%" in output and "80%" in output
     assert "2026-11-01T01:00:00Z" in output and "2026-11-07T01:00:00Z" in output
     assert "default" in output and "unavailable" in output

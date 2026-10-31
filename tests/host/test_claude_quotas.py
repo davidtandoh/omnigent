@@ -52,15 +52,23 @@ windows = [
       "resetsAt": "2026-11-01T01:00:00Z", "private": "secret"}}
     for key in ("five_hour", "seven_day")
 ]
-if mode == "missing":
-    windows.pop()
+windows.append({{"id": "model:claude-opus", "label": "Opus week", "kind": "model",
+                "percentUsed": 40, "resetsAt": "2026-11-02T01:00:00Z"}})
+windows.append({{"id": "model:share", "label": "Sonnet week", "kind": "model",
+                "percentUsed": 5, "resetsAt": "2026-11-02T01:00:00Z", "shareOf": "seven_day"}})
+if mode in ("missing", "stale"):
+    windows.pop(1)
 if mode == "invalid":
     windows[0]["percentUsed"] = -1
 if mode == "reset":
     windows[0]["resetsAt"] = "secret"
 print(json.dumps({{"providers": [{{
     "provider": "claude",
-    "state": {{"status": "auth_required" if mode == "auth" else "fresh"}},
+    "state": {{
+        "status": {{"auth": "auth_required", "stale": "stale"}}.get(mode, "fresh"),
+        "refreshedAt": "2026-10-31T08:00:00Z",
+        "error": "PRIVATE ERROR",
+    }},
     "windows": windows,
     "account": {{"email": "private@example.com"}},
 }}]}}))
@@ -78,10 +86,41 @@ def test_quota_windows_are_separate_and_sanitized(quota_host, monkeypatch):
     assert [q.five_hour.percent_used for q in readings] == [10, 70]
     assert [q.seven_day.percent_used for q in readings] == [10, 70]
     assert all(q.five_hour.resets_at.isoformat() == "2026-11-01T01:00:00+00:00" for q in readings)
+    assert all(q.status == "available" for q in readings)
+    assert all(q.observed_at.isoformat() == "2026-10-31T08:00:00+00:00" for q in readings)
+    # Independent model limits are kept; shares of another window are not.
+    assert [(w.model, w.percent_used) for w in readings[0].model_windows] == [("Opus", 40)]
     frame = HostClaudeQuotasResultFrame("request", readings)
     wire = encode_host_frame(frame)
     assert decode_host_frame(wire) == frame
     assert "private" not in wire and "secret" not in wire and str(quota_host.parent) not in wire
+    assert "PRIVATE" not in wire
+
+
+def test_stale_reading_keeps_surviving_windows_and_snapshot_time(quota_host, monkeypatch):
+    monkeypatch.setenv("FAKE_QUOTA_MODE", "stale")
+    readings = claude_quotas.read_claude_quotas()
+    assert [(q.status, q.five_hour is None, q.seven_day) for q in readings] == [
+        ("stale", False, None),
+        ("stale", False, None),
+    ]
+    assert readings[0].observed_at.isoformat() == "2026-10-31T08:00:00+00:00"
+
+
+_FIVE_HOUR = {"id": "five_hour", "percentUsed": 1, "resetsAt": "2026-11-01T01:00:00Z"}
+
+
+@pytest.mark.parametrize(
+    ("state", "windows"),
+    [
+        ({"status": "stale"}, [_FIVE_HOUR]),
+        ({"status": "stale", "refreshedAt": "2026-10-31T08:00:00Z"}, []),
+        ({"status": "error", "refreshedAt": "2026-10-31T08:00:00Z"}, []),
+    ],
+)
+def test_unprovable_snapshots_are_unavailable(state, windows):
+    report = {"providers": [{"provider": "claude", "state": state, "windows": windows}]}
+    assert claude_quotas.parse_quota_report("work", report).status == "unavailable"
 
 
 @pytest.mark.parametrize(
