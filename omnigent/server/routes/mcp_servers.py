@@ -85,11 +85,9 @@ def create_mcp_servers_router(
         )
         account = None
         if session_id is not None:
-            conv = (
-                await asyncio.to_thread(conversation_store.get_conversation, session_id)
-                if conversation_store
-                else None
-            )
+            if conversation_store is None:
+                raise HTTPException(404, "session not found on host")
+            conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
             if conv is None or conv.host_id != host_id:
                 raise HTTPException(404, "session not found on host")
             if (

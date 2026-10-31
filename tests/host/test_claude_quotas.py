@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
@@ -48,14 +47,23 @@ if mode == "json":
     print("PRIVATE OUTPUT")
     sys.exit(0)
 used = 70 if folder else 10
-windows = [{{"id": key, "percentUsed": used, "resetsAt": "2026-11-01T01:00:00Z", "private": "secret"}} for key in ("five_hour", "seven_day")]
+windows = [
+    {{"id": key, "percentUsed": used,
+      "resetsAt": "2026-11-01T01:00:00Z", "private": "secret"}}
+    for key in ("five_hour", "seven_day")
+]
 if mode == "missing":
     windows.pop()
 if mode == "invalid":
     windows[0]["percentUsed"] = -1
 if mode == "reset":
     windows[0]["resetsAt"] = "secret"
-print(json.dumps({{"providers": [{{"provider": "claude", "state": {{"status": "auth_required" if mode == "auth" else "fresh"}}, "windows": windows, "account": {{"email": "private@example.com"}}}}]}}))
+print(json.dumps({{"providers": [{{
+    "provider": "claude",
+    "state": {{"status": "auth_required" if mode == "auth" else "fresh"}},
+    "windows": windows,
+    "account": {{"email": "private@example.com"}},
+}}]}}))
 """)
     binary.chmod(0o700)
     monkeypatch.setenv("PATH", str(tmp_path))

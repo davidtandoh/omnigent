@@ -153,8 +153,9 @@ def test_render_usage_account_column(capsys):
 
 
 def test_render_account_quota_windows(capsys):
-    from omnigent.cli import _render_claude_quotas
     from rich.console import Console
+
+    from omnigent.cli import _render_claude_quotas
 
     _render_claude_quotas(
         Console(width=140),

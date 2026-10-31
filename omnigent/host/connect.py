@@ -5574,11 +5574,15 @@ class HostProcess:
             startup_result = await asyncio.to_thread(self._handle_harness_startup, frame)
             await self._send_text(ws, encode_host_frame(startup_result))
         elif isinstance(frame, HostClaudeQuotasFrame):
+            import yaml
+
+            from omnigent.errors import OmnigentError
             from omnigent.host.claude_quotas import read_claude_quotas
+            from omnigent.onboarding.claude_accounts import AccountUnavailableError
 
             try:
                 quotas = await asyncio.to_thread(read_claude_quotas)
-            except Exception:
+            except (OSError, ValueError, yaml.YAMLError, OmnigentError, AccountUnavailableError):
                 quotas = []
             await self._send_text(
                 ws, encode_host_frame(HostClaudeQuotasResultFrame(frame.request_id, quotas))

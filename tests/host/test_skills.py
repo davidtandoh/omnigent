@@ -263,6 +263,6 @@ def test_session_account_catalog_is_resolved_and_cached_separately(tmp_path, mon
     assert [s["name"] for s in discovery.discover(selected, tmp_path)] == ["work-only"]
     assert [s["name"] for s in discovery.discover(frame, tmp_path)] == ["default-only"]
     assert [s["name"] for s in discovery.discover(selected, tmp_path)] == ["work-only"]
-    monkeypatch.setattr("omnigent.config.load_global_config", lambda: {})
+    monkeypatch.setattr("omnigent.config.load_global_config", dict)
     with pytest.raises(RuntimeError):
         discovery.discover(selected, tmp_path)

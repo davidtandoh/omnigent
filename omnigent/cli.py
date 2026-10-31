@@ -11015,7 +11015,7 @@ def _echo_daemon_payloads(payloads: list[_HostPayload]) -> None:
             )
             console.print(f"  [red]error={_host_markup(message)}[/red]")
         if isinstance(payload.get("claude_quotas"), list):
-            _render_claude_quotas(console, payload["claude_quotas"])
+            _render_claude_quotas(console, cast(list[dict[str, Any]], payload["claude_quotas"]))
         _add_host_payload_sessions_table(console, payload)
 
 
