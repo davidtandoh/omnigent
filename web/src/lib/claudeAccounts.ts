@@ -113,7 +113,7 @@ export function accountQuotaView(
   return {
     state: quota.status === "stale" || ageMs > CLAUDE_QUOTA_STALE_AFTER_MS ? "stale" : "current",
     ageText: age === "now" ? "Read just now" : `Read ${age} ago`,
-    windows: windows.flatMap(([label, window]) => {
+    windows: windows.flatMap<QuotaWindowView>(([label, window]) => {
       if (!window) return [];
       const resetMs = Date.parse(window.resets_at);
       if (!Number.isFinite(resetMs)) return [];
