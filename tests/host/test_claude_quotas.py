@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import time
 from pathlib import Path
@@ -86,7 +87,7 @@ print(json.dumps({{"providers": [{{
 def test_quota_windows_are_separate_and_sanitized(quota_host, monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "private-token")
     monkeypatch.setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", "other-account")
-    readings = claude_quotas.read_claude_quotas()
+    readings = asyncio.run(claude_quotas.read_claude_quotas())
     assert [q.account for q in readings] == ["default", "work"]
     assert [q.five_hour.percent_used for q in readings] == [10, 70]
     assert [q.seven_day.percent_used for q in readings] == [10, 70]
@@ -116,14 +117,14 @@ def test_slow_quota_readings_are_available(quota_host, monkeypatch):
     }
     monkeypatch.setattr("omnigent.config.load_global_config", lambda: config)
     started = time.monotonic()
-    readings = claude_quotas.read_claude_quotas()
+    readings = asyncio.run(claude_quotas.read_claude_quotas())
     assert [q.status for q in readings] == ["available"] * 5
     assert time.monotonic() - started < 7
 
 
 def test_stale_reading_keeps_surviving_windows_and_snapshot_time(quota_host, monkeypatch):
     monkeypatch.setenv("FAKE_QUOTA_MODE", "stale")
-    readings = claude_quotas.read_claude_quotas()
+    readings = asyncio.run(claude_quotas.read_claude_quotas())
     assert [(q.status, q.five_hour is None, q.seven_day) for q in readings] == [
         ("stale", False, None),
         ("stale", False, None),
@@ -156,6 +157,7 @@ def test_quota_failures_are_unavailable(quota_host, monkeypatch, capsys, mode):
     if mode == "absent":
         quota_host.unlink()
     assert [
-        (q.account, q.status, q.five_hour, q.seven_day) for q in claude_quotas.read_claude_quotas()
+        (q.account, q.status, q.five_hour, q.seven_day)
+        for q in asyncio.run(claude_quotas.read_claude_quotas())
     ] == [("default", "unavailable", None, None), ("work", "unavailable", None, None)]
     assert capsys.readouterr().out == ""

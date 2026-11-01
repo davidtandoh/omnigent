@@ -5667,7 +5667,7 @@ class HostProcess:
             from omnigent.onboarding.claude_accounts import AccountUnavailableError
 
             try:
-                quotas = await asyncio.to_thread(read_claude_quotas)
+                quotas = await read_claude_quotas()
             except (OSError, ValueError, yaml.YAMLError, OmnigentError, AccountUnavailableError):
                 quotas = []
             await self._send_text(

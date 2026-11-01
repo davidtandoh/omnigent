@@ -1124,7 +1124,7 @@
       },
       "ClaudeAccountQuota": {
         "additionalProperties": false,
-        "description": "One account's quota snapshot; never carries identity or credentials.\n\n`stale` means quota-axi served its last successful reading because a\nfresh read failed. `observed_at` is when the vendor reported the\nwindows, so readers can show the snapshot age.",
+        "description": "One account's quota snapshot; never carries identity or credentials.\n\n`stale` means the reader served its last successful reading because a\nfresh read failed. `observed_at` is when the vendor reported the\nwindows, so readers can show the snapshot age.",
         "properties": {
           "account": {
             "title": "Account",
