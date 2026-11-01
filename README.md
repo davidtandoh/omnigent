@@ -430,11 +430,13 @@ host. The host reads the key on each request, so a change needs no restart.
   concurrent requests share one probe. After a failed probe, the host serves
   the last good reading as `stale` and waits 5 minutes before it probes that
   account again. `get_usage` is experimental in the Claude CLI; an unknown
-  answer shows `unavailable`, not a wrong number.
+  answer follows the same failure handling. Without a last good reading,
+  a failed probe shows `unavailable`.
 
-The `native` reader is temporary: after it is verified on every account, it
-replaces `quota-axi` and the key is removed. To check the native reader by
-hand, run `python -m omnigent.host.usage_limits` on the host. The command
+The reader selection key is temporary: after the native reader is verified on
+every account, the cutover PR removes both the key and the `quota-axi` path.
+To check the native reader by hand, run
+`python -m omnigent.host.usage_limits` on the host. The command
 prints sanitized readings for every Claude account and for Codex.
 
 Every host quota request also asks Codex natively with `codex app-server` and
@@ -444,6 +446,9 @@ The provider config currently supports no additional Codex homes. Claude and
 Codex reads run in parallel. Codex uses a 15-second probe deadline and the same
 5-minute cache, single-flight, stale readings and failure back-off as native
 Claude. Missing CLIs produce unavailable readings, or stale cached readings.
+Codex classifies windows by their reported duration and omits windows without
+a positive integer duration. Its individual monthly credit limit has an
+explicit monthly kind and does not require a duration.
 The tunnel result and `GET /v1/hosts/{host_id}/claude-quotas` expose Codex as
 provider-neutral `usage` snapshots beside the unchanged Claude `quotas` list.
 Replies from older hosts omit `usage` and decode as an empty list. The web view
