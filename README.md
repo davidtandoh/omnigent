@@ -425,9 +425,15 @@ host. The host reads the key on each request, so a change needs no restart.
   request, once per account folder. The CLI uses its own login and refreshes
   its own token. Omnigent never reads a token or the Keychain, and no new
   Keychain approval is needed. The probe sends no prompt and runs with no
-  tools, MCP servers, hooks, settings files or saved session. Each probe has a
-  30-second deadline. The host keeps each account's reading for 5 minutes, and
-  concurrent requests share one probe. After a failed probe, the host serves
+  tools, MCP servers, hooks, settings files or saved session. The probe
+  removes `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, because with that
+  variable the CLI only replays its own cached usage, which can be missing or
+  old. Each probe has a 30-second deadline, including its graceful exit wait.
+  The probe runs in its own process group. When the probe ends, the host kills
+  that group and waits up to 1 additional second to reap the CLI process.
+  Helpers that keep the output pipes open cannot extend these waits. The host
+  keeps each account's reading for 5 minutes, and concurrent requests share
+  one probe. After a failed probe, the host serves
   the last good reading as `stale` and waits 5 minutes before it probes that
   account again. `get_usage` is experimental in the Claude CLI; an unknown
   answer follows the same failure handling. Without a last good reading,
@@ -443,9 +449,10 @@ Every host quota request also asks Codex natively with `codex app-server` and
 `account/rateLimits/read`, regardless of `quota_reader`. Codex uses the host's
 `CODEX_HOME`, or the CLI default home when unset, with the local label `default`.
 The provider config currently supports no additional Codex homes. Claude and
-Codex reads run in parallel. Codex uses a 15-second probe deadline and the same
-5-minute cache, single-flight, stale readings and failure back-off as native
-Claude. Missing CLIs produce unavailable readings, or stale cached readings.
+Codex reads run in parallel. Codex uses a 15-second probe deadline with the same
+shutdown bounds as native Claude. Codex also uses the same 5-minute cache,
+single-flight, stale readings and failure back-off as native Claude. Missing
+CLIs produce unavailable readings, or stale cached readings.
 Codex classifies windows by their reported duration and omits windows without
 a positive integer duration. Its individual monthly credit limit has an
 explicit monthly kind and does not require a duration.

@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+import psutil
 import pytest
 
 from omnigent.host import claude_quotas, usage_limits
@@ -111,6 +114,8 @@ def probe_host(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.delenv("CODEX_HOME", raising=False)
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "private-token")
+    # An inherited kill-switch would make the CLI replay its cache instead of fetching.
+    monkeypatch.setenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
     config: dict[str, object] = {
         "providers": {
             "claude-work": {
@@ -124,16 +129,25 @@ def probe_host(tmp_path: Path, monkeypatch):
     log = tmp_path / "calls.log"
     claude = tmp_path / "claude"
     claude.write_text(f"""#!{sys.executable}
-import json, os, sys, time
+import json, os, subprocess, sys, time
 assert tuple(sys.argv[1:]) == {usage_limits.CLAUDE_PROBE_ARGS!r}, sys.argv
 assert os.environ["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false"
-assert os.environ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+assert "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" not in os.environ
+helper_pid_file = os.environ.get("FAKE_HELPER_PID_FILE")
+if helper_pid_file:
+    # A launcher-style helper inherits stdout and outlives the CLI.
+    helper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    with open(helper_pid_file, "w") as pid_file:
+        pid_file.write(str(helper.pid))
 folder = os.environ.get("CLAUDE_CONFIG_DIR")
 if folder:
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in os.environ
 with open({str(log)!r}, "a") as log:
     log.write(f"claude {{folder or 'default'}}\\n")
 mode = os.environ.get("FAKE_USAGE_MODE")
+if mode == "late":
+    with open(os.environ["FAKE_CLI_PID_FILE"], "w") as pid_file:
+        pid_file.write(str(os.getpid()))
 if mode == "exit":
     sys.exit(1)
 usage = json.load(open({str(FIXTURES / "claude_get_usage.json")!r}))
@@ -157,9 +171,13 @@ for line in sys.stdin:
     else:
         assert request == {{"subtype": "get_usage", "skip_behaviors": True}}
         body = usage
+        if mode == "late":
+            time.sleep(1.5)
     print(json.dumps({{"type": "control_response", "response": {{
         "subtype": "success", "request_id": message["request_id"], "response": body}}}}),
         flush=True)
+    if mode == "late" and request["subtype"] == "get_usage":
+        time.sleep(60)
 """)
     codex = tmp_path / "codex"
     codex.write_text(f"""#!{sys.executable}
@@ -213,6 +231,79 @@ def test_probe_failures_are_unavailable(probe_host, monkeypatch, mode):
         ("default", "unavailable", []),
         ("work", "unavailable", []),
     ]
+
+
+def test_claude_probe_lets_the_cli_fetch_usage(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+    for folder in (None, "/work"):
+        env = usage_limits.claude_probe_environment(folder)
+        assert "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" not in env
+        assert env["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false"
+
+
+def _process_stopped(pid: int, wait_seconds: float = 3.0) -> bool:
+    deadline = time.monotonic() + wait_seconds
+    while time.monotonic() < deadline:
+        try:
+            # A killed orphan can remain a zombie until its new parent reaps it.
+            if psutil.Process(pid).status() == psutil.STATUS_ZOMBIE:
+                return True
+        except psutil.NoSuchProcess:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+@pytest.mark.posix_only
+def test_process_stopped_recognizes_an_unreaped_child():
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        assert not _process_stopped(child.pid, wait_seconds=0.01)
+        child.kill()
+        deadline = time.monotonic() + 3.0
+        while psutil.Process(child.pid).status() != psutil.STATUS_ZOMBIE:
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert _process_stopped(child.pid, wait_seconds=0.01)
+    finally:
+        child.kill()
+        child.wait()
+
+
+@pytest.mark.parametrize(("mode", "status"), [("hang", None), (None, "available")])
+async def test_probe_stops_helpers_that_hold_its_output_open(
+    probe_host, monkeypatch, tmp_path, mode, status
+):
+    pid_file = tmp_path / "helper.pid"
+    monkeypatch.setenv("FAKE_HELPER_PID_FILE", str(pid_file))
+    if mode is not None:
+        monkeypatch.setenv("FAKE_USAGE_MODE", mode)
+    monkeypatch.setattr(usage_limits, "CLAUDE_PROBE_SECONDS", 2.0)
+    started = time.monotonic()
+    try:
+        reading = await usage_limits.probe_claude("work", None, str(tmp_path / "claude"))
+    except TimeoutError:
+        reading = None
+    elapsed = time.monotonic() - started
+    assert (reading.status if reading else None) == status
+    # Both paths finish well before the helper's own 60 s lifetime.
+    assert elapsed < usage_limits.CLAUDE_PROBE_SECONDS + usage_limits._REAP_SECONDS + 1.5
+    assert _process_stopped(int(pid_file.read_text()))
+
+
+async def test_late_answer_shares_the_probe_deadline_with_shutdown(
+    probe_host, monkeypatch, tmp_path
+):
+    pid_file = tmp_path / "cli.pid"
+    monkeypatch.setenv("FAKE_USAGE_MODE", "late")
+    monkeypatch.setenv("FAKE_CLI_PID_FILE", str(pid_file))
+    monkeypatch.setattr(usage_limits, "CLAUDE_PROBE_SECONDS", 2.0)
+    started = time.monotonic()
+    reading = await usage_limits.probe_claude("work", None, str(tmp_path / "claude"))
+    elapsed = time.monotonic() - started
+    assert reading.status == "available"
+    assert elapsed < usage_limits.CLAUDE_PROBE_SECONDS + usage_limits._REAP_SECONDS
+    assert _process_stopped(int(pid_file.read_text()))
 
 
 def test_missing_cli_is_unavailable(probe_host, monkeypatch, tmp_path):
