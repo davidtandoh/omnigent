@@ -14,6 +14,7 @@ import json
 import math
 import os
 import shutil
+import signal
 import tempfile
 import time
 from collections.abc import Awaitable, Callable, Mapping
@@ -27,6 +28,9 @@ CLAUDE_PROBE_SECONDS = 30.0
 CODEX_PROBE_SECONDS = 15.0
 CACHE_SECONDS = 300.0
 FAILURE_BACKOFF_SECONDS = 300.0
+# After an answer the CLI may exit on its own; then its process group is killed.
+_EXIT_GRACE_SECONDS = 5.0
+_REAP_SECONDS = 1.0
 MODEL_WINDOWS_MAX = 8
 LABEL_MAX_CHARS = 64
 # Initialize responses list commands and models; allow lines far above 64 KiB.
@@ -268,16 +272,23 @@ async def _write_line(proc: asyncio.subprocess.Process, message: dict[str, objec
 
 
 async def _stop(proc: asyncio.subprocess.Process, *, graceful: bool) -> None:
-    """After an answer, let the CLI exit on closed stdin; otherwise kill it."""
+    """After an answer, let the CLI exit on closed stdin; then kill its process group.
+
+    Helpers the CLI started can hold stdout open after it exits, so no wait
+    here depends on the pipes closing.
+    """
     if proc.stdin is not None and not proc.stdin.is_closing():
         proc.stdin.close()
-    if proc.returncode is None and graceful:
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(proc.wait(), timeout=5.0)
-    if proc.returncode is None:
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
-        await proc.wait()
+    if graceful:
+        # ``returncode`` is set when the CLI exits, even while helpers hold its pipes.
+        deadline = time.monotonic() + _EXIT_GRACE_SECONDS
+        while proc.returncode is None and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+    # The probe leads its own session, so its pid is also its process group id.
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    with contextlib.suppress(TimeoutError):
+        await asyncio.wait_for(proc.wait(), timeout=_REAP_SECONDS)
 
 
 async def _spawn(command: str, args: tuple[str, ...], env: Mapping[str, str], cwd: str):
@@ -290,6 +301,7 @@ async def _spawn(command: str, args: tuple[str, ...], env: Mapping[str, str], cw
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
         limit=_STREAM_LIMIT_BYTES,
+        start_new_session=True,
     )
 
 
@@ -324,9 +336,9 @@ def claude_probe_environment(config_dir: str | None) -> dict[str, str]:
         env["CLAUDE_CONFIG_DIR"] = config_dir
         env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
         env.pop("CLAUDE_SECURESTORAGE_CONFIG_DIR", None)
-    # Skipping start-up telemetry and update checks cuts initialize from ~15 s to ~5 s.
+    # With this kill-switch the CLI only replays its own usage cache, which can be missing or old.
+    env.pop("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", None)
     env.update(
-        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1",
         ENABLE_CLAUDEAI_MCP_SERVERS="false",
         CLAUDE_CODE_AUTO_CONNECT_IDE="0",
         CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL="1",

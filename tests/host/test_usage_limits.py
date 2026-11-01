@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -111,6 +113,8 @@ def probe_host(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.delenv("CODEX_HOME", raising=False)
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "private-token")
+    # An inherited kill-switch would make the CLI replay its cache instead of fetching.
+    monkeypatch.setenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
     config: dict[str, object] = {
         "providers": {
             "claude-work": {
@@ -124,10 +128,16 @@ def probe_host(tmp_path: Path, monkeypatch):
     log = tmp_path / "calls.log"
     claude = tmp_path / "claude"
     claude.write_text(f"""#!{sys.executable}
-import json, os, sys, time
+import json, os, subprocess, sys, time
 assert tuple(sys.argv[1:]) == {usage_limits.CLAUDE_PROBE_ARGS!r}, sys.argv
 assert os.environ["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false"
-assert os.environ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+assert "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" not in os.environ
+helper_pid_file = os.environ.get("FAKE_HELPER_PID_FILE")
+if helper_pid_file:
+    # A launcher-style helper inherits stdout and outlives the CLI.
+    helper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    with open(helper_pid_file, "w") as pid_file:
+        pid_file.write(str(helper.pid))
 folder = os.environ.get("CLAUDE_CONFIG_DIR")
 if folder:
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in os.environ
@@ -213,6 +223,46 @@ def test_probe_failures_are_unavailable(probe_host, monkeypatch, mode):
         ("default", "unavailable", []),
         ("work", "unavailable", []),
     ]
+
+
+def test_claude_probe_lets_the_cli_fetch_usage(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+    for folder in (None, "/work"):
+        env = usage_limits.claude_probe_environment(folder)
+        assert "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" not in env
+        assert env["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false"
+
+
+def _process_gone(pid: int, wait_seconds: float = 3.0) -> bool:
+    deadline = time.monotonic() + wait_seconds
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+@pytest.mark.parametrize(("mode", "status"), [("hang", None), (None, "available")])
+async def test_probe_stops_helpers_that_hold_its_output_open(
+    probe_host, monkeypatch, tmp_path, mode, status
+):
+    pid_file = tmp_path / "helper.pid"
+    monkeypatch.setenv("FAKE_HELPER_PID_FILE", str(pid_file))
+    if mode is not None:
+        monkeypatch.setenv("FAKE_USAGE_MODE", mode)
+    monkeypatch.setattr(usage_limits, "CLAUDE_PROBE_SECONDS", 2.0)
+    started = time.monotonic()
+    try:
+        reading = await usage_limits.probe_claude("work", None, str(tmp_path / "claude"))
+    except TimeoutError:
+        reading = None
+    elapsed = time.monotonic() - started
+    assert (reading.status if reading else None) == status
+    # Both paths finish well before the helper's own 60 s lifetime.
+    assert elapsed < usage_limits.CLAUDE_PROBE_SECONDS + usage_limits._REAP_SECONDS + 1.5
+    assert _process_gone(int(pid_file.read_text()))
 
 
 def test_missing_cli_is_unavailable(probe_host, monkeypatch, tmp_path):

@@ -425,8 +425,12 @@ host. The host reads the key on each request, so a change needs no restart.
   request, once per account folder. The CLI uses its own login and refreshes
   its own token. Omnigent never reads a token or the Keychain, and no new
   Keychain approval is needed. The probe sends no prompt and runs with no
-  tools, MCP servers, hooks, settings files or saved session. Each probe has a
-  30-second deadline. The host keeps each account's reading for 5 minutes, and
+  tools, MCP servers, hooks, settings files or saved session. The probe
+  removes `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, because with that
+  variable the CLI only replays its own cached usage, which can be missing or
+  old. Each probe has a 30-second deadline. The probe runs in its own process
+  group, and the host kills that group when the probe ends, so helper processes
+  that the CLI starts cannot extend the deadline. The host keeps each account's reading for 5 minutes, and
   concurrent requests share one probe. After a failed probe, the host serves
   the last good reading as `stale` and waits 5 minutes before it probes that
   account again. `get_usage` is experimental in the Claude CLI; an unknown
