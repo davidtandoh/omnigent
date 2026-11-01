@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
+import subprocess
 import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+import psutil
 import pytest
 
 from omnigent.host import claude_quotas, usage_limits
@@ -240,15 +241,33 @@ def test_claude_probe_lets_the_cli_fetch_usage(monkeypatch):
         assert env["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false"
 
 
-def _process_gone(pid: int, wait_seconds: float = 3.0) -> bool:
+def _process_stopped(pid: int, wait_seconds: float = 3.0) -> bool:
     deadline = time.monotonic() + wait_seconds
     while time.monotonic() < deadline:
         try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+            # A killed orphan can remain a zombie until its new parent reaps it.
+            if psutil.Process(pid).status() == psutil.STATUS_ZOMBIE:
+                return True
+        except psutil.NoSuchProcess:
             return True
         time.sleep(0.05)
     return False
+
+
+@pytest.mark.posix_only
+def test_process_stopped_recognizes_an_unreaped_child():
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        assert not _process_stopped(child.pid, wait_seconds=0.01)
+        child.kill()
+        deadline = time.monotonic() + 3.0
+        while psutil.Process(child.pid).status() != psutil.STATUS_ZOMBIE:
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert _process_stopped(child.pid, wait_seconds=0.01)
+    finally:
+        child.kill()
+        child.wait()
 
 
 @pytest.mark.parametrize(("mode", "status"), [("hang", None), (None, "available")])
@@ -269,7 +288,7 @@ async def test_probe_stops_helpers_that_hold_its_output_open(
     assert (reading.status if reading else None) == status
     # Both paths finish well before the helper's own 60 s lifetime.
     assert elapsed < usage_limits.CLAUDE_PROBE_SECONDS + usage_limits._REAP_SECONDS + 1.5
-    assert _process_gone(int(pid_file.read_text()))
+    assert _process_stopped(int(pid_file.read_text()))
 
 
 async def test_late_answer_shares_the_probe_deadline_with_shutdown(
@@ -284,7 +303,7 @@ async def test_late_answer_shares_the_probe_deadline_with_shutdown(
     elapsed = time.monotonic() - started
     assert reading.status == "available"
     assert elapsed < usage_limits.CLAUDE_PROBE_SECONDS + usage_limits._REAP_SECONDS
-    assert _process_gone(int(pid_file.read_text()))
+    assert _process_stopped(int(pid_file.read_text()))
 
 
 def test_missing_cli_is_unavailable(probe_host, monkeypatch, tmp_path):
