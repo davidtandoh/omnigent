@@ -12,7 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-QUOTA_TIMEOUT_SECONDS = 3.0
+QUOTA_TIMEOUT_SECONDS = 20.0
 MODEL_WINDOWS_MAX = 8
 MODEL_LABEL_MAX_CHARS = 64
 
@@ -133,7 +133,15 @@ def _read_quota(account: str, folder: str | None, command: str | None) -> Claude
         env.pop("CLAUDE_SECURESTORAGE_CONFIG_DIR", None)
     try:
         result = subprocess.run(
-            [command, "--provider", "claude", "--json", "--no-credential-refresh"],
+            [
+                command,
+                "--provider",
+                "claude",
+                "--json",
+                "--no-credential-refresh",
+                "--max-age",
+                "60s",
+            ],
             env=env,
             stdin=subprocess.DEVNULL,
             capture_output=True,
@@ -173,7 +181,8 @@ def read_claude_quotas() -> list[ClaudeAccountQuota]:
                 )["CLAUDE_CONFIG_DIR"]
     except (OSError, ValueError):
         return [ClaudeAccountQuota(account="default")]
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+    # Read all accounts together so batching cannot exceed the host reply deadline.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(folders)) as pool:
         futures = [
             pool.submit(_read_quota, account, folder, command)
             for account, folder in folders.items()

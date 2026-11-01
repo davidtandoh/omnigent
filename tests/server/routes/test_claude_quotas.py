@@ -115,3 +115,20 @@ async def test_old_host_and_lost_tunnel_return_unavailable(quota_app):
     registry.deregister(conn.host_id)
     assert (await task)[0].status == "unavailable"
     assert not conn.pending_claude_quotas
+
+
+async def test_slow_host_quota_reply_is_not_discarded(quota_app):
+    _, registry, conn = quota_app
+    task = asyncio.create_task(request_host_claude_quotas(registry, conn))
+    frame = decode_host_frame((await asyncio.wait_for(conn.outbound_queue.get(), 2)).data)
+    assert isinstance(frame, HostClaudeQuotasFrame)
+    await asyncio.sleep(21)
+    future = conn.pending_claude_quotas.get(frame.request_id)
+    if future is not None:
+        future.set_result(
+            HostClaudeQuotasResultFrame(
+                frame.request_id, [ClaudeAccountQuota(account="work", status="available")]
+            )
+        )
+    assert (await task)[0].status == "available"
+    assert not conn.pending_claude_quotas
