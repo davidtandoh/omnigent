@@ -333,7 +333,7 @@ async def _claude_control(
 
 def claude_probe_environment(config_dir: str | None) -> dict[str, str]:
     """Return the environment that selects one Claude login and no extras."""
-    env = dict(os.environ)
+    env = os.environ.copy()
     if config_dir is None:
         env.pop("CLAUDE_CONFIG_DIR", None)
     else:
@@ -389,7 +389,7 @@ async def probe_codex(account: str, codex_home: str | None, command: str | None)
     if command is None:
         raise ProbeError("codex not found")
     deadline = asyncio.get_running_loop().time() + CODEX_PROBE_SECONDS
-    env = dict(os.environ)
+    env = os.environ.copy()
     if codex_home is not None:
         env["CODEX_HOME"] = codex_home
     with tempfile.TemporaryDirectory(prefix="omnigent-usage-") as cwd:
