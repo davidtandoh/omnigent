@@ -144,6 +144,9 @@ if folder:
 with open({str(log)!r}, "a") as log:
     log.write(f"claude {{folder or 'default'}}\\n")
 mode = os.environ.get("FAKE_USAGE_MODE")
+if mode == "late":
+    with open(os.environ["FAKE_CLI_PID_FILE"], "w") as pid_file:
+        pid_file.write(str(os.getpid()))
 if mode == "exit":
     sys.exit(1)
 usage = json.load(open({str(FIXTURES / "claude_get_usage.json")!r}))
@@ -167,9 +170,13 @@ for line in sys.stdin:
     else:
         assert request == {{"subtype": "get_usage", "skip_behaviors": True}}
         body = usage
+        if mode == "late":
+            time.sleep(1.5)
     print(json.dumps({{"type": "control_response", "response": {{
         "subtype": "success", "request_id": message["request_id"], "response": body}}}}),
         flush=True)
+    if mode == "late" and request["subtype"] == "get_usage":
+        time.sleep(60)
 """)
     codex = tmp_path / "codex"
     codex.write_text(f"""#!{sys.executable}
@@ -262,6 +269,21 @@ async def test_probe_stops_helpers_that_hold_its_output_open(
     assert (reading.status if reading else None) == status
     # Both paths finish well before the helper's own 60 s lifetime.
     assert elapsed < usage_limits.CLAUDE_PROBE_SECONDS + usage_limits._REAP_SECONDS + 1.5
+    assert _process_gone(int(pid_file.read_text()))
+
+
+async def test_late_answer_shares_the_probe_deadline_with_shutdown(
+    probe_host, monkeypatch, tmp_path
+):
+    pid_file = tmp_path / "cli.pid"
+    monkeypatch.setenv("FAKE_USAGE_MODE", "late")
+    monkeypatch.setenv("FAKE_CLI_PID_FILE", str(pid_file))
+    monkeypatch.setattr(usage_limits, "CLAUDE_PROBE_SECONDS", 2.0)
+    started = time.monotonic()
+    reading = await usage_limits.probe_claude("work", None, str(tmp_path / "claude"))
+    elapsed = time.monotonic() - started
+    assert reading.status == "available"
+    assert elapsed < usage_limits.CLAUDE_PROBE_SECONDS + usage_limits._REAP_SECONDS
     assert _process_gone(int(pid_file.read_text()))
 
 

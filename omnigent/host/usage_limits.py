@@ -271,7 +271,7 @@ async def _write_line(proc: asyncio.subprocess.Process, message: dict[str, objec
     await proc.stdin.drain()
 
 
-async def _stop(proc: asyncio.subprocess.Process, *, graceful: bool) -> None:
+async def _stop(proc: asyncio.subprocess.Process, *, graceful: bool, deadline: float) -> None:
     """After an answer, let the CLI exit on closed stdin; then kill its process group.
 
     Helpers the CLI started can hold stdout open after it exits, so no wait
@@ -281,9 +281,13 @@ async def _stop(proc: asyncio.subprocess.Process, *, graceful: bool) -> None:
         proc.stdin.close()
     if graceful:
         # ``returncode`` is set when the CLI exits, even while helpers hold its pipes.
-        deadline = time.monotonic() + _EXIT_GRACE_SECONDS
-        while proc.returncode is None and time.monotonic() < deadline:
-            await asyncio.sleep(0.05)
+        loop = asyncio.get_running_loop()
+        exit_deadline = min(deadline, loop.time() + _EXIT_GRACE_SECONDS)
+        while proc.returncode is None:
+            remaining = exit_deadline - loop.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(0.05, remaining))
     # The probe leads its own session, so its pid is also its process group id.
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(proc.pid, signal.SIGKILL)
@@ -350,11 +354,12 @@ async def probe_claude(account: str, config_dir: str | None, command: str | None
     """Ask the Claude CLI for one login's usage without sending a prompt."""
     if command is None:
         raise ProbeError("claude not found")
+    deadline = asyncio.get_running_loop().time() + CLAUDE_PROBE_SECONDS
     with tempfile.TemporaryDirectory(prefix="omnigent-usage-") as cwd:
         proc = await _spawn(command, CLAUDE_PROBE_ARGS, claude_probe_environment(config_dir), cwd)
         answered = False
         try:
-            async with asyncio.timeout(CLAUDE_PROBE_SECONDS):
+            async with asyncio.timeout_at(deadline):
                 await _claude_control(proc, "usage_init", {"subtype": "initialize", "hooks": None})
                 observed_at = datetime.now(UTC)
                 response = await _claude_control(
@@ -362,7 +367,7 @@ async def probe_claude(account: str, config_dir: str | None, command: str | None
                 )
             answered = True
         finally:
-            await _stop(proc, graceful=answered)
+            await _stop(proc, graceful=answered, deadline=deadline)
     return normalize_claude_usage(account, response, observed_at)
 
 
@@ -383,6 +388,7 @@ async def probe_codex(account: str, codex_home: str | None, command: str | None)
     """Ask ``codex app-server`` for one home's rate limits."""
     if command is None:
         raise ProbeError("codex not found")
+    deadline = asyncio.get_running_loop().time() + CODEX_PROBE_SECONDS
     env = dict(os.environ)
     if codex_home is not None:
         env["CODEX_HOME"] = codex_home
@@ -390,7 +396,7 @@ async def probe_codex(account: str, codex_home: str | None, command: str | None)
         proc = await _spawn(command, CODEX_PROBE_ARGS, env, cwd)
         answered = False
         try:
-            async with asyncio.timeout(CODEX_PROBE_SECONDS):
+            async with asyncio.timeout_at(deadline):
                 await _codex_request(
                     proc,
                     1,
@@ -402,7 +408,7 @@ async def probe_codex(account: str, codex_home: str | None, command: str | None)
                 result = await _codex_request(proc, 2, "account/rateLimits/read", None)
             answered = True
         finally:
-            await _stop(proc, graceful=answered)
+            await _stop(proc, graceful=answered, deadline=deadline)
     return normalize_codex_rate_limits(account, result, observed_at)
 
 
