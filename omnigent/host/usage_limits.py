@@ -214,18 +214,14 @@ def normalize_codex_rate_limits(
     # Model-specific buckets are not the account's main allowance.
     if not isinstance(snapshot, dict) or snapshot.get("limitId") not in (None, "codex"):
         return AccountUsage(provider="codex", account=account)
-    monthly_plan = snapshot.get("planType") in ("free", "go")
     windows: list[UsageWindow] = []
-    for key, fallback in (
-        ("primary", _MONTH_MINUTES if monthly_plan else _SESSION_MINUTES),
-        ("secondary", _WEEK_MINUTES),
-    ):
+    for key in ("primary", "secondary"):
         window = snapshot.get(key)
         if not isinstance(window, dict) or (used := _percent(window.get("usedPercent"))) is None:
             continue
         minutes = window.get("windowDurationMins")
         if isinstance(minutes, bool) or not isinstance(minutes, int) or minutes <= 0:
-            minutes = fallback
+            continue
         kind = _codex_kind(minutes)
         windows.append(
             UsageWindow(
@@ -502,7 +498,8 @@ async def read_usage_limits(
                     lambda a=account, f=folder: probe_claude(a, f, claude),
                 )
             )
-    if "codex" in providers and (codex := shutil.which("codex")) is not None:
+    if "codex" in providers:
+        codex = shutil.which("codex")
         home = os.environ.get("CODEX_HOME") or None
         reads.append(
             cache.read(

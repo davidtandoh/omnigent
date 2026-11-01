@@ -205,7 +205,8 @@ def quota_reader() -> str:
     """Return ``native`` when ``quota_reader: native`` is set in the global config.
 
     Temporary switch: quota-axi stays the default until the native reader is
-    verified on every account, then the switch and quota-axi path are removed.
+    verified on every account. The cutover PR removes the switch together
+    with the quota-axi path.
     """
     from omnigent.config import load_global_config
 
@@ -225,3 +226,21 @@ async def read_claude_quotas() -> list[ClaudeAccountQuota]:
             return [ClaudeAccountQuota(account="default")]
         return [claude_quota_from_usage(reading) for reading in readings]
     return await asyncio.to_thread(_read_with_quota_axi)
+
+
+class HostQuotaSnapshot(BaseModel):
+    quotas: list[ClaudeAccountQuota] = Field(default_factory=list)
+    usage: list[AccountUsage] = Field(default_factory=list)
+
+
+async def read_host_quota_snapshot() -> HostQuotaSnapshot:
+    """Read Claude quotas and native Codex usage concurrently for the tunnel."""
+    quotas, usage = await asyncio.gather(
+        read_claude_quotas(), read_usage_limits(("codex",)), return_exceptions=True
+    )
+    return HostQuotaSnapshot(
+        quotas=quotas if isinstance(quotas, list) else [ClaudeAccountQuota(account="default")],
+        usage=usage
+        if isinstance(usage, list)
+        else [AccountUsage(provider="codex", account="default")],
+    )

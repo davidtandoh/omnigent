@@ -435,9 +435,19 @@ host. The host reads the key on each request, so a change needs no restart.
 The `native` reader is temporary: after it is verified on every account, it
 replaces `quota-axi` and the key is removed. To check the native reader by
 hand, run `python -m omnigent.host.usage_limits` on the host. The command
-prints sanitized readings for every Claude account and for Codex, which it
-asks with `codex app-server` and `account/rateLimits/read` for the host's
-`CODEX_HOME`.
+prints sanitized readings for every Claude account and for Codex.
+
+Every host quota request also asks Codex natively with `codex app-server` and
+`account/rateLimits/read`, regardless of `quota_reader`. Codex uses the host's
+`CODEX_HOME`, or the CLI default home when unset, with the local label `default`.
+The provider config currently supports no additional Codex homes. Claude and
+Codex reads run in parallel. Codex uses a 15-second probe deadline and the same
+5-minute cache, single-flight, stale readings and failure back-off as native
+Claude. Missing CLIs produce unavailable readings, or stale cached readings.
+The tunnel result and `GET /v1/hosts/{host_id}/claude-quotas` expose Codex as
+provider-neutral `usage` snapshots beside the unchanged Claude `quotas` list.
+Replies from older hosts omit `usage` and decode as an empty list. The web view
+and CLI continue to show Claude only.
 
 In the web UI, **Settings → Harnesses → Claude → Settings** shows the same
 readings under each account in the Claude accounts list, on desktop and mobile.

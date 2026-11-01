@@ -1,6 +1,59 @@
 {
   "components": {
     "schemas": {
+      "AccountUsage": {
+        "additionalProperties": false,
+        "description": "One account's usage snapshot; never carries identity or credentials.\n\n`stale` is the last successful reading after a later probe failed.\n`observed_at` is when that reading was taken.",
+        "properties": {
+          "account": {
+            "title": "Account",
+            "type": "string"
+          },
+          "observed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed At"
+          },
+          "provider": {
+            "enum": [
+              "claude",
+              "codex"
+            ],
+            "title": "Provider",
+            "type": "string"
+          },
+          "status": {
+            "default": "unavailable",
+            "enum": [
+              "available",
+              "stale",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "windows": {
+            "items": {
+              "$ref": "#/components/schemas/UsageWindow"
+            },
+            "title": "Windows",
+            "type": "array"
+          }
+        },
+        "required": [
+          "provider",
+          "account"
+        ],
+        "title": "AccountUsage",
+        "type": "object"
+      },
       "AddCommentRequest": {
         "description": "Request body for `POST /sessions/{id}/comments`.",
         "properties": {
@@ -3332,6 +3385,26 @@
           "routable_models"
         ],
         "title": "HostModelOptionsResponse",
+        "type": "object"
+      },
+      "HostQuotaSnapshot": {
+        "properties": {
+          "quotas": {
+            "items": {
+              "$ref": "#/components/schemas/ClaudeAccountQuota"
+            },
+            "title": "Quotas",
+            "type": "array"
+          },
+          "usage": {
+            "items": {
+              "$ref": "#/components/schemas/AccountUsage"
+            },
+            "title": "Usage",
+            "type": "array"
+          }
+        },
+        "title": "HostQuotaSnapshot",
         "type": "object"
       },
       "ImportFailureRef": {
@@ -10454,6 +10527,66 @@
         "title": "UsageReport",
         "type": "object"
       },
+      "UsageWindow": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": [
+              "session",
+              "weekly",
+              "weekly_model",
+              "monthly"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "label": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          },
+          "percent_used": {
+            "format": "double",
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Percent Used",
+            "type": "number"
+          },
+          "resets_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resets At"
+          },
+          "window_minutes": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window Minutes"
+          }
+        },
+        "required": [
+          "kind",
+          "label",
+          "percent_used"
+        ],
+        "title": "UsageWindow",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -11404,14 +11537,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": {
-                    "items": {
-                      "$ref": "#/components/schemas/ClaudeAccountQuota"
-                    },
-                    "type": "array"
-                  },
-                  "title": "Response Get Quotas V1 Hosts  Host Id  Claude Quotas Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/HostQuotaSnapshot"
                 }
               }
             },

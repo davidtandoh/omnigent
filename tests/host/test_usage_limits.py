@@ -86,7 +86,7 @@ def test_codex_limits_classify_by_duration_and_keep_main_bucket():
         ),
         (
             {"planType": "free", "primary": {"usedPercent": 80, "resetsAt": None}},
-            [("monthly", "Monthly", 80.0, 43200)],
+            [],
         ),
         (
             {"individualLimit": {"remainingPercent": 99, "resetsAt": 1793988000}},
@@ -222,6 +222,7 @@ def test_missing_cli_is_unavailable(probe_host, monkeypatch, tmp_path):
     assert [(r.provider, r.status) for r in readings] == [
         ("claude", "unavailable"),
         ("claude", "unavailable"),
+        ("codex", "unavailable"),
     ]
 
 
@@ -316,3 +317,77 @@ def test_adapter_drops_windows_without_reset_time():
     )
     quota = claude_quotas.claude_quota_from_usage(stale)
     assert (quota.status, quota.five_hour, quota.seven_day.percent_used) == ("stale", None, 9)
+
+
+@pytest.mark.parametrize("minutes", [None, 0, -1, True, 300.0, "10080"])
+@pytest.mark.parametrize("position", ["primary", "secondary"])
+def test_codex_omits_windows_without_positive_integer_duration(minutes, position):
+    reading = usage_limits.normalize_codex_rate_limits(
+        "default",
+        {
+            "rateLimits": {
+                "planType": "pro",
+                position: {
+                    "usedPercent": 40,
+                    "windowDurationMins": minutes,
+                },
+            }
+        },
+        OBSERVED,
+    )
+    assert (reading.status, reading.windows) == ("unavailable", [])
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+async def test_missing_cli_preserves_stale_reading_and_backoff(probe_host, tmp_path, provider):
+    now = [0.0]
+    cache = UsageCache(clock=lambda: now[0])
+    first = await usage_limits.read_usage_limits((provider,), cache=cache)
+    command = tmp_path / provider
+    command.rename(tmp_path / (provider + "-hidden"))
+    now[0] = 300
+    stale = await usage_limits.read_usage_limits((provider,), cache=cache)
+    assert all(r.status == "stale" for r in stale)
+    assert [r.windows for r in stale] == [r.windows for r in first]
+    (tmp_path / (provider + "-hidden")).rename(command)
+    now[0] = 599
+    assert await usage_limits.read_usage_limits((provider,), cache=cache) == stale
+    now[0] = 600
+    assert all(
+        r.status == "available"
+        for r in await usage_limits.read_usage_limits((provider,), cache=cache)
+    )
+
+
+@pytest.mark.parametrize("reader", ["native", "quota-axi"])
+async def test_host_snapshot_reads_codex_with_either_claude_reader(
+    probe_host, monkeypatch, reader
+):
+    config, log = probe_host
+    config["quota_reader"] = reader
+    monkeypatch.setattr(usage_limits, "_CACHE", UsageCache())
+    snapshot = await claude_quotas.read_host_quota_snapshot()
+    assert [q.account for q in snapshot.quotas] == ["default", "work"]
+    assert [(u.provider, u.account, u.status) for u in snapshot.usage] == [
+        ("codex", "default", "available")
+    ]
+    assert "codex default" in log.read_text().splitlines()
+
+
+async def test_host_snapshot_runs_readers_concurrently(monkeypatch):
+    started = set()
+    completed = set()
+    both_started = asyncio.Event()
+
+    async def read(name):
+        started.add(name)
+        if len(started) == 2:
+            both_started.set()
+        await asyncio.wait_for(both_started.wait(), 1)
+        completed.add(name)
+        return []
+
+    monkeypatch.setattr(claude_quotas, "read_claude_quotas", lambda: read("claude"))
+    monkeypatch.setattr(claude_quotas, "read_usage_limits", lambda providers: read(providers[0]))
+    assert await claude_quotas.read_host_quota_snapshot() == claude_quotas.HostQuotaSnapshot()
+    assert completed == {"claude", "codex"}

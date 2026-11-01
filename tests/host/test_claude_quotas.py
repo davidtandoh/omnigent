@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import time
 from pathlib import Path
@@ -161,3 +162,21 @@ def test_quota_failures_are_unavailable(quota_host, monkeypatch, capsys, mode):
         for q in asyncio.run(claude_quotas.read_claude_quotas())
     ] == [("default", "unavailable", None, None), ("work", "unavailable", None, None)]
     assert capsys.readouterr().out == ""
+
+
+def test_usage_frame_round_trip_and_older_host_default():
+    from omnigent.host.usage_limits import AccountUsage, UsageWindow
+
+    usage = AccountUsage(
+        provider="codex",
+        account="default",
+        status="available",
+        windows=[UsageWindow(kind="weekly", label="Weekly", percent_used=40)],
+    )
+    frame = HostClaudeQuotasResultFrame("request", usage=[usage])
+    assert decode_host_frame(encode_host_frame(frame)) == frame
+    legacy = json.loads(encode_host_frame(frame))
+    legacy.pop("usage")
+    decoded = decode_host_frame(json.dumps(legacy))
+    assert isinstance(decoded, HostClaudeQuotasResultFrame)
+    assert decoded.usage == []
