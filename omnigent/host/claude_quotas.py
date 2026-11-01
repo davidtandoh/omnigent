@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import json
 import os
@@ -11,6 +12,8 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from omnigent.host.usage_limits import AccountUsage, claude_account_folders, read_usage_limits
 
 QUOTA_TIMEOUT_SECONDS = 20.0
 MODEL_WINDOWS_MAX = 8
@@ -33,7 +36,7 @@ class ModelQuotaWindow(QuotaWindow):
 class ClaudeAccountQuota(BaseModel):
     """One account's quota snapshot; never carries identity or credentials.
 
-    ``stale`` means quota-axi served its last successful reading because a
+    ``stale`` means the reader served its last successful reading because a
     fresh read failed. ``observed_at`` is when the vendor reported the
     windows, so readers can show the snapshot age.
     """
@@ -155,30 +158,38 @@ def _read_quota(account: str, folder: str | None, command: str | None) -> Claude
         return unavailable
 
 
-def read_claude_quotas() -> list[ClaudeAccountQuota]:
-    """Read every configured Claude account without refreshing credentials."""
-    from omnigent.config import load_global_config
-    from omnigent.onboarding.claude_accounts import (
-        account_launch_environment,
-        account_name_from_provider,
+def claude_quota_from_usage(usage: AccountUsage) -> ClaudeAccountQuota:
+    """Fit a native Claude reading to the account-quota contract the web reads."""
+    unavailable = ClaudeAccountQuota(account=usage.account)
+    if usage.status == "unavailable":
+        return unavailable
+    selected: dict[str, QuotaWindow] = {}
+    models: list[ModelQuotaWindow] = []
+    for window in usage.windows:
+        # The contract needs a reset time; a window that has not started has none.
+        if window.resets_at is None:
+            continue
+        parsed = QuotaWindow(percent_used=window.percent_used, resets_at=window.resets_at)
+        if window.kind in ("session", "weekly"):
+            selected.setdefault(window.kind, parsed)
+        elif window.kind == "weekly_model":
+            models.append(ModelQuotaWindow(model=window.label, **parsed.model_dump()))
+    if not selected and not models:
+        return unavailable
+    return ClaudeAccountQuota(
+        account=usage.account,
+        status=usage.status,
+        five_hour=selected.get("session"),
+        seven_day=selected.get("weekly"),
+        model_windows=models,
+        observed_at=usage.observed_at,
     )
-    from omnigent.onboarding.provider_config import load_providers
 
+
+def _read_with_quota_axi() -> list[ClaudeAccountQuota]:
     command = shutil.which("quota-axi")
-    folders = {"default": os.environ.get("CLAUDE_CONFIG_DIR") or None}
     try:
-        config = load_global_config()
-        for name, entry in load_providers(config).items():
-            account = account_name_from_provider(name)
-            if (
-                account is not None
-                and entry.cli == "claude"
-                and entry.kind == "subscription"
-                and entry.config_dir
-            ):
-                folders[account] = account_launch_environment(
-                    account, None, host_name="this host", config=config
-                )["CLAUDE_CONFIG_DIR"]
+        folders = claude_account_folders()
     except (OSError, ValueError):
         return [ClaudeAccountQuota(account="default")]
     # Read all accounts together so batching cannot exceed the host reply deadline.
@@ -188,3 +199,48 @@ def read_claude_quotas() -> list[ClaudeAccountQuota]:
             for account, folder in folders.items()
         ]
         return [future.result() for future in futures]
+
+
+def quota_reader() -> str:
+    """Return ``native`` when ``quota_reader: native`` is set in the global config.
+
+    Temporary switch: quota-axi stays the default until the native reader is
+    verified on every account. The cutover PR removes the switch together
+    with the quota-axi path.
+    """
+    from omnigent.config import load_global_config
+
+    try:
+        value = load_global_config().get("quota_reader")
+    except (OSError, ValueError):
+        return "quota-axi"
+    return "native" if value == "native" else "quota-axi"
+
+
+async def read_claude_quotas() -> list[ClaudeAccountQuota]:
+    """Read every configured Claude account with the configured reader."""
+    if quota_reader() == "native":
+        try:
+            readings = await read_usage_limits(("claude",))
+        except (OSError, ValueError):
+            return [ClaudeAccountQuota(account="default")]
+        return [claude_quota_from_usage(reading) for reading in readings]
+    return await asyncio.to_thread(_read_with_quota_axi)
+
+
+class HostQuotaSnapshot(BaseModel):
+    quotas: list[ClaudeAccountQuota] = Field(default_factory=list)
+    usage: list[AccountUsage] = Field(default_factory=list)
+
+
+async def read_host_quota_snapshot() -> HostQuotaSnapshot:
+    """Read Claude quotas and native Codex usage concurrently for the tunnel."""
+    quotas, usage = await asyncio.gather(
+        read_claude_quotas(), read_usage_limits(("codex",)), return_exceptions=True
+    )
+    return HostQuotaSnapshot(
+        quotas=quotas if isinstance(quotas, list) else [ClaudeAccountQuota(account="default")],
+        usage=usage
+        if isinstance(usage, list)
+        else [AccountUsage(provider="codex", account="default")],
+    )

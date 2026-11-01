@@ -5660,18 +5660,14 @@ class HostProcess:
             startup_result = await asyncio.to_thread(self._handle_harness_startup, frame)
             await self._send_text(ws, encode_host_frame(startup_result))
         elif isinstance(frame, HostClaudeQuotasFrame):
-            import yaml
+            from omnigent.host.claude_quotas import read_host_quota_snapshot
 
-            from omnigent.errors import OmnigentError
-            from omnigent.host.claude_quotas import read_claude_quotas
-            from omnigent.onboarding.claude_accounts import AccountUnavailableError
-
-            try:
-                quotas = await asyncio.to_thread(read_claude_quotas)
-            except (OSError, ValueError, yaml.YAMLError, OmnigentError, AccountUnavailableError):
-                quotas = []
+            snapshot = await read_host_quota_snapshot()
             await self._send_text(
-                ws, encode_host_frame(HostClaudeQuotasResultFrame(frame.request_id, quotas))
+                ws,
+                encode_host_frame(
+                    HostClaudeQuotasResultFrame(frame.request_id, snapshot.quotas, snapshot.usage)
+                ),
             )
         elif isinstance(frame, HostMcpServersFrame):
             mcp_result = await asyncio.to_thread(self._handle_mcp_servers, frame)

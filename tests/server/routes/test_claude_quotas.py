@@ -19,6 +19,7 @@ from omnigent.host.frames import (
     HostHelloFrame,
     decode_host_frame,
 )
+from omnigent.host.usage_limits import AccountUsage
 from omnigent.server.host_registry import HostRegistry
 from omnigent.server.routes.claude_quotas import (
     create_claude_quotas_router,
@@ -76,7 +77,11 @@ async def test_owner_receives_account_quota_readings(quota_app, path):
         frame = decode_host_frame((await asyncio.wait_for(conn.outbound_queue.get(), 2)).data)
         assert isinstance(frame, HostClaudeQuotasFrame)
         conn.pending_claude_quotas[frame.request_id].set_result(
-            HostClaudeQuotasResultFrame(frame.request_id, [ClaudeAccountQuota(account="work")])
+            HostClaudeQuotasResultFrame(
+                frame.request_id,
+                [ClaudeAccountQuota(account="work")],
+                [AccountUsage(provider="codex", account="default")],
+            )
         )
         response = await task
     assert response.status_code == 200
@@ -85,6 +90,10 @@ async def test_owner_receives_account_quota_readings(quota_app, path):
         if path != "/usage"
         else response.json()["claude_quotas"][0]["quotas"]
     )
+    if path != "/usage":
+        assert response.json()["usage"] == [
+            AccountUsage(provider="codex", account="default").model_dump(mode="json")
+        ]
     assert readings[0]["account"] == "work"
     assert readings[0]["status"] == "unavailable"
     assert not conn.pending_claude_quotas
@@ -107,13 +116,13 @@ async def test_collaborator_cannot_read_host_quotas(quota_app):
 async def test_old_host_and_lost_tunnel_return_unavailable(quota_app):
     _, registry, conn = quota_app
     conn.hello.capabilities.clear()
-    assert (await request_host_claude_quotas(registry, conn))[0].status == "unavailable"
+    assert (await request_host_claude_quotas(registry, conn)).quotas[0].status == "unavailable"
     assert conn.outbound_queue.empty()
     conn.hello.capabilities.append(CAP_CLAUDE_QUOTAS)
     task = asyncio.create_task(request_host_claude_quotas(registry, conn))
     await asyncio.wait_for(conn.outbound_queue.get(), 2)
     registry.deregister(conn.host_id)
-    assert (await task)[0].status == "unavailable"
+    assert (await task).quotas[0].status == "unavailable"
     assert not conn.pending_claude_quotas
 
 
@@ -130,5 +139,5 @@ async def test_slow_host_quota_reply_is_not_discarded(quota_app):
                 frame.request_id, [ClaudeAccountQuota(account="work", status="available")]
             )
         )
-    assert (await task)[0].status == "available"
+    assert (await task).quotas[0].status == "available"
     assert not conn.pending_claude_quotas

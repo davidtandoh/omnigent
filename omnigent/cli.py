@@ -11154,6 +11154,7 @@ def host_status(
                 method="GET",
                 path=f"/v1/hosts/{payload['host_id']}/claude-quotas",
                 host_id=payload["host_id"],
+                timeout_s=45.0,
             )
             quotas = (
                 quota_result.body.get("quotas") if isinstance(quota_result.body, dict) else None

@@ -2014,6 +2014,7 @@ def test_host_status_json_reports_daemon_host_and_sessions(
         if path == "/v1/hosts/host_abc":
             return httpx.Response(200, json={"status": "online"})
         if path == "/v1/hosts/host_abc/claude-quotas":
+            assert request.extensions["timeout"]["read"] == 45.0
             quota_calls.append(path)
             return httpx.Response(200, json={"quotas": quotas})
         if path == "/v1/sessions":

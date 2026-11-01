@@ -286,7 +286,7 @@ def create_usage_router(
             async def read_host(host: Host) -> HostClaudeQuota:
                 conn = host_registry.get(host.host_id)
                 quotas = (
-                    await request_host_claude_quotas(host_registry, conn)
+                    (await request_host_claude_quotas(host_registry, conn)).quotas
                     if conn
                     else [ClaudeAccountQuota(account="default")]
                 )

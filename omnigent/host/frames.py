@@ -32,6 +32,7 @@ from pydantic import ValidationError
 from omnigent.harness_availability import HarnessAvailability, is_harness_availability
 from omnigent.host.claude_quotas import ClaudeAccountQuota
 from omnigent.host.harness_startup import HarnessStartup
+from omnigent.host.usage_limits import AccountUsage
 from omnigent.inner.native_attachments import (
     CAP_FILESYSTEM_ATTACHMENT_DELIVERY,
     CAP_FILESYSTEM_ATTACHMENTS,
@@ -1168,6 +1169,7 @@ class HostClaudeQuotasFrame:
 class HostClaudeQuotasResultFrame:
     request_id: str
     quotas: list[ClaudeAccountQuota] = field(default_factory=list)
+    usage: list[AccountUsage] = field(default_factory=list)
 
 
 @dataclass
@@ -1947,6 +1949,7 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "kind": HostFrameKind.CLAUDE_QUOTAS_RESULT.value,
                 "request_id": frame.request_id,
                 "quotas": [q.model_dump(mode="json") for q in frame.quotas],
+                "usage": [u.model_dump(mode="json") for u in frame.usage],
             }
         )
     if isinstance(frame, HostMcpServersFrame):
@@ -2368,7 +2371,15 @@ def _decode_known_host_frame(
                 )
             except (ValueError, TypeError):
                 quotas = []
-            return HostClaudeQuotasResultFrame(request_id, quotas)
+            try:
+                usage = (
+                    [AccountUsage.model_validate_json(json.dumps(u)) for u in msg["usage"]]
+                    if isinstance(msg.get("usage"), list)
+                    else []
+                )
+            except (ValueError, TypeError):
+                usage = []
+            return HostClaudeQuotasResultFrame(request_id, quotas, usage)
         case HostFrameKind.MCP_SERVERS:
             return HostMcpServersFrame(
                 request_id=_required_str(msg, "request_id"),

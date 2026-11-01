@@ -7,7 +7,7 @@ import secrets
 
 from fastapi import APIRouter, Request
 
-from omnigent.host.claude_quotas import ClaudeAccountQuota
+from omnigent.host.claude_quotas import ClaudeAccountQuota, HostQuotaSnapshot
 from omnigent.host.frames import (
     CAP_CLAUDE_QUOTAS,
     HostClaudeQuotasFrame,
@@ -23,9 +23,9 @@ from omnigent.stores.host_store import HostStore
 
 async def request_host_claude_quotas(
     registry: HostRegistry, conn: HostConnection
-) -> list[ClaudeAccountQuota]:
+) -> HostQuotaSnapshot:
     """Return sanitized readings, or unavailable when the host cannot answer."""
-    unavailable = [ClaudeAccountQuota(account="default")]
+    unavailable = HostQuotaSnapshot(quotas=[ClaudeAccountQuota(account="default")])
     if CAP_CLAUDE_QUOTAS not in conn.hello.capabilities:
         return unavailable
     request_id = secrets.token_hex(8)
@@ -35,9 +35,9 @@ async def request_host_claude_quotas(
     conn.pending_claude_quotas[request_id] = future
     try:
         registry.send_text(conn, encode_host_frame(HostClaudeQuotasFrame(request_id)))
-        # Allow the host's 20-second account reads plus tunnel overhead.
-        result = await asyncio.wait_for(future, timeout=25.0)
-        return result.quotas or unavailable
+        # Allow the host's slowest account probe (30 seconds) plus tunnel overhead.
+        result = await asyncio.wait_for(future, timeout=35.0)
+        return HostQuotaSnapshot(quotas=result.quotas or unavailable.quotas, usage=result.usage)
     except (ConnectionError, TimeoutError):
         return unavailable
     finally:
@@ -50,17 +50,16 @@ def create_claude_quotas_router(
     router = APIRouter()
 
     @router.get("/hosts/{host_id}/claude-quotas")
-    async def get_quotas(request: Request, host_id: str) -> dict[str, list[ClaudeAccountQuota]]:
+    async def get_quotas(request: Request, host_id: str) -> HostQuotaSnapshot:
         user = require_user(request, auth_provider)
         await asyncio.to_thread(
             resolve_host_owner, user_id=user, host_id=host_id, host_store=hosts
         )
         conn = registry.get(host_id)
-        quotas = (
+        return (
             await request_host_claude_quotas(registry, conn)
             if conn
-            else [ClaudeAccountQuota(account="default")]
+            else HostQuotaSnapshot(quotas=[ClaudeAccountQuota(account="default")])
         )
-        return {"quotas": quotas}
 
     return router

@@ -407,21 +407,58 @@ calling user's daily costs across accounts.
 
 `omnigent usage` and `omnigent host status` also show each host owner's Claude
 accounts with their 5-hour and 7-day usage percentages and reset times.
-These readings require `quota-axi` on the host. Omnigent reads it without
-refreshing credentials. Each account read has a 20-second timeout, and accounts
-are read in parallel. The server waits up to 25 seconds for the host reply.
-Omnigent passes `--max-age 60s` so repeated loads can reuse quota-axi's recent
-reading, with its original observation time. Missing tools or reads without a
-usable snapshot show `unavailable`. A fresh reading must contain
-both account-level windows. When a fresh read fails and `quota-axi` serves its
-last reading instead, the CLI shows `stale`; that snapshot can contain only one
-account-level window. Usage reports also mark offline hosts as unavailable.
+The host reads all accounts in parallel. The server waits up to 35 seconds for
+the host reply. Missing tools or reads without a usable snapshot show
+`unavailable`. Usage reports also mark offline hosts as unavailable.
+
+The `quota_reader` key in `~/.omnigent/config.yaml` selects the reader on the
+host. The host reads the key on each request, so a change needs no restart.
+
+- `quota-axi` (default): the host runs `quota-axi` without refreshing
+  credentials. Each account read has a 20-second timeout. Omnigent passes
+  `--max-age 60s` so repeated loads can reuse quota-axi's recent reading, with
+  its original observation time. A fresh reading must contain both
+  account-level windows. When a fresh read fails and `quota-axi` serves its
+  last reading instead, the CLI shows `stale`; that snapshot can contain only
+  one account-level window.
+- `native`: the host asks the Claude CLI itself with the `get_usage` control
+  request, once per account folder. The CLI uses its own login and refreshes
+  its own token. Omnigent never reads a token or the Keychain, and no new
+  Keychain approval is needed. The probe sends no prompt and runs with no
+  tools, MCP servers, hooks, settings files or saved session. Each probe has a
+  30-second deadline. The host keeps each account's reading for 5 minutes, and
+  concurrent requests share one probe. After a failed probe, the host serves
+  the last good reading as `stale` and waits 5 minutes before it probes that
+  account again. `get_usage` is experimental in the Claude CLI; an unknown
+  answer follows the same failure handling. Without a last good reading,
+  a failed probe shows `unavailable`.
+
+The reader selection key is temporary: after the native reader is verified on
+every account, the cutover PR removes both the key and the `quota-axi` path.
+To check the native reader by hand, run
+`python -m omnigent.host.usage_limits` on the host. The command
+prints sanitized readings for every Claude account and for Codex.
+
+Every host quota request also asks Codex natively with `codex app-server` and
+`account/rateLimits/read`, regardless of `quota_reader`. Codex uses the host's
+`CODEX_HOME`, or the CLI default home when unset, with the local label `default`.
+The provider config currently supports no additional Codex homes. Claude and
+Codex reads run in parallel. Codex uses a 15-second probe deadline and the same
+5-minute cache, single-flight, stale readings and failure back-off as native
+Claude. Missing CLIs produce unavailable readings, or stale cached readings.
+Codex classifies windows by their reported duration and omits windows without
+a positive integer duration. Its individual monthly credit limit has an
+explicit monthly kind and does not require a duration.
+The tunnel result and `GET /v1/hosts/{host_id}/claude-quotas` expose Codex as
+provider-neutral `usage` snapshots beside the unchanged Claude `quotas` list.
+Replies from older hosts omit `usage` and decode as an empty list. The web view
+and CLI continue to show Claude only.
 
 In the web UI, **Settings → Harnesses → Claude → Settings** shows the same
 readings under each account in the Claude accounts list, on desktop and mobile.
 Each account shows its 5-hour, weekly, and any per-model weekly window, with
 percent used, reset time, and the age of the reading. A reading that is older
-than 15 minutes, or that `quota-axi` marked stale after a failed read, is marked
+than 15 minutes, or that the reader marked stale after a failed read, is marked
 stale. A window whose reset time has passed shows no percentage.
 Quota readings are separate from estimated session costs. Only the host owner
 receives these readings.
