@@ -26,6 +26,7 @@ import { ComposerAgentIcon } from "@/shell/NewChatDialog";
 import { useHarnessStartup, useHostClaudeQuotas, useHosts, type Host } from "@/hooks/useHosts";
 import {
   accountQuotaView,
+  accountUsageView,
   CLAUDE_DEFAULT_ACCOUNT_LABEL,
   hostClaudeAccountNames,
   type AccountQuotaView,
@@ -645,6 +646,9 @@ function HarnessDetail({
       {entry.harness === "claude-native" && host && !host.sandbox_provider && (
         <ClaudeAccountsCard host={host} />
       )}
+      {entry.harness === "codex-native" && host && !host.sandbox_provider && (
+        <CodexUsageCard host={host} />
+      )}
     </>
   );
   const settings = host ? (
@@ -717,8 +721,9 @@ function HarnessDetail({
 }
 
 /**
- * One account's 5-hour, weekly and per-model usage. Stale and unavailable
- * readings say so in words, so an old number never reads as current.
+ * One account's usage windows (5-hour, weekly, per-model, monthly) for any
+ * provider. Stale and unavailable readings say so in words, so an old number
+ * never reads as current.
  */
 function AccountQuota({
   testId,
@@ -731,14 +736,14 @@ function AccountQuota({
 }) {
   if (loading || view.state === "unavailable") {
     return (
-      <p className="text-xs text-muted-foreground" data-testid={`claude-quota-${testId}`}>
+      <p className="text-xs text-muted-foreground" data-testid={testId}>
         {loading ? "Checking usage…" : "Usage unavailable"}
       </p>
     );
   }
   const stale = view.state === "stale";
   return (
-    <div className="flex flex-col gap-2" data-testid={`claude-quota-${testId}`}>
+    <div className="flex flex-col gap-2" data-testid={testId}>
       <div className={cn("grid gap-x-4 gap-y-2.5 sm:grid-cols-2", stale && "opacity-60")}>
         {view.windows.map((window) => (
           <div key={window.label} className="flex min-w-0 flex-col gap-1">
@@ -832,10 +837,10 @@ function ClaudeAccountsCard({ host }: { host: Host }) {
               </span>
             </div>
             <AccountQuota
-              testId={row.testId}
+              testId={`claude-quota-${row.testId}`}
               loading={quotas.isPending}
               view={accountQuotaView(
-                quotas.data?.find((quota) => quota.account === row.testId),
+                quotas.data?.quotas.find((quota) => quota.account === row.testId),
                 nowMs,
               )}
             />
@@ -859,6 +864,38 @@ function ClaudeAccountsCard({ host }: { host: Host }) {
           <CliCommandBlock command="omni setup" testIdPrefix="claude-accounts-add" />
         </div>
       )}
+    </section>
+  );
+}
+
+/**
+ * Codex usage on one machine, read from the Codex CLI's own login. Codex has
+ * one login per machine, so this is a single row in the Claude accounts' style.
+ */
+function CodexUsageCard({ host }: { host: Host }) {
+  const quotas = useHostClaudeQuotas(host.host_id);
+  const nowMs = Math.max(useNow().getTime(), quotas.dataUpdatedAt);
+  const usage = quotas.data?.usage.find(
+    (entry) => entry.provider === "codex" && entry.account === "default",
+  );
+  return (
+    <section className="flex flex-col gap-2" data-testid="codex-usage">
+      <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+        Codex usage
+      </h2>
+      <ul className="flex flex-col divide-y divide-border rounded-xl border border-border">
+        <li
+          className="flex flex-col gap-2 px-3 py-2.5 text-ui"
+          data-testid="codex-usage-account-default"
+        >
+          <span className="min-w-0 truncate">{CLAUDE_DEFAULT_ACCOUNT_LABEL}</span>
+          <AccountQuota
+            testId="codex-usage-default"
+            loading={quotas.isPending}
+            view={accountUsageView(usage, nowMs)}
+          />
+        </li>
+      </ul>
     </section>
   );
 }

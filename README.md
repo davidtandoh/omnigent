@@ -465,11 +465,13 @@ a positive integer duration. Its individual monthly credit limit has an
 explicit monthly kind and does not require a duration.
 The tunnel result and `GET /v1/hosts/{host_id}/claude-quotas` expose Codex as
 provider-neutral `usage` snapshots beside the unchanged Claude `quotas` list.
-Replies from older hosts omit `usage` and decode as an empty list. The web view
-and CLI continue to show Claude only.
+Replies from older hosts omit `usage` and decode as an empty list. The CLI
+continues to show Claude only.
 
 In the web UI, **Settings → Harnesses → Claude → Settings** shows the same
 readings under each account in the Claude accounts list, on desktop and mobile.
+**Settings → Harnesses → Codex → Settings** shows the Codex `usage` windows in
+the same card style; a host that reports no Codex usage says so.
 Each account shows its 5-hour, weekly, and any per-model weekly window, with
 percent used, reset time, and the age of the reading. A reading that is older
 than 15 minutes, or that the reader marked stale after a failed read, is marked

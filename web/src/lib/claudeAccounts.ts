@@ -52,6 +52,33 @@ export interface ClaudeAccountQuota {
   observed_at?: string | null;
 }
 
+/** One provider-neutral usage window, as read from a CLI's own usage report. */
+export interface UsageWindow {
+  kind: "session" | "weekly" | "weekly_model" | "monthly";
+  /** Display name, e.g. `"5-hour"` or `"Monthly credit limit"`. */
+  label: string;
+  percent_used: number;
+  /** ISO-8601 time the window resets; `null` when the CLI reports none. */
+  resets_at?: string | null;
+  window_minutes?: number | null;
+}
+
+/** One account's usage snapshot from the host's own CLI (Codex today). */
+export interface AccountUsage {
+  provider: "claude" | "codex";
+  /** Short account name; `"default"` is the CLI's own login. */
+  account: string;
+  status: "available" | "stale" | "unavailable";
+  windows?: UsageWindow[];
+  observed_at?: string | null;
+}
+
+/** The body of `GET /v1/hosts/{id}/claude-quotas`. Older hosts omit `usage`. */
+export interface HostQuotaSnapshot {
+  quotas: ClaudeAccountQuota[];
+  usage: AccountUsage[];
+}
+
 /** A reading older than this is shown as stale even if the host called it fresh. */
 export const CLAUDE_QUOTA_STALE_AFTER_MS = 15 * 60_000;
 
@@ -87,21 +114,54 @@ function resetText(resetMs: number, nowMs: number): string {
   return `Resets ${when}`;
 }
 
+interface LabeledWindow {
+  label: string;
+  percent_used: number;
+  resets_at?: string | null;
+}
+
+const UNAVAILABLE: AccountQuotaView = { state: "unavailable", ageText: null, windows: [] };
+
 /**
- * Turn one account's snapshot into display rows. Never presents an old
- * number as current: an aged or host-stale reading is `stale`, and a window
- * whose reset time has passed drops its percentage.
+ * Shared display logic for Claude quotas and provider-neutral usage. Never
+ * presents an old number as current: an aged or host-stale reading is
+ * `stale`, and a window whose reset time has passed drops its percentage. A
+ * window with a malformed reset time is dropped; one with no reset time at
+ * all keeps its percentage and says so.
  */
+function quotaView(
+  status: "available" | "stale",
+  observedMs: number,
+  windows: LabeledWindow[],
+  nowMs: number,
+): AccountQuotaView {
+  const ageMs = Math.max(0, nowMs - observedMs);
+  const age = relativeTime(observedMs, nowMs);
+  return {
+    state: status === "stale" || ageMs > CLAUDE_QUOTA_STALE_AFTER_MS ? "stale" : "current",
+    ageText: age === "now" ? "Read just now" : `Read ${age} ago`,
+    windows: windows.flatMap<QuotaWindowView>(({ label, percent_used, resets_at }) => {
+      if (resets_at == null) {
+        return [{ label, percentUsed: percent_used, resetText: "No reset time reported" }];
+      }
+      const resetMs = Date.parse(resets_at);
+      if (!Number.isFinite(resetMs)) return [];
+      return resetMs <= nowMs
+        ? [{ label, percentUsed: null, resetText: "Reset since this reading" }]
+        : [{ label, percentUsed: percent_used, resetText: resetText(resetMs, nowMs) }];
+    }),
+  };
+}
+
+/** Turn one Claude account's quota snapshot into display rows. */
 export function accountQuotaView(
   quota: ClaudeAccountQuota | undefined,
   nowMs: number,
 ): AccountQuotaView {
   const observedMs = quota?.observed_at ? Date.parse(quota.observed_at) : NaN;
   if (!quota || quota.status === "unavailable" || !Number.isFinite(observedMs)) {
-    return { state: "unavailable", ageText: null, windows: [] };
+    return UNAVAILABLE;
   }
-  const ageMs = Math.max(0, nowMs - observedMs);
-  const age = relativeTime(observedMs, nowMs);
   const windows: [string, ClaudeQuotaWindow | null | undefined][] = [
     ["5-hour", quota.five_hour],
     ["Weekly", quota.seven_day],
@@ -110,16 +170,28 @@ export function accountQuotaView(
       window,
     ]),
   ];
-  return {
-    state: quota.status === "stale" || ageMs > CLAUDE_QUOTA_STALE_AFTER_MS ? "stale" : "current",
-    ageText: age === "now" ? "Read just now" : `Read ${age} ago`,
-    windows: windows.flatMap<QuotaWindowView>(([label, window]) => {
-      if (!window) return [];
-      const resetMs = Date.parse(window.resets_at);
-      if (!Number.isFinite(resetMs)) return [];
-      return resetMs <= nowMs
-        ? [{ label, percentUsed: null, resetText: "Reset since this reading" }]
-        : [{ label, percentUsed: window.percent_used, resetText: resetText(resetMs, nowMs) }];
-    }),
-  };
+  return quotaView(
+    quota.status,
+    observedMs,
+    windows.flatMap(([label, window]) => (window ? [{ ...window, label }] : [])),
+    nowMs,
+  );
+}
+
+/**
+ * Turn one provider-neutral usage snapshot into display rows. A snapshot
+ * without windows is unavailable: there is nothing honest to draw.
+ */
+export function accountUsageView(usage: AccountUsage | undefined, nowMs: number): AccountQuotaView {
+  const observedMs = usage?.observed_at ? Date.parse(usage.observed_at) : NaN;
+  const windows = usage?.windows ?? [];
+  if (
+    !usage ||
+    usage.status === "unavailable" ||
+    !Number.isFinite(observedMs) ||
+    windows.length === 0
+  ) {
+    return UNAVAILABLE;
+  }
+  return quotaView(usage.status, observedMs, windows, nowMs);
 }

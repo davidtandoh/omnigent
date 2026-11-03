@@ -8,7 +8,7 @@ import {
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { authenticatedFetch } from "@/lib/identity";
 import { ApiError, apiErrorFromResponse } from "@/lib/sessionsApi";
-import type { ClaudeAccountQuota } from "@/lib/claudeAccounts";
+import type { HostQuotaSnapshot } from "@/lib/claudeAccounts";
 import type { NativeModelOption } from "@/lib/types";
 
 export interface Host {
@@ -439,18 +439,22 @@ export function useHarnessStartup(hostId: string, harness: string) {
 }
 
 /**
- * Owner-only Claude quota snapshots for each account on a host. Each fetch
- * asks the host to read every account, so poll gently and refresh on focus
- * (a phone waking up) rather than on a tight interval.
+ * Owner-only usage snapshots for a host: Claude quotas per account plus the
+ * provider-neutral `usage` readings (Codex). Each fetch asks the host to probe
+ * every CLI, so poll gently and refresh on focus (a phone waking up) rather
+ * than on a tight interval.
  */
 export function useHostClaudeQuotas(hostId: string, enabled = true) {
   return useQuery({
     queryKey: ["claude-quotas", hostId],
-    queryFn: async (): Promise<ClaudeAccountQuota[]> => {
+    queryFn: async (): Promise<HostQuotaSnapshot> => {
       const res = await authenticatedFetch(`/v1/hosts/${encodeURIComponent(hostId)}/claude-quotas`);
-      if (!res.ok) throw new ApiError("Couldn't load Claude quotas", res.status, null);
-      const body = (await res.json()) as { quotas?: ClaudeAccountQuota[] };
-      return Array.isArray(body.quotas) ? body.quotas : [];
+      if (!res.ok) throw new ApiError("Couldn't load usage", res.status, null);
+      const body = (await res.json()) as Partial<HostQuotaSnapshot>;
+      return {
+        quotas: Array.isArray(body.quotas) ? body.quotas : [],
+        usage: Array.isArray(body.usage) ? body.usage : [],
+      };
     },
     enabled,
     retry: false,
