@@ -4581,14 +4581,12 @@ async def _newest_session_error_item(
     session_id: str,
 ) -> tuple[str, str] | None:
     """
-    Return the newest persisted error item as ``(item_id, message)``.
+    Return the newest non-informational error item as ``(item_id, message)``.
 
-    When a native terminal launch fails, the runner persists a
-    ``type="error"`` conversation item carrying the diagnosis and the
-    last captured pane output (e.g. claude's own startup error). This
-    reads it so the terminal-ready wait can surface the real cause on
-    the user's TTY. Best-effort: any transport failure, non-200, or
-    unexpected payload yields ``None``.
+    Read the runner's persisted failure so the terminal-ready wait can
+    report its message on the user's TTY. See the native startup failure
+    reporting contract in ``docs/harness-diagnostics.md``. Best-effort:
+    any transport failure, non-200, or unexpected payload yields ``None``.
 
     :param client: HTTP client pointed at the Omnigent server.
     :param session_id: Session id, e.g. ``"conv_abc123"``.
@@ -4641,12 +4639,9 @@ async def _wait_for_claude_terminal_ready(
     session, so the CLI waits for the resource to appear rather than
     creating it.
 
-    A launch that dies (e.g. ``claude`` exits at argv parse) never
-    produces a running terminal, but the runner does persist the
-    failure as an error item with the captured pane output. The wait
-    watches for an error item that lands after launch was requested and fails
-    fast with that real cause, instead of burning the full timeout and
-    reporting only a generic message.
+    The caller captures the error baseline before requesting launch, so
+    even a failure that arrives before the first poll ends the wait.
+    See ``docs/harness-diagnostics.md`` for the failure reporting contract.
 
     :param client: HTTP client pointed at the Omnigent server.
     :param session_id: Session id, e.g. ``"conv_abc123"``.
@@ -4741,7 +4736,8 @@ async def _ensure_claude_terminal_on_runner(
                 if isinstance(error_id, str) and error_id not in message:
                     message = f"{message} Error ID: {error_id}."
                 raise click.ClickException(
-                    f"The runner could not start the Claude terminal for {session_id!r}:\n\n{message}"
+                    f"The runner could not start the Claude terminal for {session_id!r}:\n\n"
+                    f"{message}"
                 )
 
 

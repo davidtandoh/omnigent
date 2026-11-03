@@ -299,6 +299,13 @@ omnigent pi                          # Pi
 omnigent copilot                     # GitHub Copilot (SDK harness, via `omnigent run`)
 ```
 
+For new and resumed daemon-backed Claude sessions, the CLI reports a recorded
+terminal startup failure without waiting for the terminal-readiness timeout.
+It ignores earlier failures and informational notices. If no failure is
+available, the readiness timeout still applies. See
+[native startup failure reporting](docs/harness-diagnostics.md#native-startup-failure-reporting)
+for error details and recovery guidance.
+
 Claude, Codex, Kiro, and Antigravity can receive explicit variables in the
 native terminal that Omnigent creates:
 
