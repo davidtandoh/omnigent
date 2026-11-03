@@ -560,3 +560,135 @@ def test_account_refusal_response_preserves_details_but_shared_events_do_not(
     )
     assert transcript.error is not None
     assert transcript.error.message == "Claude account unavailable"
+
+
+async def _launch_claude_with_failing_build(
+    *, harness: str = "claude-native", server_status: int = 200
+) -> tuple[bool | None, list[dict[str, object]], list[dict[str, object]]]:
+    """Run the shared launch shell with a Claude build step that refuses the account."""
+    from types import SimpleNamespace
+
+    from omnigent.onboarding.claude_accounts import AccountUnavailableError
+
+    posts: list[dict[str, object]] = []
+    events: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posts.append({"path": request.url.path, "body": json.loads(request.content)})
+        return httpx.Response(server_status, json={})
+
+    async def refuse_account(
+        ctx: orchestration.NativeLaunchContext,
+    ) -> orchestration.NativeLaunchContext:
+        raise AccountUnavailableError("Claude account 'work' is not set up on 'mac-mini'.")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://server"
+    ) as client:
+        ctx = orchestration.NativeLaunchContext(
+            "conv_launch",
+            SimpleNamespace(terminal_registry=None),
+            lambda _session_id, event: events.append(event),
+            server_client=client,
+        )
+        launched = await orchestration._launch_native_terminal(
+            harness,
+            ctx,
+            ensure_locks={},
+            build_context=refuse_account,
+        )
+    return launched, posts, events
+
+
+@pytest.mark.asyncio
+async def test_claude_launch_failure_is_recorded_as_session_error_item() -> None:
+    """A failed auto-create leaves an error item the CLI's terminal-ready wait reads."""
+    launched, posts, events = await _launch_claude_with_failing_build()
+
+    assert launched is False
+    status_error = next(event["error"] for event in events if event.get("status") == "failed")
+    assert len(posts) == 1
+    assert posts[0]["path"] == "/v1/sessions/conv_launch/events"
+    body = posts[0]["body"]
+    assert body["type"] == "external_conversation_item"
+    assert body["data"]["item_type"] == "error"
+    item_data = body["data"]["item_data"]
+    assert item_data["code"] == ErrorCode.CLAUDE_ACCOUNT_UNAVAILABLE
+    # Same client-safe text as the shared status event, plus the log lookup id.
+    assert item_data["message"] == (
+        f"Claude account unavailable Error ID: {status_error['error_id']}."
+    )
+    assert "mac-mini" not in item_data["message"]
+    assert "level" not in item_data
+
+
+@pytest.mark.asyncio
+async def test_other_harness_launch_failure_records_no_item() -> None:
+    """Other harnesses keep the live-status-only behaviour."""
+    launched, posts, events = await _launch_claude_with_failing_build(harness="pi-native")
+
+    assert launched is False
+    assert posts == []
+    assert any(event.get("status") == "failed" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_launch_failure_survives_a_failed_item_post() -> None:
+    """A server refusal loses only the durable copy; the launch still reports failure."""
+    launched, posts, events = await _launch_claude_with_failing_build(server_status=503)
+
+    assert launched is False
+    assert len(posts) == 1
+    assert any(event.get("status") == "failed" for event in events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("server_status", [200, 503])
+async def test_claude_ensure_failure_persists_public_error(server_status: int) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from omnigent.onboarding.claude_accounts import AccountUnavailableError
+
+    posts: list[dict[str, object]] = []
+    events: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posts.append(json.loads(request.content))
+        return httpx.Response(server_status, json={})
+
+    recovery_message = (
+        "Claude account 'work' is not set up on 'mac-mini'. "
+        "Run omnigent claude setup --account work on mac-mini."
+    )
+
+    async def refuse_account(
+        ctx: orchestration.NativeLaunchContext,
+    ) -> orchestration.NativeLaunchContext:
+        raise AccountUnavailableError(recovery_message)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://server"
+    ) as client:
+        ctx = orchestration.NativeLaunchContext(
+            "conv_ensure",
+            SimpleNamespace(get_terminal_resource=AsyncMock(return_value=None)),
+            lambda _session_id, event: events.append(event),
+            server_client=client,
+        )
+        response = await orchestration._ensure_native_terminal(
+            "claude", ctx, ensure_locks={}, build_context=refuse_account
+        )
+
+    assert response is not None
+    assert response.status_code == 412
+    error = json.loads(response.body)["error"]
+    assert error["code"] == ErrorCode.CLAUDE_ACCOUNT_UNAVAILABLE
+    assert error["message"] == recovery_message
+    public_error = events[0]["error"]
+    assert public_error["message"] == "Claude account unavailable"
+    assert len(posts) == 1
+    item = posts[0]["data"]["item_data"]
+    assert item["message"] == f"Claude account unavailable Error ID: {public_error['error_id']}."
+    assert "work" not in json.dumps(posts)
+    assert "mac-mini" not in json.dumps(posts)

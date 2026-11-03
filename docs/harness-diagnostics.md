@@ -188,6 +188,30 @@ their screen-only excerpt independently of this flag; the flag is not a master
 content switch for ordinary lifecycle logs. Other terminals still export no
 pane text in these event attributes.
 
+## Native startup failure reporting
+
+When Claude terminal auto-creation or terminal ensure fails, the runner
+publishes the existing failed status event and attempts to persist a session
+`error` item. The item contains the public error code and message, with the
+status event's `error_id` appended to the message for log lookup. Account names,
+host details, and account recovery instructions are excluded from the item.
+If persistence fails, the runner logs a warning and retains the live status
+event. Other native harnesses do not gain this persisted item.
+
+The terminal-ensure HTTP response retains its permission-filtered error
+details, including account recovery instructions. The Claude CLI reports a
+definitive ensure error immediately. Transport failures fall back to terminal
+polling. The CLI captures the newest non-informational error item's ID before
+requesting the daemon launch, then polls for a different error item while
+waiting for the terminal. This excludes an earlier failure without overlooking
+a failure that arrives before the first poll. Informational notices do not
+abort the wait.
+
+The regression tests in
+`tests/runner/test_native_terminal_start_error_payload.py` cover the public
+item and detailed ensure response. The CLI cases are in
+`tests/harnesses/claude_native/test_claude_native.py`.
+
 ## Native startup failure context
 
 Native terminal startup failures carry bounded `failure_context` metadata on

@@ -8558,6 +8558,68 @@ def _publish_native_terminal_start_error(
     return error
 
 
+async def _persist_native_terminal_start_error(
+    server_client: httpx.AsyncClient,
+    session_id: str,
+    error: Mapping[str, str],
+) -> None:
+    """
+    Record a native terminal start failure as a durable session ``error`` item.
+
+    The live ``session.status: failed`` event reaches only stream
+    subscribers. A CLI waiting for the terminal polls the session's items
+    instead, so without this item it sits out its whole timeout. The item
+    carries the same client-safe payload as the status event. Best-effort:
+    a failed post only loses the durable copy.
+
+    :param server_client: Runner Omnigent server client.
+    :param session_id: Session/conversation identifier, e.g. ``"conv_abc123"``.
+    :param error: Payload from :func:`_native_terminal_start_error_payload`,
+        e.g. ``{"code": ..., "error_id": "err_...", "message": ...}``.
+    :returns: None.
+    """
+    message = error["message"]
+    error_id = error.get("error_id")
+    if error_id and error_id not in message:
+        message = f"{message} Error ID: {error_id}."
+    try:
+        resp = await server_client.post(
+            f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}/events",
+            json={
+                "type": "external_conversation_item",
+                "data": {
+                    "item_type": "error",
+                    "item_data": {
+                        "source": "execution",
+                        "code": error["code"],
+                        "message": message,
+                    },
+                },
+            },
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPError:
+        _logger.warning(
+            "Could not record the terminal start failure for session %s",
+            session_id,
+            exc_info=True,
+            extra={"session_id": session_id},
+        )
+
+
+async def _report_native_terminal_start_error(
+    ctx: NativeLaunchContext, runtime_name: str, exc: BaseException, *, persist: bool
+) -> dict[str, str]:
+    """Publish a start failure and optionally persist the same public payload."""
+    error = _publish_native_terminal_start_error(
+        ctx.publish_event, ctx.session_id, runtime_name, exc
+    )
+    if persist and ctx.server_client is not None:
+        await _persist_native_terminal_start_error(ctx.server_client, ctx.session_id, error)
+    return error
+
+
 def _native_terminal_start_error_response(
     exc: BaseException, runtime_name: str, *, session_id: str
 ) -> JSONResponse:
@@ -10803,11 +10865,8 @@ async def _launch_native_terminal(
                 )
             if reraise:
                 raise
-            _publish_native_terminal_start_error(
-                ctx.publish_event,
-                ctx.session_id,
-                agent.display_name,
-                exc,
+            await _report_native_terminal_start_error(
+                ctx, agent.display_name, exc, persist=harness_name == "claude-native"
             )
             return False
         finally:
@@ -10964,6 +11023,10 @@ async def _ensure_native_terminal(
                         stage="terminal_start",
                         error_impact=ErrorImpact.BLOCKING.value,
                     ),
+                )
+            if terminal_name == "claude":
+                await _report_native_terminal_start_error(
+                    ctx, agent.display_name, exc, persist=True
                 )
             return _native_terminal_start_error_response(
                 exc, agent.display_name, session_id=ctx.session_id
