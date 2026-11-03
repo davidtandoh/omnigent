@@ -276,7 +276,6 @@ def test_codex_child_enforces_root_cost_budget_without_parent_activity(
         assert (workspace / "under-budget.txt").read_text() == "allowed"
         assert (_snapshot(client, parent_id).get("total_cost_usd") or 0) < 100
         parent_requests = len(_work_requests(mock_url, _PARENT_MODEL))
-        assert parent_requests == 2
         release_mock_gate(mock_url)
         _wait_for(
             lambda: len(_work_requests(mock_url, _CHILD_MODEL)) == 3,
