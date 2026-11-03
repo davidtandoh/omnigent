@@ -465,15 +465,20 @@ a positive integer duration. Its individual monthly credit limit has an
 explicit monthly kind and does not require a duration.
 The tunnel result and `GET /v1/hosts/{host_id}/claude-quotas` expose Codex as
 provider-neutral `usage` snapshots beside the unchanged Claude `quotas` list.
-Replies from older hosts omit `usage` and decode as an empty list. The web view
-and CLI continue to show Claude only.
+Replies from older hosts omit `usage` and decode as an empty list. The CLI
+continues to show Claude only.
 
 In the web UI, **Settings → Harnesses → Claude → Settings** shows the same
 readings under each account in the Claude accounts list, on desktop and mobile.
-Each account shows its 5-hour, weekly, and any per-model weekly window, with
-percent used, reset time, and the age of the reading. A reading that is older
-than 15 minutes, or that the reader marked stale after a failed read, is marked
-stale. A window whose reset time has passed shows no percentage.
+Each Claude account shows its 5-hour, weekly, and any per-model weekly window.
+**Settings → Harnesses → Codex → Settings** shows the windows reported for the
+host's default Codex login, including a monthly credit limit when reported.
+If the host reports no Codex usage, the card shows **Usage unavailable**.
+Both cards show percent used, reset time, and the age of the reading. If a
+window has no reset time, the card shows **No reset time reported**.
+A reading that is older than 15 minutes, or that the reader marked stale after
+a failed read, is marked stale. A window whose reset time has passed shows no
+percentage.
 Quota readings are separate from estimated session costs. Only the host owner
 receives these readings.
 

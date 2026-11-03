@@ -14,7 +14,7 @@ import type { SkillContent } from "@/hooks/useSkillContent";
 import type { HarnessInventory } from "@/hooks/useHarnessInventory";
 import { ApiError } from "@/lib/sessionsApi";
 import type { HarnessStartup, Host } from "@/hooks/useHosts";
-import type { ClaudeAccountQuota } from "@/lib/claudeAccounts";
+import type { HostQuotaSnapshot } from "@/lib/claudeAccounts";
 import { SettingsHarnessesSection } from "./SettingsHarnessesSection";
 
 let pluginMetadataRequested = false;
@@ -89,7 +89,7 @@ let startupError: ApiError | null = null;
 const startupCalls = vi.fn();
 let hosts: Host[] = [];
 let claudeQuotas: {
-  data?: ClaudeAccountQuota[];
+  data?: HostQuotaSnapshot;
   isPending: boolean;
   dataUpdatedAt?: number;
 } = { isPending: true, dataUpdatedAt: 0 };
@@ -642,24 +642,27 @@ describe("Harness details", () => {
     claudeQuotas = {
       isPending: false,
       dataUpdatedAt: 0,
-      data: [
-        {
-          account: "default",
-          status: "available",
-          five_hour: { percent_used: 42, resets_at: "2026-10-31T14:10:00Z" },
-          seven_day: { percent_used: 91, resets_at: "2026-11-03T09:00:00Z" },
-          model_windows: [{ model: "Opus", percent_used: 30, resets_at: "2026-11-03T09:00:00Z" }],
-          observed_at: "2026-10-31T11:58:00Z",
-        },
-        {
-          account: "work",
-          status: "stale",
-          five_hour: { percent_used: 75, resets_at: "2026-10-31T11:00:00Z" },
-          seven_day: { percent_used: 20, resets_at: "2026-11-03T09:00:00Z" },
-          observed_at: "2026-10-31T09:00:00Z",
-        },
-        { account: "client-a", status: "unavailable" },
-      ],
+      data: {
+        quotas: [
+          {
+            account: "default",
+            status: "available",
+            five_hour: { percent_used: 42, resets_at: "2026-10-31T14:10:00Z" },
+            seven_day: { percent_used: 91, resets_at: "2026-11-03T09:00:00Z" },
+            model_windows: [{ model: "Opus", percent_used: 30, resets_at: "2026-11-03T09:00:00Z" }],
+            observed_at: "2026-10-31T11:58:00Z",
+          },
+          {
+            account: "work",
+            status: "stale",
+            five_hour: { percent_used: 75, resets_at: "2026-10-31T11:00:00Z" },
+            seven_day: { percent_used: 20, resets_at: "2026-11-03T09:00:00Z" },
+            observed_at: "2026-10-31T09:00:00Z",
+          },
+          { account: "client-a", status: "unavailable" },
+        ],
+        usage: [],
+      },
     };
     renderHarnesses("claude-native", "?tab=settings");
 
@@ -681,14 +684,17 @@ describe("Harness details", () => {
     claudeQuotas = {
       isPending: false,
       dataUpdatedAt: Date.parse("2026-10-31T12:03:00Z"),
-      data: [
-        {
-          account: "default",
-          status: "available",
-          five_hour: { percent_used: 10, resets_at: "2026-10-31T14:00:00Z" },
-          observed_at: "2026-10-31T11:58:00Z",
-        },
-      ],
+      data: {
+        quotas: [
+          {
+            account: "default",
+            status: "available",
+            five_hour: { percent_used: 10, resets_at: "2026-10-31T14:00:00Z" },
+            observed_at: "2026-10-31T11:58:00Z",
+          },
+        ],
+        usage: [],
+      },
     };
     renderHarnesses("claude-native", "?tab=settings");
     expect(screen.getByTestId("claude-quota-default").textContent).toContain("Read 5m ago");
@@ -698,6 +704,83 @@ describe("Harness details", () => {
     hosts = [{ ...ONLINE, claude_accounts: { default: true } }];
     renderHarnesses("claude-native", "?tab=settings");
     expect(screen.getByTestId("claude-quota-default").textContent).toBe("Checking usage…");
+  });
+
+  it("shows Codex usage from the host's usage snapshot on the Codex settings tab", () => {
+    hosts = [{ ...ONLINE, configured_harnesses: { "codex-native": true } }];
+    claudeQuotas = {
+      isPending: false,
+      dataUpdatedAt: 0,
+      data: {
+        quotas: [{ account: "default", status: "unavailable" }],
+        usage: [
+          {
+            provider: "codex",
+            account: "default",
+            status: "available",
+            windows: [
+              {
+                kind: "session",
+                label: "5-hour",
+                percent_used: 12,
+                resets_at: "2026-10-31T14:10:00Z",
+                window_minutes: 300,
+              },
+              {
+                kind: "weekly",
+                label: "Weekly",
+                percent_used: 36,
+                resets_at: "2026-11-03T09:00:00Z",
+                window_minutes: 10080,
+              },
+            ],
+            observed_at: "2026-10-31T11:58:00Z",
+          },
+        ],
+      },
+    };
+    renderHarnesses("codex-native", "?tab=settings");
+
+    const usage = screen.getByTestId("codex-usage");
+    expect(within(usage).getByText("Default login")).toBeTruthy();
+    const text = screen.getByTestId("codex-usage-default").textContent;
+    expect(text).toContain("5-hour12% usedResets in 2h 10m");
+    expect(text).toContain("Weekly36% used");
+    expect(text).toContain("Read 2m ago");
+    expect(text).not.toContain("Stale");
+    // Codex has no Claude accounts list and Claude's tab has no Codex card.
+    expect(screen.queryByTestId("claude-accounts")).toBeNull();
+  });
+
+  it("says Codex usage is unavailable when the host cannot read it", () => {
+    hosts = [{ ...ONLINE, configured_harnesses: { "codex-native": true } }];
+    claudeQuotas = {
+      isPending: false,
+      dataUpdatedAt: 0,
+      data: {
+        quotas: [],
+        usage: [{ provider: "codex", account: "default", status: "unavailable", windows: [] }],
+      },
+    };
+    renderHarnesses("codex-native", "?tab=settings");
+    expect(screen.getByTestId("codex-usage-default").textContent).toBe("Usage unavailable");
+  });
+
+  it("says Codex usage is unavailable when an older host reports no usage at all", () => {
+    hosts = [{ ...ONLINE, configured_harnesses: { "codex-native": true } }];
+    claudeQuotas = {
+      isPending: false,
+      dataUpdatedAt: 0,
+      data: { quotas: [{ account: "default", status: "unavailable" }], usage: [] },
+    };
+    renderHarnesses("codex-native", "?tab=settings");
+    expect(screen.getByTestId("codex-usage-default").textContent).toBe("Usage unavailable");
+  });
+
+  it("says Codex usage is loading before the host answers", () => {
+    hosts = [{ ...ONLINE, configured_harnesses: { "codex-native": true } }];
+    renderHarnesses("codex-native", "?tab=settings");
+    expect(screen.getByTestId("codex-usage-default").textContent).toBe("Checking usage…");
   });
 
   it("explains when an older machine does not report Claude accounts", () => {
