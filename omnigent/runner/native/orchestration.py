@@ -8621,7 +8621,7 @@ async def _report_native_terminal_start_error(
 
 
 def _native_terminal_start_error_response(
-    exc: BaseException, runtime_name: str, *, session_id: str, error: dict[str, str] | None = None
+    exc: BaseException, runtime_name: str, *, session_id: str
 ) -> JSONResponse:
     """
     Return a structured JSON error for native terminal ensure failures.
@@ -8641,10 +8641,9 @@ def _native_terminal_start_error_response(
         or exc.code == ErrorCode.HARNESS_NOT_CONFIGURED
     ):
         status_code = exc.http_status
-    if error is None:
-        error = _native_terminal_start_error_payload(
-            exc, runtime_name, session_id=session_id, include_account_details=True
-        )
+    error = _native_terminal_start_error_payload(
+        exc, runtime_name, session_id=session_id, include_account_details=True
+    )
     return JSONResponse(
         status_code=status_code,
         content={
@@ -11025,13 +11024,12 @@ async def _ensure_native_terminal(
                         error_impact=ErrorImpact.BLOCKING.value,
                     ),
                 )
-            error = None
             if terminal_name == "claude":
-                error = await _report_native_terminal_start_error(
+                await _report_native_terminal_start_error(
                     ctx, agent.display_name, exc, persist=True
                 )
             return _native_terminal_start_error_response(
-                exc, agent.display_name, session_id=ctx.session_id, error=error
+                exc, agent.display_name, session_id=ctx.session_id
             )
         return respond(view)
 

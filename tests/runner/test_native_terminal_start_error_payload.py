@@ -657,10 +657,15 @@ async def test_claude_ensure_failure_persists_public_error(server_status: int) -
         posts.append(json.loads(request.content))
         return httpx.Response(server_status, json={})
 
+    recovery_message = (
+        "Claude account 'work' is not set up on 'mac-mini'. "
+        "Run omnigent claude setup --account work on mac-mini."
+    )
+
     async def refuse_account(
         ctx: orchestration.NativeLaunchContext,
     ) -> orchestration.NativeLaunchContext:
-        raise AccountUnavailableError("Claude account 'work' is not set up on 'mac-mini'.")
+        raise AccountUnavailableError(recovery_message)
 
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(handler), base_url="http://server"
@@ -679,9 +684,11 @@ async def test_claude_ensure_failure_persists_public_error(server_status: int) -
     assert response.status_code == 412
     error = json.loads(response.body)["error"]
     assert error["code"] == ErrorCode.CLAUDE_ACCOUNT_UNAVAILABLE
-    assert error == events[0]["error"]
+    assert error["message"] == recovery_message
+    public_error = events[0]["error"]
+    assert public_error["message"] == "Claude account unavailable"
     assert len(posts) == 1
     item = posts[0]["data"]["item_data"]
-    assert item["message"] == f"Claude account unavailable Error ID: {error['error_id']}."
+    assert item["message"] == f"Claude account unavailable Error ID: {public_error['error_id']}."
     assert "work" not in json.dumps(posts)
     assert "mac-mini" not in json.dumps(posts)
