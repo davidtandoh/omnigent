@@ -2120,6 +2120,7 @@ async def test_prepare_daemon_terminal_reports_progress_steps(
         session_id: str,
         *,
         timeout_s: float,
+        baseline_error_id: str | None,
     ) -> str:
         """
         Return the Claude terminal id once the wait phase is reached.
@@ -2151,6 +2152,10 @@ async def test_prepare_daemon_terminal_reports_progress_steps(
             target="claude:main",
         )
 
+    async def no_prior_error(*args: object) -> None:
+        return None
+
+    monkeypatch.setattr(claude_native, "_newest_session_error_item", no_prior_error)
     monkeypatch.setattr(claude_native, "_create_claude_session", fake_create_session)
     monkeypatch.setattr(claude_native, "record_startup_event", capture_startup_event)
     monkeypatch.setattr(claude_native, "wait_for_host_online", fake_wait_for_host_online)
@@ -2778,7 +2783,9 @@ async def test_terminal_ready_wait_surfaces_recorded_launch_failure() -> None:
     started = asyncio.get_event_loop().time()
     async with httpx.AsyncClient(transport=transport, base_url="https://example.com") as client:
         with pytest.raises(click.ClickException) as excinfo:
-            await claude_native._wait_for_claude_terminal_ready(client, "conv_abc", timeout_s=5.0)
+            await claude_native._wait_for_claude_terminal_ready(
+                client, "conv_abc", timeout_s=5.0, baseline_error_id=None
+            )
     elapsed = asyncio.get_event_loop().time() - started
 
     assert "could not start the Claude terminal" in excinfo.value.message
@@ -2807,7 +2814,9 @@ async def test_terminal_ready_wait_ignores_stale_error_items() -> None:
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport, base_url="https://example.com") as client:
         with pytest.raises(click.ClickException) as excinfo:
-            await claude_native._wait_for_claude_terminal_ready(client, "conv_abc", timeout_s=0.3)
+            await claude_native._wait_for_claude_terminal_ready(
+                client, "conv_abc", timeout_s=0.3, baseline_error_id="item_err_old"
+            )
 
     assert "did not create the Claude terminal" in excinfo.value.message
     assert "an earlier failure" not in excinfo.value.message
@@ -2839,7 +2848,9 @@ async def test_terminal_ready_wait_ignores_informational_notices() -> None:
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport, base_url="https://example.com") as client:
         with pytest.raises(click.ClickException) as excinfo:
-            await claude_native._wait_for_claude_terminal_ready(client, "conv_abc", timeout_s=0.3)
+            await claude_native._wait_for_claude_terminal_ready(
+                client, "conv_abc", timeout_s=0.3, baseline_error_id=None
+            )
 
     assert "did not create the Claude terminal" in excinfo.value.message
     assert items_calls > 1
@@ -12414,3 +12425,80 @@ def test_resolve_native_claude_config_spec_api_key_auth_skips_connect_broker(
     dc._write_sidecar(cfg, "https://srv", "hid", "launch-tok", "https://ws.example")
 
     assert claude_native.resolve_native_claude_config(spec=spec, refresh_models=False) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resumed", [False, True])
+async def test_daemon_prepare_observes_failure_before_first_poll(
+    monkeypatch: pytest.MonkeyPatch, resumed: bool
+) -> None:
+    items = [{"id": "old", "type": "error", "message": "old failure"}]
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/items"):
+            calls.append("items")
+            return httpx.Response(200, json={"data": items})
+        return httpx.Response(404)
+
+    @contextlib.asynccontextmanager
+    async def open_client(*args: object, **kwargs: object):
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://server"
+        ) as client:
+            yield client
+
+    async def create_session(*args: object, **kwargs: object) -> str:
+        return "conv_failure"
+
+    async def online(*args: object, **kwargs: object) -> None:
+        return None
+
+    async def launch(*args: object, **kwargs: object) -> str:
+        assert calls == ["items"]
+        items.insert(0, {"id": "new", "type": "error", "message": "launch refused"})
+        return "runner_failure"
+
+    monkeypatch.setattr(claude_native, "open_daemon_client", open_client)
+    monkeypatch.setattr(claude_native, "_create_claude_session", create_session)
+    monkeypatch.setattr(claude_native, "wait_for_host_online", online)
+    monkeypatch.setattr(claude_native, "wait_for_runner_online", online)
+    monkeypatch.setattr(claude_native, "launch_or_reuse_daemon_runner", launch)
+    monkeypatch.setattr(claude_native, "_ensure_claude_terminal_on_runner", online)
+    with pytest.raises(click.ClickException, match="launch refused"):
+        await asyncio.wait_for(
+            claude_native._prepare_claude_terminal_via_daemon(
+                base_url="http://server",
+                headers={},
+                session_id="conv_failure" if resumed else None,
+                session_bundle=None if resumed else b"bundle",
+                claude_args=(),
+                host_id="host",
+                workspace="/workspace",
+            ),
+            timeout=2.0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_claude_ensure_surfaces_definitive_runner_failure() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        return httpx.Response(
+            412,
+            json={
+                "error": {
+                    "code": "claude_account_unavailable",
+                    "message": "Claude account unavailable",
+                    "error_id": "err_launch",
+                }
+            },
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://server"
+    ) as client:
+        with pytest.raises(
+            click.ClickException, match="Claude account unavailable Error ID: err_launch"
+        ):
+            await claude_native._ensure_claude_terminal_on_runner(client, "conv_failure")

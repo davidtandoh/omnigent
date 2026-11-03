@@ -4631,6 +4631,7 @@ async def _wait_for_claude_terminal_ready(
     session_id: str,
     *,
     timeout_s: float,
+    baseline_error_id: str | None,
 ) -> str:
     """
     Poll until the runner has auto-created the Claude terminal.
@@ -4643,26 +4644,23 @@ async def _wait_for_claude_terminal_ready(
     A launch that dies (e.g. ``claude`` exits at argv parse) never
     produces a running terminal, but the runner does persist the
     failure as an error item with the captured pane output. The wait
-    watches for an error item that lands after it started and fails
+    watches for an error item that lands after launch was requested and fails
     fast with that real cause, instead of burning the full timeout and
     reporting only a generic message.
 
     :param client: HTTP client pointed at the Omnigent server.
     :param session_id: Session id, e.g. ``"conv_abc123"``.
     :param timeout_s: Max seconds to wait, e.g. ``60.0``.
+    :param baseline_error_id: Newest error id captured before requesting launch.
     :returns: The terminal resource id, e.g. ``"terminal_claude_main"``.
     :raises click.ClickException: If the launch failed (with the
         runner's recorded cause) or no terminal appears in time.
     """
     deadline = asyncio.get_event_loop().time() + timeout_s
     intervals = daemon_poll_intervals()
-    # Errors persisted before the wait began (e.g. a resumed session's old
-    # failure) are not this launch's outcome; only fail fast on a new one.
-    baseline = await _newest_session_error_item(client, session_id)
-    baseline_id = baseline[0] if baseline is not None else None
 
     def _launch_failure(error: tuple[str, str] | None) -> str | None:
-        if error is None or error[0] == baseline_id:
+        if error is None or error[0] == baseline_error_id:
             return None
         return error[1]
 
@@ -4713,16 +4711,15 @@ async def _ensure_claude_terminal_on_runner(
     already running, so this is a cheap no-op for the common
     runner-and-terminal-still-alive resume.
 
-    Best-effort: a failure here is not fatal — the subsequent
-    :func:`_wait_for_claude_terminal_ready` poll surfaces the clear error
-    if the terminal still never appears.
+    Transport failures fall back to terminal polling. A definitive runner
+    error ends preparation immediately with the reported cause.
 
     :param client: HTTP client pointed at the Omnigent server.
     :param session_id: Session id, e.g. ``"conv_abc123"``.
     :returns: None.
     """
     with contextlib.suppress(httpx.HTTPError):
-        await client.post(
+        response = await client.post(
             f"/v1/sessions/{url_component(session_id)}/resources/terminals",
             # ``ensure_native_terminal`` is the explicit signal that routes this
             # to the full claude-native auto-create (incl. cold resume) on the
@@ -4732,6 +4729,20 @@ async def _ensure_claude_terminal_on_runner(
             json={"terminal": "claude", "session_key": "main", "ensure_native_terminal": True},
             timeout=60.0,
         )
+        if response.is_error:
+            try:
+                payload = response.json()
+            except ValueError:
+                return
+            error = payload.get("error") if isinstance(payload, dict) else None
+            if isinstance(error, dict) and isinstance(error.get("message"), str):
+                message = error["message"]
+                error_id = error.get("error_id")
+                if isinstance(error_id, str) and error_id not in message:
+                    message = f"{message} Error ID: {error_id}."
+                raise click.ClickException(
+                    f"The runner could not start the Claude terminal for {session_id!r}:\n\n{message}"
+                )
 
 
 async def _prepare_claude_terminal_via_daemon(
@@ -4881,6 +4892,8 @@ async def _prepare_claude_terminal_via_daemon(
             startup_progress=startup_progress,
             progress_message="Starting runner...",
         )
+        baseline = await _newest_session_error_item(client, session_id)
+        baseline_error_id = baseline[0] if baseline is not None else None
         record_startup_event("runner_requested", session_id=session_id)
         runner_id = await launch_or_reuse_daemon_runner(
             client,
@@ -4938,7 +4951,10 @@ async def _prepare_claude_terminal_via_daemon(
                 progress_message="Starting Claude terminal...",
             )
             terminal_id = await _wait_for_claude_terminal_ready(
-                client, session_id, timeout_s=_DAEMON_TERMINAL_READY_TIMEOUT_S
+                client,
+                session_id,
+                timeout_s=_DAEMON_TERMINAL_READY_TIMEOUT_S,
+                baseline_error_id=baseline_error_id,
             )
         else:
             # Fresh launch: the runner auto-creates the terminal on session-start,
@@ -4957,7 +4973,10 @@ async def _prepare_claude_terminal_via_daemon(
             _, terminal_id = await asyncio.gather(
                 _wait_for_runner_online_with_startup_event(client, runner_id),
                 _wait_for_claude_terminal_ready(
-                    client, session_id, timeout_s=_DAEMON_TERMINAL_READY_TIMEOUT_S
+                    client,
+                    session_id,
+                    timeout_s=_DAEMON_TERMINAL_READY_TIMEOUT_S,
+                    baseline_error_id=baseline_error_id,
                 ),
             )
         record_startup_event("terminal_available", session_id=session_id)

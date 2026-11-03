@@ -2975,8 +2975,6 @@ def create_runner_app(
                 pre_launch=_launch_pre,
                 build_context=_launch_build,
                 resolve_agent_spec=_launch_resolve_spec,
-                # The claude CLI's terminal-ready wait fails fast on this item.
-                persist_start_error=harness_name == "claude-native",
             )
             # Only claude reported terminal_ready in the create-session response.
             if harness_name == "claude-native":

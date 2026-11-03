@@ -8608,8 +8608,20 @@ async def _persist_native_terminal_start_error(
         )
 
 
+async def _report_native_terminal_start_error(
+    ctx: NativeLaunchContext, runtime_name: str, exc: BaseException, *, persist: bool
+) -> dict[str, str]:
+    """Publish a start failure and optionally persist the same public payload."""
+    error = _publish_native_terminal_start_error(
+        ctx.publish_event, ctx.session_id, runtime_name, exc
+    )
+    if persist and ctx.server_client is not None:
+        await _persist_native_terminal_start_error(ctx.server_client, ctx.session_id, error)
+    return error
+
+
 def _native_terminal_start_error_response(
-    exc: BaseException, runtime_name: str, *, session_id: str
+    exc: BaseException, runtime_name: str, *, session_id: str, error: dict[str, str] | None = None
 ) -> JSONResponse:
     """
     Return a structured JSON error for native terminal ensure failures.
@@ -8629,9 +8641,10 @@ def _native_terminal_start_error_response(
         or exc.code == ErrorCode.HARNESS_NOT_CONFIGURED
     ):
         status_code = exc.http_status
-    error = _native_terminal_start_error_payload(
-        exc, runtime_name, session_id=session_id, include_account_details=True
-    )
+    if error is None:
+        error = _native_terminal_start_error_payload(
+            exc, runtime_name, session_id=session_id, include_account_details=True
+        )
     return JSONResponse(
         status_code=status_code,
         content={
@@ -10743,7 +10756,6 @@ async def _launch_native_terminal(
     resolve_agent_spec: (Callable[[], Awaitable[AgentSpec | ResolvedSpec | None]] | None) = None,
     build_context: Callable[[NativeLaunchContext], Awaitable[NativeLaunchContext]] | None = None,
     reraise: bool = False,
-    persist_start_error: bool = False,
 ) -> bool | None:
     """Auto-create a native harness terminal through the provider seam.
 
@@ -10778,8 +10790,6 @@ async def _launch_native_terminal(
     :param reraise: When ``True``, a builder failure re-raises after publishing
         the pending-off event instead of publishing a start-error event — used by
         the turn-path opencode cold-boot, which converts failure to an HTTP 503.
-    :param persist_start_error: When ``True``, a start failure is also recorded
-        as a session ``error`` item, which a CLI waiting for the terminal polls.
     :returns: ``True`` when a terminal exists or was created, ``False`` when
         creation failed or was skipped, or ``None`` when *harness_name* is not a
         native harness with a launch adapter (caller handles it another way).
@@ -10856,16 +10866,9 @@ async def _launch_native_terminal(
                 )
             if reraise:
                 raise
-            error = _publish_native_terminal_start_error(
-                ctx.publish_event,
-                ctx.session_id,
-                agent.display_name,
-                exc,
+            await _report_native_terminal_start_error(
+                ctx, agent.display_name, exc, persist=harness_name == "claude-native"
             )
-            if persist_start_error and ctx.server_client is not None:
-                await _persist_native_terminal_start_error(
-                    ctx.server_client, ctx.session_id, error
-                )
             return False
         finally:
             _publish_terminal_pending(ctx.publish_event, ctx.session_id, False)
@@ -11022,8 +11025,13 @@ async def _ensure_native_terminal(
                         error_impact=ErrorImpact.BLOCKING.value,
                     ),
                 )
+            error = None
+            if terminal_name == "claude":
+                error = await _report_native_terminal_start_error(
+                    ctx, agent.display_name, exc, persist=True
+                )
             return _native_terminal_start_error_response(
-                exc, agent.display_name, session_id=ctx.session_id
+                exc, agent.display_name, session_id=ctx.session_id, error=error
             )
         return respond(view)
 
