@@ -4592,8 +4592,8 @@ async def _newest_session_error_item(
 
     :param client: HTTP client pointed at the Omnigent server.
     :param session_id: Session id, e.g. ``"conv_abc123"``.
-    :returns: The newest error item's ``(id, message)``, or ``None``
-        when the session has none (or the read failed).
+    :returns: The newest non-informational error item's ``(id, message)``,
+        or ``None`` when the session has none (or the read failed).
     """
     try:
         resp = await client.get(
@@ -4614,6 +4614,10 @@ async def _newest_session_error_item(
         return None
     for item in items:
         if not isinstance(item, dict) or item.get("type") != "error":
+            continue
+        # Informational notices (e.g. "Signed in to Databricks") share the
+        # error item type but are not launch failures.
+        if item.get("level") == "info":
             continue
         item_id = item.get("id")
         message = item.get("message")

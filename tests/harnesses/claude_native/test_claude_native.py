@@ -2813,6 +2813,38 @@ async def test_terminal_ready_wait_ignores_stale_error_items() -> None:
     assert "an earlier failure" not in excinfo.value.message
 
 
+@pytest.mark.asyncio
+async def test_terminal_ready_wait_ignores_informational_notices() -> None:
+    """
+    An info-level notice that lands mid-launch does not abort the wait.
+
+    Notices such as "Signed in to Databricks" share the ``error`` item type
+    with ``level: "info"``; only a real failure may end the launch early.
+    """
+    items_calls = 0
+    notice = {
+        "id": "item_notice",
+        "type": "error",
+        "level": "info",
+        "message": "Claude Code is ready. Send your message again.",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal items_calls
+        if request.url.path.endswith("/items"):
+            items_calls += 1
+            return httpx.Response(200, json={"data": [] if items_calls == 1 else [notice]})
+        return httpx.Response(404, json={"error": {"message": "not found"}})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="https://example.com") as client:
+        with pytest.raises(click.ClickException) as excinfo:
+            await claude_native._wait_for_claude_terminal_ready(client, "conv_abc", timeout_s=0.3)
+
+    assert "did not create the Claude terminal" in excinfo.value.message
+    assert items_calls > 1
+
+
 # ── same-machine tmux attach (Phase 4) ─────────────────────
 
 

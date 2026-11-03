@@ -8558,6 +8558,56 @@ def _publish_native_terminal_start_error(
     return error
 
 
+async def _persist_native_terminal_start_error(
+    server_client: httpx.AsyncClient,
+    session_id: str,
+    error: Mapping[str, str],
+) -> None:
+    """
+    Record a native terminal start failure as a durable session ``error`` item.
+
+    The live ``session.status: failed`` event reaches only stream
+    subscribers. A CLI waiting for the terminal polls the session's items
+    instead, so without this item it sits out its whole timeout. The item
+    carries the same client-safe payload as the status event. Best-effort:
+    a failed post only loses the durable copy.
+
+    :param server_client: Runner Omnigent server client.
+    :param session_id: Session/conversation identifier, e.g. ``"conv_abc123"``.
+    :param error: Payload from :func:`_native_terminal_start_error_payload`,
+        e.g. ``{"code": ..., "error_id": "err_...", "message": ...}``.
+    :returns: None.
+    """
+    message = error["message"]
+    error_id = error.get("error_id")
+    if error_id and error_id not in message:
+        message = f"{message} Error ID: {error_id}."
+    try:
+        resp = await server_client.post(
+            f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}/events",
+            json={
+                "type": "external_conversation_item",
+                "data": {
+                    "item_type": "error",
+                    "item_data": {
+                        "source": "execution",
+                        "code": error["code"],
+                        "message": message,
+                    },
+                },
+            },
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPError:
+        _logger.warning(
+            "Could not record the terminal start failure for session %s",
+            session_id,
+            exc_info=True,
+            extra={"session_id": session_id},
+        )
+
+
 def _native_terminal_start_error_response(
     exc: BaseException, runtime_name: str, *, session_id: str
 ) -> JSONResponse:
@@ -10693,6 +10743,7 @@ async def _launch_native_terminal(
     resolve_agent_spec: (Callable[[], Awaitable[AgentSpec | ResolvedSpec | None]] | None) = None,
     build_context: Callable[[NativeLaunchContext], Awaitable[NativeLaunchContext]] | None = None,
     reraise: bool = False,
+    persist_start_error: bool = False,
 ) -> bool | None:
     """Auto-create a native harness terminal through the provider seam.
 
@@ -10727,6 +10778,8 @@ async def _launch_native_terminal(
     :param reraise: When ``True``, a builder failure re-raises after publishing
         the pending-off event instead of publishing a start-error event — used by
         the turn-path opencode cold-boot, which converts failure to an HTTP 503.
+    :param persist_start_error: When ``True``, a start failure is also recorded
+        as a session ``error`` item, which a CLI waiting for the terminal polls.
     :returns: ``True`` when a terminal exists or was created, ``False`` when
         creation failed or was skipped, or ``None`` when *harness_name* is not a
         native harness with a launch adapter (caller handles it another way).
@@ -10803,12 +10856,16 @@ async def _launch_native_terminal(
                 )
             if reraise:
                 raise
-            _publish_native_terminal_start_error(
+            error = _publish_native_terminal_start_error(
                 ctx.publish_event,
                 ctx.session_id,
                 agent.display_name,
                 exc,
             )
+            if persist_start_error and ctx.server_client is not None:
+                await _persist_native_terminal_start_error(
+                    ctx.server_client, ctx.session_id, error
+                )
             return False
         finally:
             _publish_terminal_pending(ctx.publish_event, ctx.session_id, False)
