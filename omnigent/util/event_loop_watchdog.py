@@ -54,7 +54,7 @@ def _capture_stack(thread_id: int) -> str:
 @contextmanager
 def monitor_event_loop(
     *,
-    process_role: Literal["server", "runner"] = "server",
+    process_role: Literal["server", "runner", "host"] = "server",
     stall_threshold_s: float = 5.0,
     sample_interval_s: float = 1.0,
     report_interval_s: float = 60.0,
@@ -65,8 +65,8 @@ def monitor_event_loop(
     executor to capture a stack. Reports are rate limited across all stalls in
     this context. A native extension holding the GIL can also delay this thread.
     """
-    if process_role not in {"server", "runner"}:
-        raise ValueError("Watchdog process role must be server or runner")
+    if process_role not in {"server", "runner", "host"}:
+        raise ValueError("Watchdog process role must be server, runner or host")
     for value in (stall_threshold_s, sample_interval_s, report_interval_s):
         if not math.isfinite(value) or value <= 0:
             raise ValueError("Watchdog intervals must be finite and positive")

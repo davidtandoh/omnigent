@@ -25,7 +25,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, SupportsIndex, SupportsInt, TypeVar, cast
@@ -42,6 +42,7 @@ from omnigent._platform import (
     installed_interactive_shells,
     normalize_interactive_shells,
 )
+from omnigent._startup_profile import StartupProfiler
 from omnigent.cli_invocation import cli_invocation
 from omnigent.debug_logging import (
     ORIGIN_WORKSPACE_ID_ENV_VAR,
@@ -4373,17 +4374,38 @@ class HostProcess:
             _logger.exception("Host Claude account readiness probe failed")
             return None
 
+    async def _timed_capability_probe(self, stage: str, operation: Awaitable[_T]) -> _T:
+        """Measure advisory startup work without exposing probe inputs or output."""
+        profiler = StartupProfiler(name=f"host {stage}", enabled=True)
+        outcome = "cancelled"
+        with contextlib.suppress(OSError):
+            profiler.mark("probe_started")
+        try:
+            result = await operation
+            outcome = "unknown" if result is None else "complete"
+            return result
+        except Exception:
+            outcome = "failed"
+            raise
+        finally:
+            with contextlib.suppress(OSError):
+                profiler.mark("probe_finished", detail=f"outcome={outcome}")
+
     async def _initialize_capabilities(self) -> None:
-        """Collect startup metadata before registration, with bounded fallback."""
+        """Collect advisory metadata in the background, with bounded fallback."""
         if self._capabilities_initialized:
             return
         generation = self._capability_generation
         try:
             configured, gateway, accounts = await asyncio.wait_for(
                 asyncio.gather(
-                    self._probe_configured_harnesses(startup=True),
-                    self._probe_gateway_inference(startup=True),
-                    self._probe_claude_accounts(),
+                    self._timed_capability_probe(
+                        "harness-readiness", self._probe_configured_harnesses(startup=True)
+                    ),
+                    self._timed_capability_probe(
+                        "gateway-inference", self._probe_gateway_inference(startup=True)
+                    ),
+                    self._timed_capability_probe("claude-accounts", self._probe_claude_accounts()),
                 ),
                 timeout=_HOST_CAPABILITY_INIT_TIMEOUT_S,
             )
@@ -4394,7 +4416,7 @@ class HostProcess:
                 _HOST_CAPABILITY_INIT_TIMEOUT_S,
             )
             print(
-                "⚠ Host capability discovery timed out; connecting with readiness unknown.",
+                "⚠ Host capability discovery timed out; readiness remains unknown.",
                 file=sys.stderr,
                 flush=True,
             )
@@ -5231,10 +5253,9 @@ class HostProcess:
     async def _serve_frames(
         self, ws: websockets.asyncio.client.ClientConnection, *, connection_id: str | None = None
     ) -> None:
-        """Wait for bounded startup discovery, register, then service the connection."""
+        """Register immediately; publish advisory discovery independently."""
+        profiler = StartupProfiler(name="host registration", enabled=True)
         self._start_capability_discovery()
-        if self._capability_init_task is not None:
-            await asyncio.shield(self._capability_init_task)
         _tel_opt_out = False
         try:
             from omnigent.telemetry.client import is_disabled as _tel_disabled
@@ -5269,13 +5290,15 @@ class HostProcess:
         except Exception as exc:
             raise HostConnectError(f"Could not encode host.hello: {exc}") from exc
         await self._send_text(ws, encoded_hello)
+        with contextlib.suppress(OSError):
+            profiler.mark("hello_sent")
         # A completed failed boot probe gets another best-effort chance only
         # after registration reaches the server. Keeping this out of the outer
         # connection-attempt loop avoids repeatedly spawning native probes while
         # the server is offline. Successful or in-flight work is retained.
         self._ensure_model_options_prewarm()
         self._ws = ws
-        readiness_task = asyncio.create_task(self._harness_readiness_loop(ws))
+        readiness_task = asyncio.create_task(self._harness_readiness_loop(ws, initial=True))
         try:
             # Reports raised while disconnected must wait until registration;
             # the server cannot route them before this connection owns the host.
@@ -5326,11 +5349,23 @@ class HostProcess:
     async def _harness_readiness_loop(
         self,
         ws: websockets.asyncio.client.ClientConnection,
+        *,
+        initial: bool = False,
     ) -> None:
         """Refresh advisory capabilities without endangering the tunnel."""
         published_configured = self._configured_harnesses
         published_gateway = self._gateway_inference
         published_accounts = self._claude_accounts
+        if initial and self._capability_init_task is not None:
+            try:
+                await asyncio.shield(self._capability_init_task)
+            except Exception:
+                _logger.exception("Initial host capability discovery failed; refresh will retry")
+            if self._configured_harnesses is not None:
+                await self._publish_harness_readiness(ws)
+                published_configured = self._configured_harnesses
+                published_gateway = self._gateway_inference
+                published_accounts = self._claude_accounts
         loop = asyncio.get_running_loop()
         next_quick = loop.time() + HARNESS_READINESS_REFRESH_INTERVAL_S
         next_full = loop.time() + HARNESS_READINESS_FULL_REFRESH_INTERVAL_S
@@ -5350,6 +5385,11 @@ class HostProcess:
                         )
                     except Exception:
                         _logger.exception("Host harness quick readiness probe failed")
+            if refresh_full and self._host_subprocess_tasks:
+                # A cancelled await can leave its native worker running. Do not
+                # add another probe until that worker has actually finished.
+                next_full = now + HARNESS_READINESS_REFRESH_INTERVAL_S
+                continue
             if refresh_full:
                 latest = await self._probe_configured_harnesses(startup=False)
                 latest_gateway = await self._probe_gateway_inference(startup=False)
@@ -5371,19 +5411,27 @@ class HostProcess:
                 or gateway != published_gateway
                 or (accounts or {}) != (published_accounts or {})
             ):
-                await self._send_text(
-                    ws,
-                    encode_host_frame(
-                        HostHarnessReadinessFrame(
-                            configured_harnesses=configured,
-                            gateway_inference=gateway,
-                            claude_accounts=accounts,
-                        )
-                    ),
-                )
+                await self._publish_harness_readiness(ws)
                 published_configured = configured
                 published_gateway = gateway
                 published_accounts = accounts
+
+    async def _publish_harness_readiness(
+        self, ws: websockets.asyncio.client.ClientConnection
+    ) -> None:
+        """Publish the current advisory snapshot through the existing protocol."""
+        if self._configured_harnesses is None:
+            return
+        await self._send_text(
+            ws,
+            encode_host_frame(
+                HostHarnessReadinessFrame(
+                    configured_harnesses=self._configured_harnesses,
+                    gateway_inference=self._gateway_inference,
+                    claude_accounts=self._claude_accounts,
+                )
+            ),
+        )
 
     def _raise_connection_error(self, frame: HostConnectionErrorFrame) -> None:
         """Raise the lifecycle exception requested by a server error frame."""
@@ -5771,6 +5819,14 @@ def _generate_ucode_configs() -> None:
     )
 
 
+async def _run_monitored_host(host: HostProcess) -> None:
+    """Capture a bounded stack if the production host's event loop stops advancing."""
+    from omnigent.util.event_loop_watchdog import monitor_event_loop
+
+    with monitor_event_loop(process_role="host"):
+        await host.run()
+
+
 def run_host_process(
     server_url: str,
     config_path: Path | None = None,
@@ -5974,7 +6030,7 @@ def _serve_host_until_exit(
         interactive_shells=interactive_shells,
     )
     try:
-        asyncio.run(host.run())
+        asyncio.run(_run_monitored_host(host))
     except HostConnectError as exc:
         # Fail loud: a permanent connection failure must not look like the
         # process is still working. Print the cause + fix, then exit non-zero
