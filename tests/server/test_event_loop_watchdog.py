@@ -39,7 +39,7 @@ def stall_records() -> Iterator[queue.Queue[logging.LogRecord]]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("process_role", ["server", "runner"])
+@pytest.mark.parametrize("process_role", ["server", "runner", "host"])
 async def test_captures_blocking_stack_rate_limits_and_recovers(
     stall_records, monkeypatch, process_role
 ) -> None:

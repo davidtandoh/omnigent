@@ -24,6 +24,30 @@ from omnigent.cli_diagnostics import suppresses_recovery_hint
 from omnigent.host.local_server import LocalServerStartup
 
 
+def test_host_status_can_exclude_quota_probes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An operational readiness check must not wait on provider quota work."""
+    record = SimpleNamespace(mode="local", target="local")
+    monkeypatch.setattr(cli_module, "_selected_daemon_records", lambda **kwargs: [record])
+    monkeypatch.setattr(cli_module, "_resolve_host_server", lambda server: None)
+    monkeypatch.setattr(
+        cli_module,
+        "_daemon_status_payload",
+        lambda *args, **kwargs: {
+            "host_status": "online",
+            "host_id": "test-host",
+            "server_url": "http://127.0.0.1:52131",
+            "process": "online",
+        },
+    )
+    with patch.object(cli_module, "_host_http_json") as quota:
+        result = CliRunner().invoke(
+            cli, ["host", "status", "--server", "", "--no-quotas", "--json"]
+        )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["daemons"][0]["host_status"] == "online"
+    quota.assert_not_called()
+
+
 @dataclass(frozen=True)
 class _SpawnedDaemon:
     """

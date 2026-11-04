@@ -11109,6 +11109,9 @@ def host_disable() -> None:
 @click.option("--server", default=None, help="Inspect only this server target.")
 @click.option("--all", "all_targets", is_flag=True, help="Inspect all known daemon targets.")
 @click.option("--sessions", is_flag=True, help="Include session table.")
+@click.option(
+    "--quotas/--no-quotas", default=True, help="Include provider quota probes (default: enabled)."
+)
 @click.option("--json", "json_output", is_flag=True, help="Emit JSON.")
 @click.pass_context
 def host_status(
@@ -11116,6 +11119,7 @@ def host_status(
     server: str | None,
     all_targets: bool,
     sessions: bool,
+    quotas: bool,
     json_output: bool,
 ) -> None:
     """
@@ -11126,6 +11130,7 @@ def host_status(
         ``"https://example.databricksapps.com"``.
     :param all_targets: Whether to inspect every known daemon target.
     :param sessions: Whether to include the session table.
+    :param quotas: Whether to fetch optional provider quota information.
     :param json_output: Whether to emit machine-readable JSON.
     """
     if server is None:
@@ -11145,7 +11150,8 @@ def host_status(
             connected_sessions_only=True,
         )
         if (
-            payload.get("host_status") == "online"
+            quotas
+            and payload.get("host_status") == "online"
             and isinstance(payload.get("host_id"), str)
             and isinstance(payload.get("server_url"), str)
         ):
@@ -11156,12 +11162,12 @@ def host_status(
                 host_id=payload["host_id"],
                 timeout_s=45.0,
             )
-            quotas = (
+            quota_values = (
                 quota_result.body.get("quotas") if isinstance(quota_result.body, dict) else None
             )
             payload["claude_quotas"] = (
-                quotas
-                if quota_result.status_code == 200 and isinstance(quotas, list)
+                quota_values
+                if quota_result.status_code == 200 and isinstance(quota_values, list)
                 else [{"account": "default", "status": "unavailable"}]
             )
         if (
