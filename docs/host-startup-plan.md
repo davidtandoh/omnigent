@@ -91,6 +91,14 @@ All applicable repository hooks pass, including Ruff, the full project type
 check and custom lint. No production ownership guard was relaxed to
 accommodate the sandbox.
 
+GitHub validation then found three credential E2E cases that read capability
+maps immediately after registration. The existing API poll now waits for a
+published map for both foreground and background hosts before applying the
+unchanged credential assertions. All three focused cases pass on the normal
+host in 52.38 seconds, with retries disabled and no model requests. The other
+GitHub workflows passed on the initial repair commit; the corrected test is
+submitted for its own CI run.
+
 The historical stall's exact blocked frame remains unknown. This patch
 removes advisory work from the registration path and adds diagnostics for
 future stalls. It does not establish cold-start percentiles or a latency

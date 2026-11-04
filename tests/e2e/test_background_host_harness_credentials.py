@@ -168,6 +168,20 @@ def test_background_host_preserves_explicit_harness_credentials(
             log_path.write_text(stop.stdout + stop.stderr)
             assert stop.returncode == 0, stop.stderr
 
+        def advertised(target_host_id: str) -> dict[str, Any] | None:
+            response = client.get("/v1/hosts")
+            response.raise_for_status()
+            return next(
+                (
+                    row
+                    for row in response.json()["hosts"]
+                    if row["host_id"] == target_host_id
+                    and row["status"] == "online"
+                    and isinstance(row.get("configured_harnesses"), dict)
+                ),
+                None,
+            )
+
         foreground_root = tmp_path / "foreground"
         foreground_env = host_env(foreground_root / "home")
         with isolated_host(
@@ -179,7 +193,12 @@ def test_background_host_preserves_explicit_harness_credentials(
             command=command,
         ) as host:
             try:
-                foreground = host.wait_online(client, timeout=60)
+                host.wait_online(client, timeout=60)
+                # Registration precedes advisory discovery. Wait for its real
+                # server-side advertisement before comparing credentials.
+                poll_until(lambda: advertised(host.host_id), timeout_s=30)
+                foreground = advertised(host.host_id)
+                assert foreground is not None
                 (tmp_path / "foreground-host.json").write_text(json.dumps(foreground, indent=2))
                 assert foreground["configured_harnesses"][harness] is True
                 assert foreground["configured_harnesses"]["antigravity"] is True
@@ -218,20 +237,8 @@ def test_background_host_preserves_explicit_harness_credentials(
             (tmp_path / "background-cli.txt").write_text(f"exit={process.returncode}\n{output}")
             assert process.returncode == 0, output
 
-            def online() -> dict[str, Any] | None:
-                response = client.get("/v1/hosts")
-                response.raise_for_status()
-                return next(
-                    (
-                        row
-                        for row in response.json()["hosts"]
-                        if row["host_id"] == host_id and row["status"] == "online"
-                    ),
-                    None,
-                )
-
-            poll_until(online, timeout_s=30)
-            background = online()
+            poll_until(lambda: advertised(host_id), timeout_s=30)
+            background = advertised(host_id)
             assert background is not None
             (tmp_path / "background-host.json").write_text(json.dumps(background, indent=2))
             assert background["configured_harnesses"]["antigravity"] == "needs-auth"
