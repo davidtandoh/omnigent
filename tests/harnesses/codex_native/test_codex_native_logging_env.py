@@ -91,7 +91,8 @@ async def test_app_server_start_passes_native_filter_only_to_enabled_subprocess(
     spawn_env: dict[str, str] = {}
 
     async def spawn(*args: object, **kwargs: object) -> None:
-        assert args[1] == "app-server"
+        # Config overrides now precede the subcommand.
+        assert "app-server" in args[1:]
         assert kwargs["stderr"] == asyncio.subprocess.PIPE
         spawn_env.update(cast("dict[str, str]", kwargs["env"]))
         raise SpawnObserved

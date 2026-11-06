@@ -23,6 +23,11 @@ _REPRO_AGENT = Path(__file__).resolve().parents[2] / "dev" / "repro-agent"
         "When the preflight recorder check passed, point the recorder at the facet's lane",
         "quote only visibly rendered text",
         "hidden accessibility labels and backend logs are not screen evidence",
+        "Caption the screen from screen evidence",
+        "An absence check covers only the element it targets",
+        "name the checked element",
+        "after checking only the chat pane",
+        "unless every place showing that state was checked",
     ],
 )
 def test_recording_guidance_reaches_the_final_prompt(guidance: str) -> None:

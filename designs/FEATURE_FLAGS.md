@@ -23,11 +23,17 @@ flag change because server capabilities are cached at page boot.
 
 ## Inventory
 
-See `FEATURE_DEFINITIONS` in
-[`omnigent/server/feature_flags.py`](../omnigent/server/feature_flags.py) for
-the authoritative keys, purposes, owners, and review releases. `FeatureFlags`
-in that module defines the enabled defaults. Inspect `GET /v1/info` for the
-frontend-visible values resolved by a running server.
+| Key | Default | Owner | Review by | Purpose |
+| --- | --- | --- | --- | --- |
+| `codex_plan_at_launch` | On | Server | 0.22.0 | Allows the new-session composer to start Codex in Plan mode. Missing or disabled support disables this launch option; connected hosts must also advertise support. |
+| `session_orchestration` | On | Server | 0.22.0 | Private-owner peer messages and independent workers. Append `-session_orchestration` and restart every server replica to refuse new orchestration; already accepted work may finish. Existing reads and child operations remain available. Server-only; not exposed in `/v1/info`. |
+| `automations_v2` | Off | Server | 0.20.0 | Shared backend/UI rollout for automation improvements: scheduling, run management, execution targets and UI. Currently selects the DB scheduler instead of per-task timers and is exposed to the frontend. Requires a transactional store; a multi-replica deployment also supplies host ownership, and coordinated restart and startup draining are required when switching schedulers. See the [scheduler integration contract](../omnigent/server/scheduled/README.md). |
+| `usage_page` | Off | Web | 0.11.0 | Exposes the web Usage route, sidebar navigation, timeline, and cost breakdown details. The existing `GET /v1/usage` CLI API remains available while off. |
+| `harness_install` | Off | Onboarding | 0.11.0 | Allows the web UI to install or configure supported harnesses on a connected host. |
+| `canvas` | Off | Web | 0.15.0 | Exposes the web Canvas route (`/canvas`) and its sidebar navigation: top-level sessions as draggable cards, one canvas per project. |
+| `custom_agents_settings_ui` | Off | Web | 0.18.0 | Exposes Custom agents settings when the server also advertises `agent_install`. |
+| `sidebar_grouping_ui` | Off | Web | 0.19.0 | Adds Grouping, Ordering and Show options to the sidebar filter menu, moves that menu to the Projects header, splits Shared sessions into their own section, lets a Status or Updated grouping replace the Projects, Shared and Sessions sections, and expands the session tooltip with Repo, PR and Created by. |
+| `claude_osc_status` | On | Runner | 0.20.0 | Uses Claude OSC 7501 reports for working status, with legacy file/pane fallback. Set on the host/runner; applies to newly launched Claude-native terminals after restart. Not exposed in `/v1/info`. |
 
 At the review release, each flag must be removed by making the feature
 unconditional, removing the feature, or moving a genuinely permanent operator
@@ -53,9 +59,19 @@ for Claude working-status acceptance and kill-switch verification.
    features, apply the override to the host/runner environment, restart those
    processes, and launch fresh terminals.
 
-The built-in server entrypoints do not yet supply the required execution/recovery
-hooks. Enabling `automations_v2` there fails startup, even if only UI changes are
-needed. A deployment wrapper must provide the hooks through `create_app()`.
+With `automations_v2`, the built-in server entrypoints run claimed runs with the
+built-in executor and own every host, which suits a single replica. A
+multi-replica deployment passes its own host ownership through `create_app()`.
+
+For `session_orchestration`, verify the server gate with an actual peer-message
+or independent-create request; `/v1/info` does not advertise this backend flag.
+The server override is authoritative even when a host/runner enables the feature.
+The tools remain advertised while disabled. This kill switch does not cancel
+accepted work or disable existing session reads, ordinary messages or child work.
+Ownership, private-source ancestry and runner-binding checks always apply.
+Legacy sessions without the scheduled-origin marker remain eligible; the default
+change does not backfill old scheduling history. See the
+[orchestration feature map](../feature-map/session-orchestration.md).
 
 Before enabling `automations_v2`, deploy the schema and updated code to every server replica. Older servers cannot read `starting` runs or preserve their cleanup records when deleting tasks.
 
