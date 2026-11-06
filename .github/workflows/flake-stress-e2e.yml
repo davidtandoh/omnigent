@@ -251,17 +251,17 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Install Claude Code CLI
-        uses: davidtandoh/omnigent/.github/actions/setup-harness-cli@e83c65d4a60d344dbbadf6524b2c96980898627b
+        uses: davidtandoh/omnigent/.github/actions/setup-harness-cli@1c45254fec98e8e7b3c95c0c82e46fc4eb60b254
         with:
           harness: claude
 
       - name: Install Codex CLI
-        uses: davidtandoh/omnigent/.github/actions/setup-harness-cli@e83c65d4a60d344dbbadf6524b2c96980898627b
+        uses: davidtandoh/omnigent/.github/actions/setup-harness-cli@1c45254fec98e8e7b3c95c0c82e46fc4eb60b254
         with:
           harness: codex
 
       - name: Install Pi CLI
-        uses: davidtandoh/omnigent/.github/actions/setup-harness-cli@e83c65d4a60d344dbbadf6524b2c96980898627b
+        uses: davidtandoh/omnigent/.github/actions/setup-harness-cli@1c45254fec98e8e7b3c95c0c82e46fc4eb60b254
         with:
           harness: pi
 
