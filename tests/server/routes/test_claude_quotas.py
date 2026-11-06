@@ -131,7 +131,7 @@ async def test_slow_host_quota_reply_is_not_discarded(quota_app):
     task = asyncio.create_task(request_host_claude_quotas(registry, conn))
     frame = decode_host_frame((await asyncio.wait_for(conn.outbound_queue.get(), 2)).data)
     assert isinstance(frame, HostClaudeQuotasFrame)
-    await asyncio.sleep(21)
+    await asyncio.sleep(21)  # custom-lint: disable=sleep-then-assert -- reply after 20s
     future = conn.pending_claude_quotas.get(frame.request_id)
     if future is not None:
         future.set_result(

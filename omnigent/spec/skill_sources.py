@@ -104,6 +104,10 @@ class SkillSourceContext:
         Set by :func:`resolve_harness_skills` from the harness id. Gates the
         terminal-matching resolution (including config-home tiers)
         so it applies only to native harnesses, never the in-process SDK ones.
+    :param warnings: When not ``None``, providers append a user-facing note
+        for each source they could not read (for example a failed
+        ``codex plugin list``), so callers can show an incomplete catalog as
+        incomplete rather than empty.
     """
 
     roots: tuple[Path, ...]
@@ -113,6 +117,7 @@ class SkillSourceContext:
     claude_config_dir: Path | None = None
     codex_home: Path | None = None
     is_native: bool = False
+    warnings: list[str] | None = None
 
 
 SkillSource = Callable[[SkillSourceContext], list[SkillSpec]]
@@ -125,6 +130,7 @@ def skill_source_context_from_env(
     skills_filter: str | list[str] = "all",
     bundle_dir: Path | None = None,
     launch_env: Mapping[str, str] | None = None,
+    warnings: list[str] | None = None,
 ) -> SkillSourceContext:
     """Resolve harness configuration from the selected launch environment."""
     from omnigent.harnesses.claude_native.account import selected_claude_config_dir
@@ -143,6 +149,7 @@ def skill_source_context_from_env(
         bundle_dir=bundle_dir,
         claude_config_dir=configured_claude_dir,
         codex_home=codex_home,
+        warnings=warnings,
     )
 
 
@@ -277,6 +284,7 @@ def resolve_session_skills(
     bundle_dir: Path | None,
     *,
     launch_env: Mapping[str, str] | None = None,
+    warnings: list[str] | None = None,
 ) -> list[SkillSpec]:
     """Use identical precedence and filters for menu discovery and invocation."""
     from omnigent.harness_aliases import canonicalize_harness
@@ -291,15 +299,23 @@ def resolve_session_skills(
         skills_filter=spec.skills_filter,
         bundle_dir=bundle_dir,
         launch_env=launch_env,
+        warnings=warnings,
     )
     for skill in resolve_harness_skills(ctx, harness):
         if skill.name in seen:
             continue
-        if skill.skill_dir is not None and skill.skill_dir.resolve() in seen_dirs:
-            continue
-        seen.add(skill.name)
+        resolved_dir = None
         if skill.skill_dir is not None:
-            seen_dirs.add(skill.skill_dir.resolve())
+            try:
+                resolved_dir = skill.skill_dir.resolve()
+            except FileNotFoundError:
+                _log.warning("Skipping host skill whose directory disappeared during discovery")
+                continue
+            if resolved_dir in seen_dirs:
+                continue
+        seen.add(skill.name)
+        if resolved_dir is not None:
+            seen_dirs.add(resolved_dir)
         merged.append(skill)
     return merged
 
@@ -885,7 +901,9 @@ def codex_host_skills(ctx: SkillSourceContext) -> list[SkillSpec]:
         out.append(replace(spec, name=name))
     codex_home = host_override if host_override is not None else ctx.home / ".codex"
     cwd = ctx.roots[0] if ctx.roots else None
-    out.extend(discover_codex_plugin_skills(codex_home, ctx.skills_filter, cwd=cwd))
+    out.extend(
+        discover_codex_plugin_skills(codex_home, ctx.skills_filter, cwd=cwd, warnings=ctx.warnings)
+    )
     return out
 
 

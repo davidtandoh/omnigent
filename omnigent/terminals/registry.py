@@ -335,7 +335,13 @@ class TerminalRegistry:
                             raise RuntimeError(f"Session custody refused: {exc}") from exc
                     return existing
             if existing is not None:
-                await self.close(conversation_id, terminal_name, session_key, _preserve_lock=True)
+                await self.close(
+                    conversation_id,
+                    terminal_name,
+                    session_key,
+                    expected=existing,
+                    _preserve_lock=True,
+                )
 
             if custody is not None:
                 try:
