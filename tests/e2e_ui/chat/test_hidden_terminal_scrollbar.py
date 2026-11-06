@@ -208,6 +208,8 @@ def _assert_hidden_output(
         Image.open(io.BytesIO(before)).convert("RGB"),
         Image.open(io.BytesIO(after)).convert("RGB"),
     )
+    # Ignore +-2 anti-aliasing on neighbouring rounded edges; a painted slider differs far more.
+    diff = diff.point(lambda value: 255 if value > 2 else 0)
     assert diff.getbbox() is None, (
         f"Hidden terminal output changed visible pixels during {phase}; "
         f"compare {artifacts / f'{phase}-before.png'} and {artifacts / f'{phase}-after.png'}"

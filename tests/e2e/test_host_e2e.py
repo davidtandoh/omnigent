@@ -154,7 +154,8 @@ def _spawn_host_daemon(
             "--server",
             live_server,
         ]
-    with open(daemon_log, "w") as log_fh:
+    # Append like the real daemon log, so stdio and the log handler interleave.
+    with open(daemon_log, "a") as log_fh:
         proc = subprocess.Popen(
             # Compat-aware: pinned OLD host venv in runner compat mode (Config 2),
             # else the test process's python. apply_runner_env drops the inherited
@@ -436,7 +437,7 @@ def test_host_name_only_config_generates_host_id(
         "OPENAI_API_KEY": "mock-key",
         PROCESS_LOG_FILE_ENV_VAR: str(daemon_log),
     }
-    with open(daemon_log, "w") as log_fh:
+    with open(daemon_log, "a") as log_fh:
         proc = subprocess.Popen(
             [runner_executable(), "-m", "omnigent.host._daemon_entry", "--server", live_server],
             env=apply_runner_env(env),
@@ -1026,7 +1027,8 @@ def _spawn_host_daemon_for_mock_claude(
         "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
         PROCESS_LOG_FILE_ENV_VAR: str(daemon_log),
     }
-    with open(daemon_log, "w") as log_fh:
+    # Append like the real daemon log, so stdio and the log handler interleave.
+    with open(daemon_log, "a") as log_fh:
         proc = subprocess.Popen(
             # Compat-aware: pinned OLD host venv in runner compat mode (Config 2),
             # else the test process's python. apply_runner_env drops the inherited

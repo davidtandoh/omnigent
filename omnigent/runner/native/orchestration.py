@@ -287,7 +287,7 @@ def _record_codex_terminal_cleanup_refusal(
     }
     for server in _AUTO_CODEX_APP_SERVERS.values():
         if (
-            server.listen_url in remote_urls
+            getattr(server, "listen_url", None) in remote_urls
             and getattr(server, "terminal_cleanup_refusal", None) is None
         ):
             server.terminal_cleanup_refusal = refusal
@@ -339,8 +339,9 @@ async def guard_codex_native_cleanup(
     launch_ids = []
     for launch_session_id, server in list(_AUTO_CODEX_APP_SERVERS.items()):
         refusal = getattr(server, "terminal_cleanup_refusal", None)
+        listen_url = getattr(server, "listen_url", None)
         if not (
-            server.listen_url in related_urls
+            listen_url in related_urls
             or launch_session_id == session_id
             or _codex_native_active_session_id(launch_session_id) == session_id
             or getattr(refusal, "session_id", None) == session_id
@@ -350,7 +351,7 @@ async def guard_codex_native_cleanup(
             continue
         if refusal is not None:
             raise refusal
-        if server.listen_url in pending_urls:
+        if listen_url in pending_urls:
             raise OmnigentError(
                 "Terminal cleanup refused: process_pending", code="process_pending"
             )

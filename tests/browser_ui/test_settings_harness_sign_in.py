@@ -55,6 +55,8 @@ def test_expired_codex_account_recovers_on_selected_machine(
         contract.json(prefix + "/plugins", {"plugins": []})
         contract.json(re.compile(r"/v1/skills(?:\?.*)?$"), {"skills": []})
         contract.json(prefix + "/credentials/detected", {"credentials": []})
+        # The fork's Settings quota cards read this host's usage snapshot.
+        contract.json(prefix + "/claude-quotas", {"quotas": [], "usage": []})
         contract.json(
             prefix + "/harnesses/codex-native/startup",
             {

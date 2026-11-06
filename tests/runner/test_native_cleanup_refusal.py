@@ -166,6 +166,8 @@ async def test_opencode_launch_cancellation_preserves_refused_dependencies(
                 terminal_launch_args=None,
                 external_session_id=None,
                 fork_carry_history=False,
+                fork_source_id=None,
+                fork_source_external_id=None,
             )
         ),
     )
@@ -190,7 +192,7 @@ async def test_opencode_launch_cancellation_preserves_refused_dependencies(
         aclose=AsyncMock(),
     )
     monkeypatch.setattr(app_server, "OpenCodeNativeServer", lambda **_kw: server)
-    monkeypatch.setattr(app_server, "opencode_terminal_env", lambda _server: {})
+    monkeypatch.setattr(app_server, "opencode_terminal_env", lambda *_a, **_kw: {})
     forwarder_started = asyncio.Event()
     forwarder_tasks = []
 

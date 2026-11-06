@@ -201,6 +201,7 @@ def test_automatic_review_runs_base_workflow_and_excludes_fork_prs(
             "gate": {"result": gate},
             "trigger": {"result": "success", "outputs": {"eligible": eligible}},
         },
+        "inputs": {},
         "cancelled": cancelled,
     }
     jobs = workflow["jobs"]

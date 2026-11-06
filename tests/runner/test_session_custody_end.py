@@ -570,6 +570,7 @@ def test_global_stop_excludes_covered_sessions_and_isolates_refusals(
     monkeypatch.setattr(custody, "end_session", end)
     terminate = Mock()
     monkeypatch.setattr(cli, "_terminate_daemon", terminate)
+    monkeypatch.setattr(cli, "_record_daemon_stop_requested", Mock())
     monkeypatch.setattr(cli, "local_server_url_if_healthy", lambda: None)
     monkeypatch.setattr(cli, "stop_local_omnigent_server", Mock())
     monkeypatch.setattr(cli, "stop_untracked_local_server", lambda: None)

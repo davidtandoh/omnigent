@@ -2427,6 +2427,10 @@ async def test_codex_adapter_keeps_multiple_text_blocks_out_of_shell_mode(
     monkeypatch.setattr(
         codex_native_executor, "_connect_to_app_server", AsyncMock(return_value=client)
     )
+    # No forwarder completes this turn; skip the final-response wait.
+    monkeypatch.setattr(
+        codex_native_executor, "_await_final_response", AsyncMock(return_value=None)
+    )
     executor = codex_native_executor.CodexNativeExecutor(bridge_dir=tmp_path)
     adapter = ExecutorAdapter(executor_factory=lambda: executor, session_key="session_blocks")
     blocks = [
