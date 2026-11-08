@@ -159,6 +159,7 @@ function ComposerMicButtonImpl(
   const [error, setError] = useState<string | null>(null);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const sessionRef = useRef<DictationSession | null>(null);
+  const startAbortRef = useRef<AbortController | null>(null);
   // Refs so handlers aren't re-attached on every parent re-render.
   const onTranscriptRef = useRef(onTranscript);
   onTranscriptRef.current = onTranscript;
@@ -340,6 +341,9 @@ function ComposerMicButtonImpl(
   // new-chat dialog closes while dictating).
   useEffect(
     () => () => {
+      discardingRef.current = true;
+      endPendingRef.current = true;
+      startAbortRef.current?.abort();
       sessionRef.current?.cancel();
       sessionRef.current = null;
     },
@@ -455,38 +459,44 @@ function ComposerMicButtonImpl(
       interimRef.current = "";
       setConnecting(true);
       onVoiceStartRef.current?.();
-      const next = await DictationSession.start({
-        onPartial: (text) => {
-          // Drop late partials after an Esc discard — they'd repopulate the
-          // composer the parent just reverted.
-          if (!disabledRef.current && !discardingRef.current && !sentRef.current) {
-            interimRef.current = text;
-            onInterimRef.current?.(text);
-          }
+      const startAbort = new AbortController();
+      startAbortRef.current = startAbort;
+      const next = await DictationSession.start(
+        {
+          onPartial: (text) => {
+            // Drop late partials after an Esc discard — they'd repopulate the
+            // composer the parent just reverted.
+            if (!disabledRef.current && !discardingRef.current && !sentRef.current) {
+              interimRef.current = text;
+              onInterimRef.current?.(text);
+            }
+          },
+          onFinal: (text) => {
+            interimRef.current = "";
+            const trimmed = text.trim();
+            if (trimmed && !disabledRef.current && !discardingRef.current && !sentRef.current) {
+              onTranscriptRef.current(trimmed);
+            }
+          },
+          onError: () => {
+            sessionRef.current = null;
+            // Preserve anything spoken but not yet finalized: pin the pending
+            // partial as a final rather than blanking it, so a crash mid-take
+            // doesn't discard the user's words.
+            const pending = interimRef.current.trim();
+            interimRef.current = "";
+            if (pending && !disabledRef.current && !discardingRef.current && !sentRef.current) {
+              onTranscriptRef.current(pending);
+            } else {
+              onInterimRef.current?.("");
+            }
+            reportError("Voice input failed. Please try again.");
+            setIsListening(false);
+          },
         },
-        onFinal: (text) => {
-          interimRef.current = "";
-          const trimmed = text.trim();
-          if (trimmed && !disabledRef.current && !discardingRef.current && !sentRef.current) {
-            onTranscriptRef.current(trimmed);
-          }
-        },
-        onError: () => {
-          sessionRef.current = null;
-          // Preserve anything spoken but not yet finalized: pin the pending
-          // partial as a final rather than blanking it, so a crash mid-take
-          // doesn't discard the user's words.
-          const pending = interimRef.current.trim();
-          interimRef.current = "";
-          if (pending && !disabledRef.current && !discardingRef.current && !sentRef.current) {
-            onTranscriptRef.current(pending);
-          } else {
-            onInterimRef.current?.("");
-          }
-          reportError("Voice input failed. Please try again.");
-          setIsListening(false);
-        },
-      });
+        startAbort.signal,
+      );
+      startAbortRef.current = null;
       if (endPendingRef.current) {
         // The take was ended (e.g. a Send tap) while the socket was still
         // connecting. Discard the session we just opened instead of attaching
@@ -516,6 +526,7 @@ function ComposerMicButtonImpl(
     }
     // Reached only by the start path (the stop branch returns earlier). Clear
     // the handshake spinner and reconcile endPendingRef on success and failure.
+    startAbortRef.current = null;
     setConnecting(false);
     serverBusyRef.current = false;
     endPendingRef.current = false;
@@ -586,6 +597,7 @@ function ComposerMicButtonImpl(
     if (serverBusyRef.current) {
       endPendingRef.current = true;
       discardingRef.current = true;
+      startAbortRef.current?.abort();
       return;
     }
     if (!isListening && !transitionRef.current) return;

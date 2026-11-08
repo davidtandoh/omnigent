@@ -31,7 +31,9 @@ interface SessionStub {
   stop: () => Promise<string>;
   cancel: () => void;
 }
-let sessionStartMock: Mock<(events: DictationSessionEvents) => Promise<SessionStub>>;
+let sessionStartMock: Mock<
+  (events: DictationSessionEvents, signal?: AbortSignal) => Promise<SessionStub>
+>;
 let sessionStopMock: Mock<() => Promise<string>>;
 let sessionCancelMock: Mock<() => void>;
 let sessionEvents: DictationSessionEvents | null;
@@ -41,7 +43,8 @@ vi.mock("@/lib/dictation", () => {
   return {
     DictationBusyError,
     DictationSession: {
-      start: (events: DictationSessionEvents) => sessionStartMock(events),
+      start: (events: DictationSessionEvents, signal?: AbortSignal) =>
+        sessionStartMock(events, signal),
     },
   };
 });
@@ -619,6 +622,64 @@ describe("ComposerMicButton (server dictation)", () => {
     });
     expect(onTranscript).not.toHaveBeenCalled();
     expect(onVoiceSend).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops a pending stop and late transcripts after unmount", async () => {
+    let resolveStop!: (tail: string) => void;
+    sessionStopMock = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveStop = resolve;
+        }),
+    );
+    const onTranscript = vi.fn();
+    const onInterim = vi.fn();
+    const onVoiceSend = vi.fn();
+    const view = renderServerMode({ onTranscript, onInterim, onVoiceSend });
+    await clickMic();
+    await clickMic();
+    expect(sessionStopMock).toHaveBeenCalledTimes(1);
+    view.unmount();
+    await act(async () => {
+      sessionEvents?.onPartial("late partial");
+      sessionEvents?.onFinal("late final");
+      resolveStop("tail from the previous conversation");
+    });
+    expect(onTranscript).not.toHaveBeenCalled();
+    expect(onInterim).not.toHaveBeenCalled();
+    expect(onVoiceSend).not.toHaveBeenCalled();
+  });
+
+  it.each(["send", "unmount"])("aborts pending startup on %s", async (action) => {
+    let signal!: AbortSignal;
+    sessionStartMock = vi.fn((_events, startSignal) => {
+      signal = startSignal!;
+      return new Promise<SessionStub>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new DOMException("Cancelled", "AbortError")));
+      });
+    });
+    vi.stubGlobal("SpeechRecognition", undefined);
+    vi.stubGlobal("webkitSpeechRecognition", undefined);
+    const ref = createRef<ComposerMicButtonHandle>();
+    const view = render(
+      <CapabilitiesContext.Provider value={DICTATION_INFO}>
+        <ComposerMicButton ref={ref} onTranscript={vi.fn()} />
+      </CapabilitiesContext.Provider>,
+    );
+    await clickMic();
+    expect(signal.aborted).toBe(false);
+    await act(async () => {
+      if (action === "send") ref.current?.endTake();
+      else view.unmount();
+      expect(signal.aborted).toBe(true);
+    });
+    expect(showToastMock).not.toHaveBeenCalled();
+    if (action === "send") {
+      expect(screen.getByRole("button", { name: "Voice dictation" })).toHaveAttribute(
+        "aria-busy",
+        "false",
+      );
+    }
   });
 
   it("stop with an empty tail clears the interim region and still sends", async () => {
