@@ -160,9 +160,11 @@ apply only to that side chat. See the [side-chat settings recipe](sessions.md).
   be removed. State: unsupported file type rejected without losing the message.
 - `dictation`: the microphone button beside the message box dictates speech
   into the composer at the caret; ⌘/Ctrl+Alt+V toggles it unless focus is in a
-  terminal or code editor. While listening, Enter keeps the dictated text and
-  Escape discards it. The button is absent when neither the browser nor the
-  server can transcribe.
+  terminal or code editor. While listening, tapping the mic or pressing Enter
+  sends the dictated text once and turns the mic off; Escape discards it, and
+  the hotkey stops while keeping the text. Sending any other way also ends the
+  take. The button is absent when neither the browser nor the server can
+  transcribe.
 - `send-shortcut`: Enter or Mod+Enter, chosen in settings; only one gesture sends.
   Shift+Enter and Alt/Option+Enter insert a newline in both composers. The
   Inbox reply box follows the same shortcut.

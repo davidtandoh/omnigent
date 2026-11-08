@@ -1252,6 +1252,22 @@ describe("unsent composer state survives the pane moving", () => {
     expect(screen.getByTestId("side-chat-input")).toHaveValue("half-typed question");
   });
 
+  it("sends a dictated question once when the mic ends the take", async () => {
+    conversationRegistry.acquire(childId).setState({ sessionStatus: "idle" });
+    renderPane(<SideChatPane childId={childId} />);
+    // The tail and the send arrive in one turn, before React renders the tail.
+    act(() => {
+      mic.current!.onTranscript("dictated question");
+      mic.current!.onVoiceSend!();
+    });
+
+    await waitFor(() => expect(send).toHaveBeenCalledOnce());
+    expect(send).toHaveBeenCalledWith("dictated question", "agent_side", undefined, {
+      pinnedConversationId: childId,
+    });
+    expect(screen.getByTestId("side-chat-input")).toHaveValue("");
+  });
+
   it.each([false, true])(
     "drops only its own draft once sent (full session: %s)",
     async (fullSession) => {

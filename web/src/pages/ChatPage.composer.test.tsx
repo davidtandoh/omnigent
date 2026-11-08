@@ -8015,6 +8015,31 @@ describe("Composer voice dictation", () => {
     expect(mic).toHaveAttribute("aria-pressed", "false");
   });
 
+  it("sends the dictated message once when the mic is tapped again", () => {
+    onTestFinished(forceDesktopCoarsePointer());
+    const onSend = vi.fn();
+    render(<Composer {...composerProps({ onSend })} />);
+    const mic = screen.getByRole("button", { name: "Voice dictation" });
+    fireEvent.click(mic);
+    act(() => handlers.start?.({}));
+    act(() => handlers.result?.(finalResult("first part")));
+
+    // Tapping the live mic stops the recognizer; its last sentence lands before "end".
+    fireEvent.click(mic);
+    expect(stopSpy).toHaveBeenCalledTimes(1);
+    expect(onSend).not.toHaveBeenCalled();
+    act(() => handlers.result?.(finalResult("and the tail")));
+    act(() => handlers.end?.({}));
+
+    expect(onSend).toHaveBeenCalledExactlyOnceWith("first part and the tail", undefined);
+    expect(textarea().value).toBe("");
+    expect(mic).toHaveAttribute("aria-pressed", "false");
+    // The take already ended, so the send's endTake does not abort it again.
+    expect(abortSpy).not.toHaveBeenCalled();
+    act(() => handlers.result?.(finalResult("late words")));
+    expect(textarea().value).toBe("");
+  });
+
   it.each([
     { name: "deslop", input: "/deslop fix the bug", args: "fix the bug" },
     // A multi-word skill whose first word is a built-in takes an earlier branch.

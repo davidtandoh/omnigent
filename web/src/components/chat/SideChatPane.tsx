@@ -5,6 +5,7 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useReducer,
   useRef,
   useState,
   type ClipboardEvent,
@@ -880,6 +881,16 @@ function SideChatComposer({
     void send(message, agentId, outgoing, { pinnedConversationId: childId }).finally(refreshLabels);
   };
 
+  // A voice send waits for the render that holds the flushed tail, so submit
+  // reads the whole draft. It never interrupts the side chat's running turn.
+  const voiceSendRef = useRef(false);
+  const [, requestVoiceSend] = useReducer((count: number) => count + 1, 0);
+  useEffect(() => {
+    if (!voiceSendRef.current) return;
+    voiceSendRef.current = false;
+    submit();
+  });
+
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>, intent: ComposerKeyIntent) => {
     // Mod+Enter submits any draft, then steers the whole queue into the running turn.
     if (queues && intent.shouldSteerAllFromKeyboard) {
@@ -1069,6 +1080,10 @@ function SideChatComposer({
                 }}
                 onTranscript={(spoken) => dictation.appendFinal(spoken)}
                 onInterim={(spoken) => dictation.replaceInterim(spoken)}
+                onVoiceSend={() => {
+                  voiceSendRef.current = true;
+                  requestVoiceSend();
+                }}
               />
               <ComposerSendButton
                 type="button"
