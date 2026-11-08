@@ -494,6 +494,35 @@ function renderServerMode(
   );
 }
 
+/** Pose as a native shell of the given kind; returns the restore function. */
+function installShell(kind: "electron" | "ios"): () => void {
+  const shellWindow = window as unknown as { omnigentDesktop?: unknown; omnigentNative?: unknown };
+  if (kind === "electron") shellWindow.omnigentDesktop = { kind };
+  else shellWindow.omnigentNative = { kind };
+  return () => {
+    delete shellWindow.omnigentDesktop;
+    delete shellWindow.omnigentNative;
+  };
+}
+
+/** Make `(pointer: coarse)` match, as on a phone; returns the restore function. */
+function installCoarsePointer(): () => void {
+  const original = window.matchMedia;
+  window.matchMedia = ((query: string) => ({
+    matches: query === "(pointer: coarse)",
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
+  })) as typeof window.matchMedia;
+  return () => {
+    window.matchMedia = original;
+  };
+}
+
 async function clickMic() {
   // toggle() kicks off the async DictationSession.start; flush it inside act.
   await act(async () => {
@@ -732,11 +761,14 @@ describe("ComposerMicButton (server dictation)", () => {
     expect(onVoiceStart).toHaveBeenCalledTimes(1);
   });
 
-  it("in Electron goes straight to the server, skipping the doomed Web Speech take", async () => {
-    // Electron HAS a SpeechRecognition constructor but no backend: a Web Speech
-    // take always fails with "network" and only then falls back, a visible ~1s
-    // stall. With the server available the button must skip it entirely.
-    (window as unknown as Record<string, unknown>).omnigentDesktop = { kind: "electron" };
+  it.each([
+    // Electron has the constructor but no backend: Web Speech fails with "network".
+    { surface: "Electron", install: () => installShell("electron") },
+    // The iOS app and touch browsers have Web Speech, but without partials or punctuation.
+    { surface: "the iOS app", install: () => installShell("ios") },
+    { surface: "a touch device", install: installCoarsePointer },
+  ])("goes straight to server dictation in $surface", async ({ install }) => {
+    const restore = install();
     try {
       render(
         <CapabilitiesContext.Provider value={DICTATION_INFO}>
@@ -753,7 +785,24 @@ describe("ComposerMicButton (server dictation)", () => {
         "true",
       );
     } finally {
-      delete (window as unknown as Record<string, unknown>).omnigentDesktop;
+      restore();
+    }
+  });
+
+  it("keeps Web Speech on a touch device when the server cannot dictate", async () => {
+    const restore = installCoarsePointer();
+    try {
+      render(
+        <CapabilitiesContext.Provider value={NO_DICTATION_INFO}>
+          <ComposerMicButton onTranscript={vi.fn()} />
+        </CapabilitiesContext.Provider>,
+      );
+      await clickMic();
+
+      expect(startSpy).toHaveBeenCalledTimes(1);
+      expect(sessionStartMock).not.toHaveBeenCalled();
+    } finally {
+      restore();
     }
   });
 

@@ -238,6 +238,12 @@ lands); the next take tries Web Speech again, so a transient blip in real
 Chrome never permanently downgrades the page. With no constructor at all
 (Firefox), takes go to the server directly.
 
+When the server advertises dictation, the Electron app, the iOS app and
+touch-primary devices (`(pointer: coarse)`) skip Web Speech and go to the
+server directly. Electron's constructor has no backend, and the mobile
+engines return final phrases without partials or punctuation. Without
+server dictation those surfaces keep Web Speech.
+
 New optional prop `onInterim?: (text: string) => void`. In server mode the
 button emits `onInterim` for partial frames and the existing
 `onTranscript` for finals. The composers (`ChatPage`, `NewChatDialog`,

@@ -2,10 +2,11 @@
 
 import { Button } from "@/components/ui/button";
 import { showToast } from "@/components/ui/toast";
+import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
 import { useVoiceDictationHotkey } from "@/hooks/useVoiceDictationHotkey";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { DictationBusyError, DictationSession } from "@/lib/dictation";
-import { isElectronShell } from "@/lib/nativeBridge";
+import { isElectronShell, isIOSShell } from "@/lib/nativeBridge";
 import { cn } from "@/lib/utils";
 import { ArrowUpIcon, Loader2Icon, MicIcon } from "lucide-react";
 import {
@@ -130,9 +131,9 @@ function ComposerMicButtonImpl(
   }: ComposerMicButtonProps,
   ref: ForwardedRef<ComposerMicButtonHandle>,
 ) {
-  // Web Speech is primary whenever the browser has the constructor
-  // (Chrome/Safari, unchanged behavior); with no constructor at all
-  // (Firefox) takes use server dictation when GET /v1/info advertises it.
+  // Web Speech is primary on desktop browsers that have the constructor
+  // (Chrome/Safari); with no constructor (Firefox), or on the surfaces in
+  // prefersServer, takes use server dictation when GET /v1/info advertises it.
   // A constructor is no guarantee of a backend — Electron and plain
   // Chromium error at runtime with "network" — so a failed Web Speech
   // take falls back to the server per take (see handleError). Per-take,
@@ -145,6 +146,11 @@ function ComposerMicButtonImpl(
   // over [Ctor, lang]) see the current probe result.
   const serverAvailableRef = useRef(serverAvailable);
   serverAvailableRef.current = serverAvailable;
+  // When the server can dictate, these surfaces skip Web Speech. Electron has
+  // the constructor but no backend, so a take fails with "network" first. On
+  // touch devices and the iOS app, Safari's engine gives no partials or punctuation.
+  const coarsePointer = useIsCoarsePointer();
+  const prefersServer = isElectronShell() || isIOSShell() || coarsePointer;
   const [isListening, setIsListening] = useState(false);
   // Server-path only: the take has started but audio isn't flowing yet (the
   // first take cold-loads the model, up to ~40s). Shows a spinner so the click
@@ -528,12 +534,7 @@ function ComposerMicButtonImpl(
         void toggleServer();
         return;
       }
-      // In Electron the SpeechRecognition constructor exists but has no backend,
-      // so a Web Speech take always fails with "network" and only THEN falls back
-      // to the server — a visible ~1s "fail then recover" on every first take.
-      // When the server can serve, go straight to it and skip the doomed attempt.
-      // (Real browsers keep Web Speech primary; it genuinely works there.)
-      if (!Ctor || (serverAvailable && isElectronShell())) {
+      if (!Ctor || (serverAvailable && prefersServer)) {
         if (serverAvailable) void toggleServer();
         return;
       }
@@ -559,7 +560,7 @@ function ComposerMicButtonImpl(
         pendingSendRef.current = false;
       }
     },
-    [isListening, Ctor, serverAvailable, toggleServer],
+    [isListening, Ctor, serverAvailable, prefersServer, toggleServer],
   );
 
   // End an in-progress take without flushing a trailing utterance into the

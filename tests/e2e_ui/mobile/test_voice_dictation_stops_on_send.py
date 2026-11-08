@@ -4,9 +4,10 @@ The mobile apps load this SPA in a WebView; desktop Chromium at a 390x844
 touch profile stands in for them. Both dictation paths are covered:
 
 - Web Speech (``webkitSpeechRecognition``), taken by a WebView that exposes
-  the API. Headless Chromium's recognizer has no backend, so a scripted one is
-  installed before boot; it keeps listening until ``stop()``/``abort()`` and
-  records those calls.
+  the API while the server cannot dictate (touch devices prefer the server
+  otherwise). Headless Chromium's recognizer has no backend, so a scripted one
+  is installed before boot; it keeps listening until ``stop()``/``abort()``
+  and records those calls.
 - Server dictation (``WS /v1/dictation/stream`` + the fake engine), taken by a
   WebView without Web Speech. The constructors are stripped before boot, as in
   ``tests/e2e_ui/chat/test_dictation.py``.
@@ -22,7 +23,7 @@ import re
 from typing import Any
 
 import httpx
-from playwright.sync_api import Browser, BrowserContext, Page, expect
+from playwright.sync_api import Browser, BrowserContext, Page, Route, expect
 
 from omnigent.server.dictation import FAKE_SCRIPT as _FAKE_SCRIPT
 from tests.e2e_ui.conftest import configure_mock_llm
@@ -114,15 +115,24 @@ _MIC_TRACK_STATES_JS = (
 )
 
 
+def _report_no_server_dictation(route: Route) -> None:
+    info = route.fetch().json()
+    route.fulfill(json={**info, "dictation_available": False})
+
+
 def _open_phone_session(
     browser: Browser,
     browser_context_args: dict[str, Any],
     base_url: str,
     session_id: str,
     init_scripts: list[str],
+    *,
+    server_dictation: bool = True,
 ) -> tuple[BrowserContext, Page]:
     context = browser.new_context(**{**browser_context_args, **_PHONE}, permissions=["microphone"])
     page = context.new_page()
+    if not server_dictation:
+        page.route("**/v1/info", _report_no_server_dictation)
     for script in init_scripts:
         page.add_init_script(script)
     page.goto(f"{base_url}/c/{session_id}")
@@ -185,6 +195,7 @@ def test_web_speech_take_ends_when_message_is_sent(
         base_url,
         session_id,
         [_TRACK_MIC_STREAMS_JS, _FAKE_WEB_SPEECH_JS],
+        server_dictation=False,
     )
     try:
         composer = page.locator(_COMPOSER)

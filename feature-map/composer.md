@@ -863,7 +863,7 @@ Other connection providers alone do not enable the managed MCP picker.
   when unavailable or the browser speech service fails. Audio still comes from
   the client device; choosing a remote host does not change the microphone.
   Denying microphone permission must not start a fallback recording.
-  The desktop app prefers the
+  The desktop app, the iOS app and touch devices prefer the
   server when available. A verification instance without a transcription engine
   depends on browser support; a missing microphone there does not prove that
   dictation is unavailable on a configured server.
