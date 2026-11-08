@@ -293,6 +293,7 @@ jobs:
 
   deploy:
     needs: build
+    if: github.repository == 'omnigent-ai/omnigent'
     # Gate the secret-bearing deploy behind a protected Environment for
     # UNTRUSTED fork PRs only: a labelled outside-contributor fork PR that gets a
     # new commit must wait for a human reviewer to approve this run before it can
@@ -576,10 +577,13 @@ jobs:
     # and workspace files forever. Run on every close; the delete step is a cheap
     # no-op (one existence check) for PRs that never had a preview.
     if: >-
-      github.event_name == 'workflow_dispatch'
-      || (
-        github.event_name != 'push'
-        && github.event.action == 'closed'
+      github.repository == 'omnigent-ai/omnigent'
+      && (
+        github.event_name == 'workflow_dispatch'
+        || (
+          github.event_name != 'push'
+          && github.event.action == 'closed'
+        )
       )
     runs-on: ubuntu-24.04
     permissions:
