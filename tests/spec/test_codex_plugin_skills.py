@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import threading
+from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 
+from omnigent.spec import codex_plugin_skills
 from omnigent.spec.skill_sources import SkillSourceContext, resolve_harness_skills
 
 
@@ -46,6 +49,21 @@ def _inventory(cli: Mock, *entries: dict[str, object]) -> None:
     cli.return_value = subprocess.CompletedProcess(
         [], 0, stdout=json.dumps({"installed": entries, "available": [_entry("uninstalled")]})
     )
+
+
+def _finish_refreshes() -> None:
+    for state in list(codex_plugin_skills._inventories.values()):
+        if (refresh := state.refresh) is not None:
+            refresh.join(5)
+
+
+@pytest.fixture(autouse=True)
+def fresh_inventories() -> Iterator[None]:
+    """Each test starts without a last good inventory and leaves no refresh running."""
+    codex_plugin_skills._inventories.clear()
+    yield
+    _finish_refreshes()
+    codex_plugin_skills._inventories.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -114,7 +132,10 @@ def test_plugin_updates_follow_the_inventory_version(tmp_path: Path, codex_cli: 
 
     _inventory(codex_cli, _entry(version="1.9.0"))
     assert _discover(tmp_path) == {"toolkit:review": old}
+    # The update is served once the background refresh it started has finished.
     _inventory(codex_cli, _entry(version="1.10.0"))
+    assert _discover(tmp_path) == {"toolkit:review": old}
+    _finish_refreshes()
     assert _discover(tmp_path) == {"toolkit:review": new}
 
 
@@ -208,7 +229,7 @@ def test_plugin_inventory_uses_session_home_and_workspace(tmp_path: Path, codex_
     assert args == (["/test/codex", "plugin", "list", "--json"],)
     assert kwargs["env"]["CODEX_HOME"] == str(codex_home)
     assert kwargs["cwd"] == workspace
-    assert kwargs["timeout"] == 5
+    assert kwargs["timeout"] == 90
 
 
 @pytest.mark.parametrize(
@@ -420,19 +441,121 @@ def test_unavailable_plugin_sources_without_a_collector_only_log(
     ]
 
 
-def test_loaded_skill_query_uses_workspace_and_preserves_healthy_inventory(
+def test_loaded_skill_query_uses_workspace(
     tmp_path: Path, codex_cli: Mock, loaded_skills: Mock
 ) -> None:
     codex_home = tmp_path / ".codex"
     _skill(_plugin(codex_home) / "skills")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    ctx = SkillSourceContext((workspace,), tmp_path, "all", None, codex_home=codex_home)
-    assert len(resolve_harness_skills(ctx, "codex-native")) == 1
-    loaded_skills.assert_not_called()
     codex_cli.side_effect = subprocess.CalledProcessError(1, "codex")
+    ctx = SkillSourceContext((workspace,), tmp_path, "all", None, codex_home=codex_home)
     assert resolve_harness_skills(ctx, "codex-native") == []
     loaded_skills.assert_called_once_with("/test/codex", codex_home, workspace, errors=[])
+
+
+def test_last_good_inventory_is_served_while_a_single_refresh_runs(
+    tmp_path: Path, codex_cli: Mock, loaded_skills: Mock
+) -> None:
+    codex_home = tmp_path / ".codex"
+    old = _skill(_plugin(codex_home) / "skills")
+    new = _skill(_plugin(codex_home, version="2.0.0") / "skills")
+    assert _discover(tmp_path) == {"toolkit:review": old}
+    assert codex_cli.call_count == 1
+
+    release = threading.Event()
+
+    def slow_listing(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        release.wait(5)
+        entries = [_entry(version="2.0.0")]
+        return subprocess.CompletedProcess([], 0, stdout=json.dumps({"installed": entries}))
+
+    codex_cli.side_effect = slow_listing
+    # Callers get the last good inventory at once; only one listing runs meanwhile.
+    for _ in range(3):
+        assert _discover(tmp_path) == {"toolkit:review": old}
+    assert codex_cli.call_count == 2
+    release.set()
+    _finish_refreshes()
+    assert _discover(tmp_path) == {"toolkit:review": new}
+    loaded_skills.assert_not_called()
+
+
+def test_failed_refresh_keeps_last_good_inventory_and_logs_once(
+    tmp_path: Path, codex_cli: Mock, loaded_skills: Mock, caplog: pytest.LogCaptureFixture
+) -> None:
+    codex_home = tmp_path / ".codex"
+    enabled = _skill(_plugin(codex_home) / "skills")
+    assert _discover(tmp_path) == {"toolkit:review": enabled}
+    codex_cli.side_effect = subprocess.TimeoutExpired("codex", 90)
+    warnings: list[str] = []
+
+    with caplog.at_level(logging.INFO, logger="omnigent.spec.codex_plugin_skills"):
+        for _ in range(3):
+            assert _discover(tmp_path, warnings=warnings) == {"toolkit:review": enabled}
+            _finish_refreshes()
+
+    assert codex_cli.call_count == 4
+    assert warnings == []
+    loaded_skills.assert_not_called()
+    assert [record.getMessage() for record in caplog.records] == [
+        "Codex plugin inventory refresh failed; keeping the last good inventory: "
+        "`codex plugin list` timed out after 90s"
+    ]
+
+
+def test_first_inventory_still_loading_uses_codex_loaded_skills(
+    tmp_path: Path,
+    codex_cli: Mock,
+    loaded_skills: Mock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(codex_plugin_skills, "_FIRST_INVENTORY_WAIT_SECONDS", 0.01)
+    codex_home = tmp_path / ".codex"
+    enabled = _skill(_plugin(codex_home) / "skills")
+    loaded_skills.return_value = [
+        {"name": "toolkit:review", "path": str(enabled / "SKILL.md"), "enabled": True}
+    ]
+    release = threading.Event()
+    listed = codex_cli.return_value
+
+    def slow_listing(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        release.wait(5)
+        return listed
+
+    codex_cli.side_effect = slow_listing
+    warnings: list[str] = []
+
+    # Neither request waits for the listing; both use Codex's loaded-skill catalog.
+    assert _discover(tmp_path, warnings=warnings) == {"toolkit:review": enabled}
+    assert _discover(tmp_path, warnings=warnings) == {"toolkit:review": enabled}
+    assert warnings == []
+    assert loaded_skills.call_count == 2
+    assert codex_cli.call_count == 1
+    release.set()
+    _finish_refreshes()
+    assert _discover(tmp_path) == {"toolkit:review": enabled}
+    assert loaded_skills.call_count == 2
+
+
+def test_first_inventory_still_loading_warns_when_the_fallback_fails(
+    tmp_path: Path, codex_cli: Mock, loaded_skills: Mock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(codex_plugin_skills, "_FIRST_INVENTORY_WAIT_SECONDS", 0.01)
+    _skill(_plugin(tmp_path / ".codex") / "skills")
+    release = threading.Event()
+    listed = codex_cli.return_value
+    codex_cli.side_effect = lambda *_args, **_kwargs: release.wait(5) and listed
+    loaded_skills.side_effect = TimeoutError()
+    warnings: list[str] = []
+    try:
+        assert _discover(tmp_path, warnings=warnings) == {}
+    finally:
+        release.set()
+    assert warnings == [
+        "Codex plugin skills unavailable: `codex plugin list` is still loading and "
+        "`codex app-server` could not list skills; see the host log for details."
+    ]
 
 
 def test_loaded_skill_query_skips_unreadable_plugin(
