@@ -1268,6 +1268,24 @@ describe("unsent composer state survives the pane moving", () => {
     expect(screen.getByTestId("side-chat-input")).toHaveValue("");
   });
 
+  it("sends dictated text once in a busy editable subagent tab without interrupting", async () => {
+    renderPane(<SideChatPane childId={childId} fullSession />);
+    expect(screen.getByRole("button", { name: "Interrupt session" })).toBeInTheDocument();
+    expect(mic.current!.disabled).toBe(false);
+    act(() => {
+      mic.current!.onTranscript("dictated follow-up");
+      mic.current!.onVoiceSend!();
+    });
+
+    await waitFor(() => expect(send).toHaveBeenCalledOnce());
+    expect(send).toHaveBeenCalledWith("dictated follow-up", "agent_side", undefined, {
+      pinnedConversationId: childId,
+    });
+    expect(screen.getByTestId("side-chat-input")).toHaveValue("");
+    expect(sessionsApi.interrupt).not.toHaveBeenCalled();
+    expect(micEndTake).toHaveBeenCalledTimes(1);
+  });
+
   it.each([false, true])(
     "drops only its own draft once sent (full session: %s)",
     async (fullSession) => {

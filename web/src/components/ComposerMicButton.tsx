@@ -319,9 +319,15 @@ function ComposerMicButtonImpl(
   // cancelled outright (no tail flush) — the take is moot once the
   // composer can't accept text.
   useEffect(() => {
-    if (!(disabled && isListening)) return;
+    if (!disabled || (!isListening && !connecting)) return;
     pendingSendRef.current = false;
     sendOnStopRef.current = false;
+    if (startAbortRef.current) {
+      endPendingRef.current = true;
+      discardingRef.current = true;
+      startAbortRef.current.abort();
+      return;
+    }
     if (sessionRef.current) {
       sessionRef.current.cancel();
       sessionRef.current = null;
@@ -335,7 +341,7 @@ function ComposerMicButtonImpl(
       // .stop() on an already-stopped recognizer can throw in some
       // browsers; safe to ignore — the end event will reconcile state.
     }
-  }, [disabled, isListening]);
+  }, [disabled, isListening, connecting]);
 
   // Release the mic if the component unmounts mid-take (e.g. the
   // new-chat dialog closes while dictating).

@@ -650,7 +650,7 @@ describe("ComposerMicButton (server dictation)", () => {
     expect(onVoiceSend).not.toHaveBeenCalled();
   });
 
-  it.each(["send", "unmount"])("aborts pending startup on %s", async (action) => {
+  it.each(["send", "unmount", "disable"])("aborts pending startup on %s", async (action) => {
     let signal!: AbortSignal;
     sessionStartMock = vi.fn((_events, startSignal) => {
       signal = startSignal!;
@@ -670,11 +670,17 @@ describe("ComposerMicButton (server dictation)", () => {
     expect(signal.aborted).toBe(false);
     await act(async () => {
       if (action === "send") ref.current?.endTake();
-      else view.unmount();
-      expect(signal.aborted).toBe(true);
+      else if (action === "disable") {
+        view.rerender(
+          <CapabilitiesContext.Provider value={DICTATION_INFO}>
+            <ComposerMicButton ref={ref} onTranscript={vi.fn()} disabled />
+          </CapabilitiesContext.Provider>,
+        );
+      } else view.unmount();
     });
+    expect(signal.aborted).toBe(true);
     expect(showToastMock).not.toHaveBeenCalled();
-    if (action === "send") {
+    if (action !== "unmount") {
       expect(screen.getByRole("button", { name: "Voice dictation" })).toHaveAttribute(
         "aria-busy",
         "false",

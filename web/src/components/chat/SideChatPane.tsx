@@ -805,7 +805,7 @@ function SideChatComposer({
       .finally(() => setInterrupting(false));
   };
 
-  const submit = () => {
+  const submit = ({ allowWhileBusy = false }: { allowWhileBusy?: boolean } = {}) => {
     if (settingsSavePending()) return;
     const trimmed = isSlashCommandText(text) ? text.trim() : text.trimEnd();
     if (pending) {
@@ -815,7 +815,7 @@ function SideChatComposer({
       void onStart(serializeReplyDraft({ quotes, text: trimmed }));
       return;
     }
-    if ((busy && fullSession) || !canSend || agentId === null) return;
+    if ((busy && fullSession && !allowWhileBusy) || !canSend || agentId === null) return;
     // On in-process harnesses /help and skills resolve locally; native TUIs
     // (claude-native, codex-native) read the text themselves, and a quote or
     // attachment is always an ordinary message.
@@ -888,7 +888,7 @@ function SideChatComposer({
   useEffect(() => {
     if (!voiceSendRef.current) return;
     voiceSendRef.current = false;
-    submit();
+    submit({ allowWhileBusy: true });
   });
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>, intent: ComposerKeyIntent) => {
@@ -1099,7 +1099,7 @@ function SideChatComposer({
                 interrupt={showInterrupt}
                 busy={showInterrupt && interrupting}
                 disabled={showInterrupt ? interrupting || !interruptReady : !canSend || !ready}
-                onClick={showInterrupt ? interruptSideChat : submit}
+                onClick={showInterrupt ? interruptSideChat : () => submit()}
                 data-testid={showInterrupt ? "side-chat-interrupt" : "side-chat-send"}
               />
             </>
