@@ -463,19 +463,24 @@ def test_last_good_inventory_is_served_while_a_single_refresh_runs(
     assert _discover(tmp_path) == {"toolkit:review": old}
     assert codex_cli.call_count == 1
 
+    started = threading.Event()
     release = threading.Event()
 
     def slow_listing(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        started.set()
         release.wait(5)
         entries = [_entry(version="2.0.0")]
         return subprocess.CompletedProcess([], 0, stdout=json.dumps({"installed": entries}))
 
     codex_cli.side_effect = slow_listing
     # Callers get the last good inventory at once; only one listing runs meanwhile.
-    for _ in range(3):
-        assert _discover(tmp_path) == {"toolkit:review": old}
-    assert codex_cli.call_count == 2
-    release.set()
+    try:
+        for _ in range(3):
+            assert _discover(tmp_path) == {"toolkit:review": old}
+        assert started.wait(5)
+        assert codex_cli.call_count == 2
+    finally:
+        release.set()
     _finish_refreshes()
     assert _discover(tmp_path) == {"toolkit:review": new}
     loaded_skills.assert_not_called()
