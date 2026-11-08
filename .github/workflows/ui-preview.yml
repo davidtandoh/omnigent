@@ -375,7 +375,7 @@ jobs:
               break
             fi
 
-            for poll in $(seq 1 40); do
+            for _poll in $(seq 1 40); do
               refresh_app
               if [ "$APP_STATE" = "ACTIVE" ]; then
                 break
@@ -412,7 +412,7 @@ jobs:
 
             echo "::warning::Compute did not become ACTIVE (last state: $APP_STATE); recreating $APP_NAME"
             databricks apps delete "$APP_NAME" --auto-approve
-            for poll in $(seq 1 20); do
+            for _poll in $(seq 1 20); do
               APP_JSON=$(databricks apps list -o json | jq -c --arg name "$APP_NAME" \
                 '.[] | select(.name == $name)')
               if [ -z "$APP_JSON" ]; then
@@ -495,7 +495,7 @@ jobs:
           # source.
           echo "Stopping app..."
           databricks apps stop "$APP_NAME"
-          for i in $(seq 1 40); do
+          for _poll in $(seq 1 40); do
             STATE=$(databricks apps get "$APP_NAME" -o json | jq -r '.compute_status.state')
             echo "Compute state: $STATE"
             if [ "$STATE" = "STOPPED" ]; then
@@ -509,7 +509,7 @@ jobs:
 
           echo "Starting app..."
           databricks apps start "$APP_NAME"
-          for i in $(seq 1 40); do
+          for _poll in $(seq 1 40); do
             STATE=$(databricks apps get "$APP_NAME" -o json | jq -r '.compute_status.state')
             echo "Compute state: $STATE"
             if [ "$STATE" = "ACTIVE" ]; then

@@ -4,6 +4,11 @@ Deploy a live, per-PR preview of the Omnigent web UI as a
 [Databricks App](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/)
 when a PR changes the frontend (`web/`).
 
+Deployment and cleanup run only in `omnigent-ai/omnigent`. This includes cleanup
+requested through `workflow_dispatch`. In fork repositories, both jobs are
+skipped; build and notification jobs retain their existing conditions. A PR
+from a fork into `omnigent-ai/omnigent` can still receive a preview.
+
 ## How it works
 
 1. A maintainer adds the `ui-preview` label to a PR. The label — not the PR
@@ -49,11 +54,12 @@ request"):
 - **Build pins the head SHA.** The build checks out the PR's immutable head SHA,
   not the live `refs/pull/<n>/merge` ref (which re-points to the newest push), so
   a run only ever builds one specific, inspectable commit.
-- **Fork deploys need per-run approval.** The secret-bearing `deploy` job runs in
-  the `ui-preview-fork` Environment for fork PRs, so each new commit waits for a
-  human reviewer before it can deploy. Same-repo PRs (maintainers + the
-  resolve-agent bot, which outside contributors can't push to) are trusted and
-  skip the gate.
+- **Untrusted fork deploys need per-run approval.** The secret-bearing `deploy`
+  job runs in the `ui-preview-fork` Environment for fork PRs whose authors are
+  not repository owners, members, or collaborators, so each new commit waits
+  for a human reviewer before it can deploy. Trusted authors and same-repo PRs
+  (maintainers + the resolve-agent bot, which outside contributors can't push
+  to) skip the gate.
 
 ## What it is
 
