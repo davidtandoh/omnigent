@@ -2757,7 +2757,7 @@ function ComposerImpl(
   // Composer text captured when voice dictation starts, so Esc can revert to it.
   const voiceSnapshotRef = useRef("");
   // Lets a Send end a live voice take: on touch devices Send is a button tap,
-  // which never reaches the mic's Enter-commit handler.
+  // which never reaches the mic's Enter-to-send handler.
   const micRef = useRef<ComposerMicButtonHandle>(null);
   // On mobile, programmatic focus immediately summons the software keyboard.
   // Keep desktop's fast-type affordance, but let mobile users explicitly tap

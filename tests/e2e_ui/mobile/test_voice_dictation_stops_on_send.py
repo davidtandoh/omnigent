@@ -23,6 +23,7 @@ import re
 from typing import Any
 
 import httpx
+import pytest
 from playwright.sync_api import Browser, BrowserContext, Page, Route, expect
 
 from omnigent.server.dictation import FAKE_SCRIPT as _FAKE_SCRIPT
@@ -234,11 +235,13 @@ def test_web_speech_take_ends_when_message_is_sent(
         context.close()
 
 
+@pytest.mark.parametrize("browser_speech_available", [False, True])
 def test_server_dictation_take_ends_when_message_is_sent(
     browser: Browser,
     browser_context_args: dict[str, Any],
     seeded_session: tuple[str, str],
     mock_llm_server_url: str,
+    browser_speech_available: bool,
 ) -> None:
     base_url, session_id = seeded_session
     response = httpx.get(f"{base_url}/v1/info", timeout=10.0)
@@ -256,10 +259,15 @@ def test_server_dictation_take_ends_when_message_is_sent(
         browser_context_args,
         base_url,
         session_id,
-        [_TRACK_MIC_STREAMS_JS, _STRIP_WEB_SPEECH_JS],
+        [
+            _TRACK_MIC_STREAMS_JS,
+            _FAKE_WEB_SPEECH_JS if browser_speech_available else _STRIP_WEB_SPEECH_JS,
+        ],
     )
     try:
         _dictate_then_send(page, _FAKE_SCRIPT)
         _expect_take_ended(page)
+        if browser_speech_available:
+            assert page.evaluate("window.__fakeSpeech.starts") == 0
     finally:
         context.close()

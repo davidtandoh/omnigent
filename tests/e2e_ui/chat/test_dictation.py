@@ -153,7 +153,13 @@ def test_speech_service_denial_falls_back_to_client_audio(
     expect(mic).to_have_attribute("aria-pressed", "true")
     page.keyboard.press("Enter")
     expect(mic).to_have_attribute("aria-pressed", "false")
-    expect(composer).to_have_value(_FAKE_SCRIPT)
+    if surface == "landing":
+        # Launch remains blocked until the user selects a host and agent.
+        expect(composer).to_have_value(_FAKE_SCRIPT)
+    else:
+        expect(composer).to_have_value("")
+        messages = page.locator('[data-testid="message-bubble"][data-role="user"]')
+        expect(messages.filter(has_text=_FAKE_SCRIPT)).to_have_count(1)
 
 
 def test_hotkey_toggles_dictation(
@@ -180,7 +186,7 @@ def test_hotkey_toggles_dictation(
 
         # Start via the hotkey — server handshake flips aria-pressed once
         # audio flows.
-        page.keyboard.press("Control+Alt+KeyV")
+        page.keyboard.press("ControlOrMeta+Alt+KeyV")
         expect(mic).to_have_attribute("aria-pressed", "true", timeout=_TRANSCRIPT_TIMEOUT_MS)
         composer = page.get_by_placeholder("Send a message…")
         expect(composer).to_have_value(
@@ -190,7 +196,7 @@ def test_hotkey_toggles_dictation(
 
         # The chord ends the take and keeps the text. It does not send;
         # the mic button and Enter do that.
-        page.keyboard.press("Control+Alt+KeyV")
+        page.keyboard.press("ControlOrMeta+Alt+KeyV")
         expect(mic).to_have_attribute("aria-pressed", "false")
         expect(composer).to_have_value(re.compile(re.escape(_FAKE_SCRIPT)))
     finally:
@@ -240,7 +246,7 @@ def test_transcript_lands_at_the_caret(
 
     The reported flow: paste a block of context, click above it, dictate the
     instructions that should lead. Drives the real caret through the browser
-    (click + Ctrl+Home) rather than calling the hook, so it also covers the
+    (click + Home on a single-line draft) rather than calling the hook, so it covers the
     composer's ``onFocus`` wiring and the caret surviving the mic button
     taking focus on click.
     """
@@ -255,7 +261,7 @@ def test_transcript_lands_at_the_caret(
         # Paste a block of context, then put the caret at the very top.
         composer.fill("PASTED CONTEXT")
         composer.click()
-        page.keyboard.press("Control+Home")
+        page.keyboard.press("Home")
 
         mic = page.get_by_role("button", name="Voice dictation")
         mic.click()
@@ -279,7 +285,7 @@ def test_transcript_lands_at_the_caret(
         # the mic takes the onTranscript branch instead of onInterim(""). That
         # path is covered in web/src/hooks/useDictationInsert.test.tsx.)
         composer.click()
-        page.keyboard.press("Control+Home")
+        page.keyboard.press("Home")
         mic.click()
         expect(mic).to_have_attribute("aria-pressed", "true")
         expect(composer).to_have_value(

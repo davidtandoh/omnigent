@@ -163,8 +163,10 @@ apply only to that side chat. See the [side-chat settings recipe](sessions.md).
   terminal or code editor. While listening, tapping the mic or pressing Enter
   sends the dictated text once and turns the mic off; Escape discards it, and
   the hotkey stops while keeping the text. Sending any other way also ends the
-  take. The button is absent when neither the browser nor the server can
-  transcribe.
+  take. Cmd/Ctrl+Enter also sends a live take; Shift+Enter and Alt/Option+Enter
+  insert newlines. Voice sends do not invoke Interrupt. A send still requires
+  the composer's normal prerequisites, such as a selected host and agent.
+  The button is absent when neither the browser nor the server can transcribe.
 - `send-shortcut`: Enter or Mod+Enter, chosen in settings; only one gesture sends.
   Shift+Enter and Alt/Option+Enter insert a newline in both composers. The
   Inbox reply box follows the same shortcut.
@@ -274,7 +276,7 @@ apply only to that side chat. See the [side-chat settings recipe](sessions.md).
   A plugin catalog the host could not read is named in the Skills section with
   a Retry link.
 - Click the microphone button, or press ⌘/Ctrl+Alt+V, to dictate into the
-  message box; press Enter to keep the text or Escape to discard it.
+  message box. See `dictation` above for the send, keep, and discard controls.
 - Send while the agent is working to queue a message, then steer it.
 - With the in-session message box empty, press Up to recall a previous prompt
   (or the last queued message). While writing a draft, Up stops at the top.
@@ -680,16 +682,21 @@ Other connection providers alone do not enable the managed MCP picker.
 - **`dictation`, in-session composer (own environment):**
   `tests/e2e_ui/chat/test_dictation.py` streams a fake microphone through the
   server's fake transcription engine, which only the test's own server enables;
-  run it with plain `uv run pytest`. It covers the button, the hotkey, Enter
-  keeping the text, Escape discarding it, and insertion at the caret.
+  run it with plain `uv run pytest`. It covers the button and Enter sending,
+  the hotkey keeping text, Escape discarding text, and insertion at the caret.
 - **`dictation`, both composers and side chat (own environment):**
   `tests/e2e_ui/chat/test_dictation.py::test_speech_service_denial_falls_back_to_client_audio`
   covers a browser speech service refusing access while the client microphone
   remains available, through the buttons on both composers and in side chat.
   It streams client audio through the fake server
-  engine and keeps the transcript on Enter.
+  engine. Enter sends once in session and side chat; the landing draft stays
+  when launch prerequisites are missing.
   Manually on the landing page: dictate with ⌘/Ctrl+Alt+V, then press Escape
   to restore the previous draft.
+- **`dictation`, mobile Send (own environment):**
+  `tests/e2e_ui/mobile/test_voice_dictation_stops_on_send.py` checks that Send
+  ends browser and server takes and releases capture. It also checks that a
+  touch device prefers the server when a browser speech constructor exists.
 - **`send-shortcut`:**
   `tests/e2e_ui/chat/test_composer_submit_shortcut.py::test_submit_with_mod_enter_persists_and_is_the_only_send_gesture`,
   `tests/e2e_ui/chat/test_composer_submit_shortcut.py::test_alt_enter_inserts_newline_in_both_composers`
@@ -859,11 +866,9 @@ Other connection providers alone do not enable the managed MCP picker.
   connections. Bearer-token accounts must be connected in settings first.
 - Managed MCP browser tests stub launch and authentication. They prove composer
   wiring; the HTTP integration test proves the real provider boundary.
-- Dictation normally uses browser speech recognition, with server fallback
-  when unavailable or the browser speech service fails. Audio still comes from
-  the client device; choosing a remote host does not change the microphone.
-  Denying microphone permission must not start a fallback recording.
-  The desktop app, the iOS app and touch devices prefer the
-  server when available. A verification instance without a transcription engine
+- For dictation routing and permission rules, see the
+  [server dictation design](../designs/server-dictation.md#mic-button--composermicbuttontsx).
+  Audio comes from the client device; choosing a remote host does not change
+  the microphone. A verification instance without a transcription engine
   depends on browser support; a missing microphone there does not prove that
   dictation is unavailable on a configured server.

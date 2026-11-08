@@ -31,7 +31,7 @@ to it whenever Web Speech is unavailable.
 ## Non-goals
 
 - Voice *conversations* (TTS replies, wake words, hands-free turn taking).
-- Replacing the Web Speech path where it works today.
+- Replacing Web Speech on desktop browsers with a working speech backend.
 - Terminal REPL dictation (possible follow-up; shares the engine).
 - Speaker diarization, translation, non-English models beyond whatever
   sherpa-onnx model the operator installs.
@@ -220,29 +220,27 @@ terminal-attach and session-updates sockets ride, so embed hosts and the
 Vite dev proxy keep working). Callbacks: `onPartial`, `onFinal`, `onError`;
 `stop()` sends `{"type":"stop"}`, resolves with the flushed tail, and
 releases the mic tracks and audio context.
+`start(events, signal)` accepts an optional `AbortSignal` for pending startup.
+Aborting releases acquired capture resources; a pending microphone permission
+request is cleaned up when it resolves. After startup resolves, use `stop()`
+or `cancel()` on the session.
 
 Availability comes from the existing `/v1/info` capability context
 (`useServerInfo().dictation_available`) — no extra request.
 
 ### Mic button — `ComposerMicButton.tsx`
 
-Mode selection: **Web Speech when the browser has a working one, server
-dictation otherwise** — no behavior change for Chrome/Safari users;
-Electron, Firefox, and Chromium gain a working button. "Working" cannot be
-detected statically: Electron and plain Chromium expose the
-`SpeechRecognition` constructor but its cloud backend rejects them at
-runtime with a `network` error. So Web Speech stays primary whenever the
-constructor exists, and a take that dies with `network` falls back to the
-server **for that take** (retried immediately, so the user's click still
-lands); the next take tries Web Speech again, so a transient blip in real
-Chrome never permanently downgrades the page. With no constructor at all
-(Firefox), takes go to the server directly.
-
 When the server advertises dictation, the Electron app, the iOS app and
 touch-primary devices (`(pointer: coarse)`) skip Web Speech and go to the
 server directly. Electron's constructor has no backend, and the mobile
 engines return final phrases without partials or punctuation. Without
 server dictation those surfaces keep Web Speech.
+
+Other desktop browsers try Web Speech when its constructor exists. If the
+speech backend fails with `network` or `service-not-allowed`, the button
+retries with server dictation for that take. Microphone permission denial
+does not trigger fallback. The next take tries Web Speech again. Browsers
+without a speech constructor use the server directly when available.
 
 New optional prop `onInterim?: (text: string) => void`. In server mode the
 button emits `onInterim` for partial frames and the existing
@@ -252,19 +250,13 @@ finals and maintains a replaceable interim region in the textarea value, so
 text forms live while speaking. `readDraft()` returns that text in the same
 turn, before React re-renders, so a send can include the tail.
 
-While a take is live, clicking the mic or pressing Enter (including
-Cmd/Ctrl+Enter) flushes the tail once, calls optional `onVoiceSend`, and
-turns the mic off. The parent sends that draft once and does not use the
-agent Interrupt control. A recognizer sentence that arrives after the send
-is dropped. Escape still discards back to the pre-take snapshot and does
-not send or interrupt a running turn. Shift+Enter and Alt+Enter stay
-newlines. The ⌘⌥V hotkey still only toggles the take: stopping with the
-chord keeps the text so it can be edited.
-
-Every other accepted send (the Send button, a slash command or skill that
-clears the composer) ends a live take through the button's `endTake()`
-handle, without flushing a trailing utterance. On touch devices the Send
-tap is the only way to submit, so this is what stops the microphone there.
+The user controls are documented in the [composer feature map](../feature-map/composer.md#sub-features).
+A mic click or Enter flushes the tail before calling optional `onVoiceSend`.
+The parent sends without invoking Interrupt, including in busy editable
+subagent tabs. Other accepted sends end the take through `endTake()` without
+flushing a trailing utterance. Late recognizer results after send are dropped.
+Send, disabling the mic, or unmounting cancels pending server startup.
+Unmounting also suppresses delivery from an in-flight stop.
 
 ## Testing
 
@@ -289,8 +281,8 @@ tap is the only way to submit, so this is what stops the microphone there.
 
 - No schema changes, no migrations, no new required deps.
 - Servers without the extra: `/v1/info` reports `dictation_available: false`;
-  the web UI behaves exactly as today.
+  dictation uses Web Speech where supported. The send controls above still apply.
 - Old web clients against new servers: unaffected (new route + one new
   `/v1/info` field only).
 - New web clients against old servers: `/v1/info` lacks the field → treated
-  as unavailable → today's behavior.
+  as unavailable → Web Speech where supported.

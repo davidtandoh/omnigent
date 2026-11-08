@@ -1,8 +1,7 @@
 // Server-side dictation transport: mic → 16 kHz PCM → WS /v1/dictation/stream.
 //
-// ComposerMicButton uses this as the fallback when the browser Web Speech API
-// has no working backend (Electron, Firefox/Chromium — see
-// web/electron/README.md). One DictationSession is one dictation take: it
+// ComposerMicButton selects this transport as described in
+// designs/server-dictation.md. One DictationSession is one dictation take: it
 // owns the microphone stream, an AudioWorklet that downsamples the capture
 // rate to 16 kHz mono s16le, and the WebSocket that streams those frames to
 // the server and receives transcript events back. The wire protocol is
@@ -243,6 +242,8 @@ export class DictationSession {
    * handshake. Rejects (with everything torn down) when the mic is
    * denied, the socket fails, the server is at capacity
    * ({@link DictationBusyError}), or the engine never comes up.
+   * An optional signal cancels startup and releases acquired resources. After
+   * startup resolves, end the session with stop() or cancel().
    */
   static async start(
     events: DictationSessionEvents,
