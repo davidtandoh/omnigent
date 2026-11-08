@@ -1,7 +1,9 @@
 ### 4.1 — Deploy a live preview so the fix can be validated
 
-Add the **`ui-preview`** label so the repo's UI Preview workflow deploys a live
-per-PR preview of the app:
+Check the [UI Preview repository scope](../../../.github/ui-preview/README.md)
+before requesting a preview. If deployment is skipped for the repository, use
+the "fails / no URL" fallback below. Otherwise, add the **`ui-preview`** label
+to request a live per-PR preview of the app:
 
 ```
 gh pr edit <pr> --add-label ui-preview
@@ -43,15 +45,10 @@ you're relying on for a PR whose review is still red — on the author path, if 
 later goes red, say so in the handoff rather than pointing a reviewer at a broken
 preview.
 
-The workflow deploys for **any labelled PR that isn't a draft — including fork
-PRs**; there is no author-membership gate. The label itself *is* the trust
-boundary: applying it needs Triage+ on the repo, so an outside contributor
-can't self-label their own fork PR — only a maintainer (or a maintainer-
-privileged bot identity) can. So the thing that can stop a preview from
-appearing is not the author but **whether the label actually got applied**: if
-you're running under an identity without label permission, `gh pr edit
---add-label` fails and no preview appears — that is expected; fall back to the
-"fails / no URL" handling below rather than looping.
+See [How it works](../../../.github/ui-preview/README.md#how-it-works) for preview
+eligibility and label permissions. If `gh pr edit --add-label` fails because
+your identity lacks label permission, use the "fails / no URL" fallback below
+rather than looping.
 The workflow posts (and updates) a PR comment marked `<!-- ui-preview -->`; it
 starts as "being deployed" and flips to "ready" with the preview **URL** once the
 Databricks App is up (a few minutes). Poll for the ready comment:

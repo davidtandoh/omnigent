@@ -293,6 +293,7 @@ jobs:
 
   deploy:
     needs: build
+    if: github.repository == 'omnigent-ai/omnigent'
     # Gate the secret-bearing deploy behind a protected Environment for
     # UNTRUSTED fork PRs only: a labelled outside-contributor fork PR that gets a
     # new commit must wait for a human reviewer to approve this run before it can
@@ -374,7 +375,7 @@ jobs:
               break
             fi
 
-            for poll in $(seq 1 40); do
+            for _poll in $(seq 1 40); do
               refresh_app
               if [ "$APP_STATE" = "ACTIVE" ]; then
                 break
@@ -411,7 +412,7 @@ jobs:
 
             echo "::warning::Compute did not become ACTIVE (last state: $APP_STATE); recreating $APP_NAME"
             databricks apps delete "$APP_NAME" --auto-approve
-            for poll in $(seq 1 20); do
+            for _poll in $(seq 1 20); do
               APP_JSON=$(databricks apps list -o json | jq -c --arg name "$APP_NAME" \
                 '.[] | select(.name == $name)')
               if [ -z "$APP_JSON" ]; then
@@ -494,7 +495,7 @@ jobs:
           # source.
           echo "Stopping app..."
           databricks apps stop "$APP_NAME"
-          for i in $(seq 1 40); do
+          for _poll in $(seq 1 40); do
             STATE=$(databricks apps get "$APP_NAME" -o json | jq -r '.compute_status.state')
             echo "Compute state: $STATE"
             if [ "$STATE" = "STOPPED" ]; then
@@ -508,7 +509,7 @@ jobs:
 
           echo "Starting app..."
           databricks apps start "$APP_NAME"
-          for i in $(seq 1 40); do
+          for _poll in $(seq 1 40); do
             STATE=$(databricks apps get "$APP_NAME" -o json | jq -r '.compute_status.state')
             echo "Compute state: $STATE"
             if [ "$STATE" = "ACTIVE" ]; then
@@ -576,10 +577,13 @@ jobs:
     # and workspace files forever. Run on every close; the delete step is a cheap
     # no-op (one existence check) for PRs that never had a preview.
     if: >-
-      github.event_name == 'workflow_dispatch'
-      || (
-        github.event_name != 'push'
-        && github.event.action == 'closed'
+      github.repository == 'omnigent-ai/omnigent'
+      && (
+        github.event_name == 'workflow_dispatch'
+        || (
+          github.event_name != 'push'
+          && github.event.action == 'closed'
+        )
       )
     runs-on: ubuntu-24.04
     permissions:

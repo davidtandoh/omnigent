@@ -18,6 +18,38 @@ APP_URL = "https://preview.example.com"
 Reply = tuple[str, object, int]
 
 
+@pytest.mark.parametrize("repository", ["omnigent-ai/omnigent", "davidtandoh/omnigent"])
+@pytest.mark.parametrize("job_name", ["deploy", "cleanup"])
+@pytest.mark.parametrize(
+    ("event_name", "action", "cleanup_expected"),
+    [
+        ("push", "", False),
+        ("pull_request_target", "closed", True),
+        ("pull_request_target", "opened", False),
+        ("pull_request_target", "labeled", False),
+        ("pull_request_target", "synchronize", False),
+        ("workflow_dispatch", "", True),
+    ],
+)
+def test_secret_bearing_jobs_only_run_upstream(
+    repository: str, job_name: str, event_name: str, action: str, cleanup_expected: bool
+) -> None:
+    jobs = yaml.safe_load(WORKFLOW)["jobs"]
+    condition = jobs[job_name].get("if", "True")
+    for field, value in (
+        ("github.repository", repository),
+        ("github.event_name", event_name),
+        ("github.event.action", action),
+    ):
+        condition = condition.replace(field, repr(value))
+    condition = " ".join(condition.replace("&&", " and ").replace("||", " or ").split())
+    # These job conditions use only equality and Boolean operators.
+    enabled = eval(condition, {"__builtins__": {}}, {})
+    expected = repository == "omnigent-ai/omnigent" and (job_name == "deploy" or cleanup_expected)
+    assert enabled == expected, (job_name, repository, event_name, action)
+    assert jobs["deploy"]["needs"] == "build"
+
+
 def _app(state: str = "STARTING", **fields: object) -> dict[str, object]:
     return {
         "id": "app-1",
