@@ -103,8 +103,9 @@ def test_failed_plugin_inventory_is_not_shown_as_an_empty_catalog(
     mock_llm_server_url: str,
     tmp_path: Path,
 ) -> None:
-    workspace = tmp_path / "workspace"
+    workspace, probe = tmp_path / "workspace", tmp_path / "probe"
     workspace.mkdir()
+    probe.mkdir()
     codex_home = tmp_path / "codex-home"
     _seed_plugin_cache(codex_home)
     shim, mode = _write_codex_shim(tmp_path / "codex-shim", codex_home)
@@ -120,8 +121,9 @@ def test_failed_plugin_inventory_is_not_shown_as_an_empty_catalog(
         isolated_host(tmp_path / "host", live_server, env=host_env) as host,
     ):
         host.wait_online(client, timeout=60, poll_interval=0.2)
+        # Probe another workspace: the session's must have no last good inventory to serve.
         assert _PLUGIN_SKILL in _skill_names(
-            client, host_id=host.host_id, harness="codex-native", path=str(workspace)
+            client, host_id=host.host_id, harness="codex-native", path=str(probe)
         )
         mode.write_text("fail")
         session_id = create_native_session(

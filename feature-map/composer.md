@@ -147,9 +147,13 @@ apply only to that side chat. See the [side-chat settings recipe](sessions.md).
 - `codex-plugin-skills`: typing `$` lists enabled Codex plugin skills in both
   composers, including cached plugins whose marketplace inventory is unavailable.
   Selecting a row inserts its namespaced identifier.
-  When neither `codex plugin list` nor Codex's loaded-skill catalog can be read,
-  the menu names the failure with Retry beside the skills it did read, instead
-  of "No skills available".
+  The host refreshes `codex plugin list` in the background and serves the last
+  good inventory for that Codex home and workspace until a refresh succeeds.
+  Plugin version and enabled-state changes can therefore appear after a delay.
+  Without a last good inventory, the host waits up to 5 seconds before using
+  Codex's loaded-skill catalog; the background listing can continue for up to
+  90 seconds. If neither source is available, the menu names the failure with
+  Retry beside the skills it did read, instead of "No skills available".
 - `new-command`: `/new` opens a blank new-session composer in the same project;
   working-directory selection follows the project's defaults, not the old session.
 - `attachments`: attach button, paste, and drop onto the transcript; chips can

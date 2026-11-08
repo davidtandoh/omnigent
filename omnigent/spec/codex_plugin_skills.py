@@ -6,7 +6,8 @@ import json
 import logging
 import os
 import subprocess
-from dataclasses import replace
+import threading
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
 
@@ -17,6 +18,29 @@ from omnigent.spec.parser import _discover_skills, _parse_skill
 from omnigent.spec.types import SkillSpec
 
 _log = logging.getLogger(__name__)
+
+# A cold Codex remote catalogue takes about 40 s to download; killing the listing
+# early leaves Codex's cache cold, so the background refresh gets a generous bound.
+_REFRESH_TIMEOUT_SECONDS = 90.0
+# The longest a request waits for the first inventory before using the fallback.
+_FIRST_INVENTORY_WAIT_SECONDS = 5.0
+
+
+class _InventoryStillLoading(subprocess.SubprocessError):
+    """The first ``codex plugin list`` is still running in the background."""
+
+
+@dataclass
+class _Inventory:
+    """The last good plugin inventory for one Codex home and workspace."""
+
+    plugins: list[object] | None = None
+    refresh: threading.Thread | None = None
+    error: OSError | subprocess.SubprocessError | ValueError | None = None
+
+
+_inventories: dict[tuple[Path, Path], _Inventory] = {}
+_inventories_lock = threading.Lock()
 
 
 def _is_path_segment(part: object) -> bool:
@@ -58,6 +82,8 @@ def _inventory_failure(exc: Exception) -> tuple[str, str]:
         )
     if isinstance(exc, subprocess.TimeoutExpired):
         return f"`codex plugin list` timed out after {exc.timeout:g}s", ""
+    if isinstance(exc, _InventoryStillLoading):
+        return "`codex plugin list` is still loading", ""
     if isinstance(exc, ValueError):
         return "`codex plugin list` returned unreadable output", str(exc)
     return "`codex plugin list` could not be run", str(exc)
@@ -79,18 +105,18 @@ def _without_inventory(summary: str, detail: str, warnings: list[str] | None) ->
     return []
 
 
-def _inventory_plugins(codex_path: str, codex_home: Path, cwd: Path | None) -> list[object]:
-    """Return the installed entries of ``codex plugin list --json``.
+def _list_plugins(codex_path: str, codex_home: Path, cwd: Path) -> list[object]:
+    """Run ``codex plugin list --json`` and return its installed entries.
 
     :raises OSError, subprocess.SubprocessError, ValueError: The inventory is unreadable.
     """
     result = subprocess.run(
         [codex_path, "plugin", "list", "--json"],
-        cwd=cwd or codex_home,
+        cwd=cwd,
         env={**os.environ, "CODEX_HOME": str(codex_home)},
         capture_output=True,
         text=True,
-        timeout=5,
+        timeout=_REFRESH_TIMEOUT_SECONDS,
         check=True,
     )
     inventory = json.loads(result.stdout)
@@ -98,6 +124,66 @@ def _inventory_plugins(codex_path: str, codex_home: Path, cwd: Path | None) -> l
     if not isinstance(plugins, list):
         raise ValueError("inventory has no list of installed plugins")
     return plugins
+
+
+def _refresh_inventory(state: _Inventory, codex_path: str, codex_home: Path, cwd: Path) -> None:
+    """Replace ``state``'s inventory, keeping the last good one when the listing fails.
+
+    A failure is logged when the inventory starts failing, not on every refresh.
+    """
+    try:
+        plugins = _list_plugins(codex_path, codex_home, cwd)
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        with _inventories_lock:
+            already_failing = state.error is not None
+            state.error = exc
+            serving_last_good = state.plugins is not None
+        if not already_failing:
+            summary, detail = _inventory_failure(exc)
+            if serving_last_good:
+                _log.warning(
+                    "Codex plugin inventory refresh failed; keeping the last good inventory: %s",
+                    detail or summary,
+                )
+            else:
+                _log.info("Codex plugin inventory unavailable: %s", detail or summary)
+    else:
+        with _inventories_lock:
+            state.plugins, state.error = plugins, None
+    finally:
+        with _inventories_lock:
+            state.refresh = None
+
+
+def _inventory_plugins(codex_path: str, codex_home: Path, cwd: Path | None) -> list[object]:
+    """Return the last good ``codex plugin list`` entries and refresh them in the background.
+
+    At most one refresh runs per Codex home and workspace. Without a last good
+    inventory, wait briefly for the first refresh.
+
+    :raises OSError, subprocess.SubprocessError, ValueError: No inventory is available yet.
+    """
+    workspace = cwd or codex_home
+    with _inventories_lock:
+        state = _inventories.setdefault((codex_home, workspace), _Inventory())
+        refresh = state.refresh
+        if refresh is None:
+            refresh = state.refresh = threading.Thread(
+                target=_refresh_inventory,
+                args=(state, codex_path, codex_home, workspace),
+                name="codex-plugin-inventory",
+                daemon=True,
+            )
+            refresh.start()
+        if state.plugins is not None:
+            return state.plugins
+    refresh.join(_FIRST_INVENTORY_WAIT_SECONDS)
+    with _inventories_lock:
+        if state.plugins is not None:
+            return state.plugins
+        if state.refresh is refresh or state.error is None:
+            raise _InventoryStillLoading()
+        raise state.error
 
 
 def _loaded_plugin_skills(
@@ -149,7 +235,8 @@ def discover_codex_plugin_skills(
 ) -> list[SkillSpec]:
     """Ask Codex which plugin versions are installed, then parse their skills.
 
-    When the inventory cannot be read, Codex's loaded-skill catalog supplies
+    The inventory is the last good ``codex plugin list`` result, refreshed in
+    the background. When none is available yet, Codex's loaded-skill catalog supplies
     the plugin skills. When that fails too, plugin skills are omitted and, if
     ``warnings`` is given, a user-facing explanation is appended to it so the
     caller can show the catalog as incomplete rather than empty.
@@ -167,7 +254,6 @@ def discover_codex_plugin_skills(
         plugins = _inventory_plugins(codex_path, codex_home, cwd)
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         summary, detail = _inventory_failure(exc)
-        _log.info("Codex plugin inventory unavailable: %s", detail or summary)
         catalog_errors: list[str] = []
         try:
             loaded = _loaded_plugin_skills(

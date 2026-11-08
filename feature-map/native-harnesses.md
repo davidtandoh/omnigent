@@ -121,9 +121,8 @@ implements them separately, so a fix for one harness does not reach the others.
   Other harnesses keep their credential card only.
 - `skill-contents`: open plain or plugin skills to read their SKILL.md markdown,
   with loading, truncation, unavailable-host, and older-server states.
-- `codex-plugin-skills`: enabled Codex plugin skills remain selectable in both
-  web composers when marketplace inventory fails; disabled or uninstalled
-  cached plugins do not become invocable.
+- `codex-plugin-skills`: see the [Composer map](./composer.md#sub-features)
+  for plugin completion, background inventory refresh, and fallback behavior.
 
 - `mcp-tools`: expand a configured or plugin MCP server to probe its tools,
   with connected/auth/timeout/unreachable/unsupported and mixed-version states.

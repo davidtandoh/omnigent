@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from omnigent.harnesses.codex_native import skill_discovery
+from omnigent.spec import codex_plugin_skills
 from omnigent.spec.skill_sources import SkillSourceContext, resolve_harness_skills
 from tests._helpers.codex_plugins import install_codex_plugin
 
@@ -84,6 +85,8 @@ def test_installed_plugin_survives_marketplace_failure(
     ctx = SkillSourceContext((workspace,), tmp_path, "all", None, codex_home=home)
 
     def selected_version() -> str | None:
+        # Each check starts like a fresh host, without a last good inventory to serve.
+        monkeypatch.setattr(codex_plugin_skills, "_inventories", {})
         skills = [
             s
             for s in resolve_harness_skills(ctx, "codex-native")
@@ -124,6 +127,7 @@ def test_installed_plugin_survives_marketplace_failure(
     # skills/list and report the failure in its errors; 0.142 rejects the request.
     # Either way the menu must say the plugin skills are missing.
     config.write_text(f'{enabled_config}model = "unterminated\n')
+    monkeypatch.setattr(codex_plugin_skills, "_inventories", {})
     warnings: list[str] = []
     broken = SkillSourceContext(
         (workspace,), tmp_path, "all", None, codex_home=home, warnings=warnings
