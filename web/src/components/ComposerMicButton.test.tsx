@@ -17,11 +17,12 @@
 // e2e test against the server's fake engine).
 
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { createRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { CapabilitiesContext } from "@/lib/CapabilitiesContext";
 import type { ServerInfo } from "@/lib/capabilities";
 import type { DictationSessionEvents } from "@/lib/dictation";
-import { ComposerMicButton } from "./ComposerMicButton";
+import { ComposerMicButton, type ComposerMicButtonHandle } from "./ComposerMicButton";
 
 // Controllable DictationSession stand-in for the server-mode tests. The
 // factory reads the mutable spies at call time, so each test installs its
@@ -30,7 +31,9 @@ interface SessionStub {
   stop: () => Promise<string>;
   cancel: () => void;
 }
-let sessionStartMock: Mock<(events: DictationSessionEvents) => Promise<SessionStub>>;
+let sessionStartMock: Mock<
+  (events: DictationSessionEvents, signal?: AbortSignal) => Promise<SessionStub>
+>;
 let sessionStopMock: Mock<() => Promise<string>>;
 let sessionCancelMock: Mock<() => void>;
 let sessionEvents: DictationSessionEvents | null;
@@ -40,7 +43,8 @@ vi.mock("@/lib/dictation", () => {
   return {
     DictationBusyError,
     DictationSession: {
-      start: (events: DictationSessionEvents) => sessionStartMock(events),
+      start: (events: DictationSessionEvents, signal?: AbortSignal) =>
+        sessionStartMock(events, signal),
     },
   };
 });
@@ -64,6 +68,7 @@ function installDictationSession() {
 let handlers: Record<string, (event: unknown) => void>;
 let startSpy: ReturnType<typeof vi.fn>;
 let stopSpy: ReturnType<typeof vi.fn>;
+let abortSpy: ReturnType<typeof vi.fn>;
 let recognitionLang: string | undefined;
 /** Original navigator.mediaDevices descriptor, restored after each test. */
 let originalMediaDevices: PropertyDescriptor | undefined;
@@ -74,6 +79,7 @@ function installSpeechRecognition() {
   handlers = {};
   startSpy = vi.fn();
   stopSpy = vi.fn();
+  abortSpy = vi.fn();
   recognitionLang = undefined;
   // A class (not an arrow fn) so `new Ctor()` is constructable — the component
   // does `new Ctor()` in its mount effect.
@@ -90,6 +96,7 @@ function installSpeechRecognition() {
     interimResults = false;
     start = startSpy;
     stop = stopSpy;
+    abort = abortSpy;
     addEventListener(type: string, handler: (event: unknown) => void) {
       handlers[type] = handler;
     }
@@ -163,7 +170,8 @@ describe("ComposerMicButton", () => {
     act(() => handlers.start?.({}));
 
     expect(button).toHaveAttribute("aria-pressed", "true");
-    expect(button).toHaveClass("bg-muted/60", "focus-visible:text-destructive");
+    expect(button).toHaveClass("bg-muted/60");
+    expect(button).not.toHaveClass("focus-visible:text-destructive");
   });
 
   it("defaults Web Speech to the browser language", () => {
@@ -202,14 +210,29 @@ describe("ComposerMicButton", () => {
     expect(button).toHaveAttribute("aria-pressed", "true");
   });
 
-  it("stops recognition on a second click once recording", () => {
-    render(<ComposerMicButton onTranscript={vi.fn()} />);
+  it("sends when the mic is clicked again while recording", () => {
+    const onVoiceSend = vi.fn();
+    const onVoiceDiscard = vi.fn();
+    render(
+      <ComposerMicButton
+        onTranscript={vi.fn()}
+        onVoiceSend={onVoiceSend}
+        onVoiceDiscard={onVoiceDiscard}
+      />,
+    );
     const button = screen.getByRole("button", { name: "Voice dictation" });
 
     fireEvent.click(button);
     act(() => handlers.start?.({}));
+    expect(button).toHaveAttribute("title", "Send dictation");
     fireEvent.click(button);
     expect(stopSpy).toHaveBeenCalledTimes(1);
+    expect(onVoiceSend).not.toHaveBeenCalled();
+    // The final result lands before end, and the send waits for end.
+    act(() => handlers.result?.(resultEvent("hello there")));
+    act(() => handlers.end?.({}));
+    expect(onVoiceSend).toHaveBeenCalledTimes(1);
+    expect(onVoiceDiscard).not.toHaveBeenCalled();
   });
 
   it("delivers the trimmed final transcript via onTranscript", () => {
@@ -264,9 +287,17 @@ describe("ComposerMicButton", () => {
     expect(onVoiceStart).toHaveBeenCalledTimes(1);
   });
 
-  it("Enter while listening stops dictation and keeps the text (no discard)", () => {
+  it("Enter while listening stops dictation and sends (no discard)", () => {
     const onVoiceDiscard = vi.fn();
-    render(<ComposerMicButton onTranscript={vi.fn()} onVoiceDiscard={onVoiceDiscard} />);
+    const onVoiceSend = vi.fn();
+    const onTranscript = vi.fn();
+    render(
+      <ComposerMicButton
+        onTranscript={onTranscript}
+        onVoiceDiscard={onVoiceDiscard}
+        onVoiceSend={onVoiceSend}
+      />,
+    );
     fireEvent.click(screen.getByRole("button", { name: "Voice dictation" }));
     act(() => handlers.start?.({}));
 
@@ -278,11 +309,106 @@ describe("ComposerMicButton", () => {
     expect(stopSpy).toHaveBeenCalledTimes(1);
     expect(onVoiceDiscard).not.toHaveBeenCalled();
     expect(e.defaultPrevented).toBe(true);
+    act(() => handlers.result?.(resultEvent("  hello world  ")));
+    expect(onVoiceSend).not.toHaveBeenCalled();
+    act(() => handlers.end?.({}));
+    expect(onTranscript).toHaveBeenCalledWith("hello world");
+    expect(onVoiceSend).toHaveBeenCalledTimes(1);
+
+    onTranscript.mockClear();
+    act(() => handlers.result?.(resultEvent("late words")));
+    expect(onTranscript).not.toHaveBeenCalled();
+    expect(onVoiceSend).toHaveBeenCalledTimes(1);
+  });
+
+  it("Cmd or Ctrl+Enter while listening sends and does not leave the mic running", () => {
+    const onVoiceSend = vi.fn();
+    render(<ComposerMicButton onTranscript={vi.fn()} onVoiceSend={onVoiceSend} />);
+    fireEvent.click(screen.getByRole("button", { name: "Voice dictation" }));
+    act(() => handlers.start?.({}));
+
+    const e = new KeyboardEvent("keydown", {
+      key: "Enter",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      window.dispatchEvent(e);
+    });
+    expect(stopSpy).toHaveBeenCalledTimes(1);
+    expect(e.defaultPrevented).toBe(true);
+    act(() => handlers.end?.({}));
+    expect(onVoiceSend).toHaveBeenCalledTimes(1);
+  });
+
+  it("Enter during IME composition does not stop or send", () => {
+    const onVoiceSend = vi.fn();
+    render(<ComposerMicButton onTranscript={vi.fn()} onVoiceSend={onVoiceSend} />);
+    fireEvent.click(screen.getByRole("button", { name: "Voice dictation" }));
+    act(() => handlers.start?.({}));
+
+    const composing = new KeyboardEvent("keydown", {
+      key: "Enter",
+      isComposing: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    const processing = new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(processing, "keyCode", { value: 229 });
+    act(() => {
+      window.dispatchEvent(composing);
+      window.dispatchEvent(processing);
+    });
+
+    expect(stopSpy).not.toHaveBeenCalled();
+    expect(onVoiceSend).not.toHaveBeenCalled();
+    expect(composing.defaultPrevented).toBe(false);
+    expect(processing.defaultPrevented).toBe(false);
+  });
+
+  it("Shift+Enter and Alt+Enter while listening insert a newline and do not send", () => {
+    const onVoiceSend = vi.fn();
+    render(<ComposerMicButton onTranscript={vi.fn()} onVoiceSend={onVoiceSend} />);
+    fireEvent.click(screen.getByRole("button", { name: "Voice dictation" }));
+    act(() => handlers.start?.({}));
+
+    const shift = new KeyboardEvent("keydown", {
+      key: "Enter",
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    const alt = new KeyboardEvent("keydown", {
+      key: "Enter",
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      window.dispatchEvent(shift);
+      window.dispatchEvent(alt);
+    });
+    expect(stopSpy).not.toHaveBeenCalled();
+    expect(onVoiceSend).not.toHaveBeenCalled();
+    expect(shift.defaultPrevented).toBe(false);
+    expect(alt.defaultPrevented).toBe(false);
   });
 
   it("Esc while listening stops dictation and discards the text", () => {
     const onVoiceDiscard = vi.fn();
-    render(<ComposerMicButton onTranscript={vi.fn()} onVoiceDiscard={onVoiceDiscard} />);
+    const onVoiceSend = vi.fn();
+    render(
+      <ComposerMicButton
+        onTranscript={vi.fn()}
+        onVoiceDiscard={onVoiceDiscard}
+        onVoiceSend={onVoiceSend}
+      />,
+    );
     fireEvent.click(screen.getByRole("button", { name: "Voice dictation" }));
     act(() => handlers.start?.({}));
 
@@ -294,6 +420,8 @@ describe("ComposerMicButton", () => {
     expect(stopSpy).toHaveBeenCalledTimes(1);
     expect(onVoiceDiscard).toHaveBeenCalledTimes(1);
     expect(e.defaultPrevented).toBe(true);
+    act(() => handlers.end?.({}));
+    expect(onVoiceSend).not.toHaveBeenCalled();
   });
 
   it("drops a late transcript that arrives after an Esc discard", () => {
@@ -369,6 +497,35 @@ function renderServerMode(
   );
 }
 
+/** Pose as a native shell of the given kind; returns the restore function. */
+function installShell(kind: "electron" | "ios"): () => void {
+  const shellWindow = window as unknown as { omnigentDesktop?: unknown; omnigentNative?: unknown };
+  if (kind === "electron") shellWindow.omnigentDesktop = { kind };
+  else shellWindow.omnigentNative = { kind };
+  return () => {
+    delete shellWindow.omnigentDesktop;
+    delete shellWindow.omnigentNative;
+  };
+}
+
+/** Make `(pointer: coarse)` match, as on a phone; returns the restore function. */
+function installCoarsePointer(): () => void {
+  const original = window.matchMedia;
+  window.matchMedia = ((query: string) => ({
+    matches: query === "(pointer: coarse)",
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
+  })) as typeof window.matchMedia;
+  return () => {
+    window.matchMedia = original;
+  };
+}
+
 async function clickMic() {
   // toggle() kicks off the async DictationSession.start; flush it inside act.
   await act(async () => {
@@ -440,30 +597,108 @@ describe("ComposerMicButton (server dictation)", () => {
     expect(onTranscript).toHaveBeenCalledWith("Hello, world.");
   });
 
-  it("stop click flushes the tail into onTranscript", async () => {
+  it("stop click flushes the tail into onTranscript and sends once", async () => {
     const onTranscript = vi.fn();
+    const onVoiceSend = vi.fn();
+    const onVoiceDiscard = vi.fn();
     sessionStopMock = vi.fn(async () => "tail words");
-    renderServerMode({ onTranscript });
+    renderServerMode({ onTranscript, onVoiceSend, onVoiceDiscard });
     await clickMic();
     await clickMic();
 
     expect(sessionStopMock).toHaveBeenCalledTimes(1);
     expect(onTranscript).toHaveBeenCalledWith("tail words");
+    expect(onVoiceSend).toHaveBeenCalledTimes(1);
+    expect(onVoiceDiscard).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "Voice dictation" })).toHaveAttribute(
       "aria-pressed",
       "false",
     );
+
+    onTranscript.mockClear();
+    act(() => {
+      sessionEvents?.onPartial("late partial");
+      sessionEvents?.onFinal("late final");
+    });
+    expect(onTranscript).not.toHaveBeenCalled();
+    expect(onVoiceSend).toHaveBeenCalledTimes(1);
   });
 
-  it("stop with an empty tail clears the interim region instead", async () => {
+  it("drops a pending stop and late transcripts after unmount", async () => {
+    let resolveStop!: (tail: string) => void;
+    sessionStopMock = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveStop = resolve;
+        }),
+    );
     const onTranscript = vi.fn();
     const onInterim = vi.fn();
-    renderServerMode({ onTranscript, onInterim });
+    const onVoiceSend = vi.fn();
+    const view = renderServerMode({ onTranscript, onInterim, onVoiceSend });
+    await clickMic();
+    await clickMic();
+    expect(sessionStopMock).toHaveBeenCalledTimes(1);
+    view.unmount();
+    await act(async () => {
+      sessionEvents?.onPartial("late partial");
+      sessionEvents?.onFinal("late final");
+      resolveStop("tail from the previous conversation");
+    });
+    expect(onTranscript).not.toHaveBeenCalled();
+    expect(onInterim).not.toHaveBeenCalled();
+    expect(onVoiceSend).not.toHaveBeenCalled();
+  });
+
+  it.each(["send", "unmount", "disable"])("aborts pending startup on %s", async (action) => {
+    let signal!: AbortSignal;
+    sessionStartMock = vi.fn((_events, startSignal) => {
+      signal = startSignal!;
+      return new Promise<SessionStub>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new DOMException("Cancelled", "AbortError")));
+      });
+    });
+    vi.stubGlobal("SpeechRecognition", undefined);
+    vi.stubGlobal("webkitSpeechRecognition", undefined);
+    const ref = createRef<ComposerMicButtonHandle>();
+    const view = render(
+      <CapabilitiesContext.Provider value={DICTATION_INFO}>
+        <ComposerMicButton ref={ref} onTranscript={vi.fn()} />
+      </CapabilitiesContext.Provider>,
+    );
+    await clickMic();
+    expect(signal.aborted).toBe(false);
+    await act(async () => {
+      if (action === "send") ref.current?.endTake();
+      else if (action === "disable") {
+        view.rerender(
+          <CapabilitiesContext.Provider value={DICTATION_INFO}>
+            <ComposerMicButton ref={ref} onTranscript={vi.fn()} disabled />
+          </CapabilitiesContext.Provider>,
+        );
+      } else view.unmount();
+    });
+    expect(signal.aborted).toBe(true);
+    expect(showToastMock).not.toHaveBeenCalled();
+    if (action !== "unmount") {
+      expect(screen.getByRole("button", { name: "Voice dictation" })).toHaveAttribute(
+        "aria-busy",
+        "false",
+      );
+    }
+  });
+
+  it("stop with an empty tail clears the interim region and still sends", async () => {
+    const onTranscript = vi.fn();
+    const onInterim = vi.fn();
+    const onVoiceSend = vi.fn();
+    renderServerMode({ onTranscript, onInterim, onVoiceSend });
     await clickMic();
     await clickMic();
 
     expect(onTranscript).not.toHaveBeenCalled();
     expect(onInterim).toHaveBeenCalledWith("");
+    expect(onVoiceSend).toHaveBeenCalledTimes(1);
   });
 
   it("surfaces mic permission denial in the tooltip and a toast", async () => {
@@ -529,7 +764,7 @@ describe("ComposerMicButton (server dictation)", () => {
     // the silent switch, and partials flow.
     expect(sessionStartMock).toHaveBeenCalledTimes(1);
     expect(button).toHaveAttribute("aria-pressed", "true");
-    expect(button).toHaveAttribute("title", "Voice dictation");
+    expect(button).toHaveAttribute("title", "Send dictation");
     act(() => sessionEvents?.onPartial("via server"));
     expect(onInterim).toHaveBeenCalledWith("via server");
 
@@ -593,11 +828,14 @@ describe("ComposerMicButton (server dictation)", () => {
     expect(onVoiceStart).toHaveBeenCalledTimes(1);
   });
 
-  it("in Electron goes straight to the server, skipping the doomed Web Speech take", async () => {
-    // Electron HAS a SpeechRecognition constructor but no backend: a Web Speech
-    // take always fails with "network" and only then falls back, a visible ~1s
-    // stall. With the server available the button must skip it entirely.
-    (window as unknown as Record<string, unknown>).omnigentDesktop = { kind: "electron" };
+  it.each([
+    // Electron has the constructor but no backend: Web Speech fails with "network".
+    { surface: "Electron", install: () => installShell("electron") },
+    // The iOS app and touch browsers have Web Speech, but without partials or punctuation.
+    { surface: "the iOS app", install: () => installShell("ios") },
+    { surface: "a touch device", install: installCoarsePointer },
+  ])("goes straight to server dictation in $surface", async ({ install }) => {
+    const restore = install();
     try {
       render(
         <CapabilitiesContext.Provider value={DICTATION_INFO}>
@@ -614,14 +852,33 @@ describe("ComposerMicButton (server dictation)", () => {
         "true",
       );
     } finally {
-      delete (window as unknown as Record<string, unknown>).omnigentDesktop;
+      restore();
     }
   });
 
-  it("Enter while listening ends the server take via stop (keeps the tail)", async () => {
+  it("keeps Web Speech on a touch device when the server cannot dictate", async () => {
+    const restore = installCoarsePointer();
+    try {
+      render(
+        <CapabilitiesContext.Provider value={NO_DICTATION_INFO}>
+          <ComposerMicButton onTranscript={vi.fn()} />
+        </CapabilitiesContext.Provider>,
+      );
+      await clickMic();
+
+      expect(startSpy).toHaveBeenCalledTimes(1);
+      expect(sessionStartMock).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+
+  it("Enter while listening ends the server take via stop and sends the tail", async () => {
+    const onTranscript = vi.fn();
     const onVoiceDiscard = vi.fn();
+    const onVoiceSend = vi.fn();
     sessionStopMock = vi.fn(async () => "tail words");
-    renderServerMode({ onVoiceDiscard });
+    renderServerMode({ onTranscript, onVoiceDiscard, onVoiceSend });
     await clickMic();
 
     const e = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
@@ -631,15 +888,37 @@ describe("ComposerMicButton (server dictation)", () => {
 
     expect(sessionStopMock).toHaveBeenCalledTimes(1);
     expect(sessionCancelMock).not.toHaveBeenCalled();
+    expect(onTranscript).toHaveBeenCalledWith("tail words");
+    expect(onVoiceSend).toHaveBeenCalledTimes(1);
     expect(onVoiceDiscard).not.toHaveBeenCalled();
     expect(e.defaultPrevented).toBe(true);
+  });
+
+  it("Shift+Enter while a server take is live does not stop or send", async () => {
+    const onVoiceSend = vi.fn();
+    renderServerMode({ onVoiceSend });
+    await clickMic();
+
+    const e = new KeyboardEvent("keydown", {
+      key: "Enter",
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      window.dispatchEvent(e);
+    });
+    expect(sessionStopMock).not.toHaveBeenCalled();
+    expect(onVoiceSend).not.toHaveBeenCalled();
+    expect(e.defaultPrevented).toBe(false);
   });
 
   it("Esc while listening cancels the server take and discards, dropping late results", async () => {
     const onTranscript = vi.fn();
     const onInterim = vi.fn();
     const onVoiceDiscard = vi.fn();
-    renderServerMode({ onTranscript, onInterim, onVoiceDiscard });
+    const onVoiceSend = vi.fn();
+    renderServerMode({ onTranscript, onInterim, onVoiceDiscard, onVoiceSend });
     await clickMic();
 
     const e = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
@@ -662,5 +941,203 @@ describe("ComposerMicButton (server dictation)", () => {
     });
     expect(onInterim).not.toHaveBeenCalled();
     expect(onTranscript).not.toHaveBeenCalled();
+    expect(onVoiceSend).not.toHaveBeenCalled();
+  });
+});
+
+// The imperative endTake handle lets a parent end the take when it sends the
+// draft. On touch devices Send is a button tap that never reaches the
+// Enter-commit handler, so without this the mic keeps recording after send.
+describe("ComposerMicButton (endTake)", () => {
+  it("aborts a Web Speech take and keeps the dictated text (no discard)", () => {
+    const onTranscript = vi.fn();
+    const onVoiceDiscard = vi.fn();
+    const ref = createRef<ComposerMicButtonHandle>();
+    render(
+      <ComposerMicButton ref={ref} onTranscript={onTranscript} onVoiceDiscard={onVoiceDiscard} />,
+    );
+    const button = screen.getByRole("button", { name: "Voice dictation" });
+    fireEvent.click(button);
+    act(() => handlers.start?.({}));
+    expect(button).toHaveAttribute("aria-pressed", "true");
+
+    act(() => ref.current?.endTake());
+
+    // Unlike Esc, a send keeps what was dictated. abort() (not stop()) is used
+    // so a trailing final can't flush into the composer the parent just cleared.
+    expect(abortSpy).toHaveBeenCalledTimes(1);
+    expect(stopSpy).not.toHaveBeenCalled();
+    expect(onVoiceDiscard).not.toHaveBeenCalled();
+
+    // Real abort() fires "end"; the fake doesn't, so drive it to confirm the
+    // button settles back to idle.
+    act(() => handlers.end?.({}));
+    expect(button).toHaveAttribute("aria-pressed", "false");
+
+    // A final the engine had already queued before abort() must be dropped, not
+    // flushed into the composer the parent just cleared on send.
+    act(() => handlers.result?.(resultEvent("trailing words")));
+    expect(onTranscript).not.toHaveBeenCalled();
+  });
+
+  it("is a no-op when no take is in progress", () => {
+    const ref = createRef<ComposerMicButtonHandle>();
+    render(<ComposerMicButton ref={ref} onTranscript={vi.fn()} />);
+
+    act(() => ref.current?.endTake());
+
+    expect(abortSpy).not.toHaveBeenCalled();
+    expect(stopSpy).not.toHaveBeenCalled();
+  });
+
+  it("cancels a server take without flushing the tail into the sent composer", async () => {
+    vi.stubGlobal("SpeechRecognition", undefined);
+    vi.stubGlobal("webkitSpeechRecognition", undefined);
+    const onTranscript = vi.fn();
+    // A non-empty tail would surface if endTake wrongly flushed like a stop.
+    sessionStopMock = vi.fn(async () => "tail words");
+    const ref = createRef<ComposerMicButtonHandle>();
+    render(
+      <CapabilitiesContext.Provider value={DICTATION_INFO}>
+        <ComposerMicButton ref={ref} onTranscript={onTranscript} />
+      </CapabilitiesContext.Provider>,
+    );
+    await clickMic();
+    const button = screen.getByRole("button", { name: "Voice dictation" });
+    expect(button).toHaveAttribute("aria-pressed", "true");
+
+    await act(async () => {
+      ref.current?.endTake();
+    });
+
+    expect(sessionCancelMock).toHaveBeenCalledTimes(1);
+    expect(sessionStopMock).not.toHaveBeenCalled();
+    expect(onTranscript).not.toHaveBeenCalledWith("tail words");
+    expect(button).toHaveAttribute("aria-pressed", "false");
+
+    // A final the session had already queued before cancel() must not flush
+    // into the composer the parent just cleared on send.
+    act(() => {
+      sessionEvents?.onFinal("late final");
+    });
+    expect(onTranscript).not.toHaveBeenCalled();
+  });
+
+  it("discards a server take ended mid-handshake instead of letting it go live", async () => {
+    vi.stubGlobal("SpeechRecognition", undefined);
+    vi.stubGlobal("webkitSpeechRecognition", undefined);
+    // Hold the handshake open so the send (endTake) lands while start is still
+    // pending with no session attached yet.
+    let resolveStart!: (s: SessionStub) => void;
+    sessionStartMock = vi.fn((events: DictationSessionEvents) => {
+      sessionEvents = events;
+      return new Promise<SessionStub>((resolve) => {
+        resolveStart = resolve;
+      });
+    });
+    const ref = createRef<ComposerMicButtonHandle>();
+    render(
+      <CapabilitiesContext.Provider value={DICTATION_INFO}>
+        <ComposerMicButton ref={ref} onTranscript={vi.fn()} />
+      </CapabilitiesContext.Provider>,
+    );
+    const button = screen.getByRole("button", { name: "Voice dictation" });
+
+    await act(async () => {
+      fireEvent.click(button);
+    });
+    // Handshake in flight when the parent sends.
+    expect(button).toHaveAttribute("aria-busy", "true");
+    act(() => ref.current?.endTake());
+
+    // The take is marked for teardown, but the handshake is still in flight, so
+    // the button keeps showing busy instead of looking idle yet rejecting taps.
+    expect(button).toHaveAttribute("aria-busy", "true");
+
+    // Resolving the handshake must discard the session, not attach a live take.
+    await act(async () => {
+      resolveStart({ stop: sessionStopMock, cancel: sessionCancelMock });
+    });
+    expect(sessionCancelMock).toHaveBeenCalledTimes(1);
+    expect(sessionStopMock).not.toHaveBeenCalled();
+    expect(button).toHaveAttribute("aria-busy", "false");
+    expect(button).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("stays silent when the handshake fails after the take is ended mid-send", async () => {
+    vi.stubGlobal("SpeechRecognition", undefined);
+    vi.stubGlobal("webkitSpeechRecognition", undefined);
+    // Hold the handshake open so the send (endTake) lands while start is still
+    // pending, then fail it. The failure is for a take the user already ended,
+    // so it must clear the spinner without warning about a dropped take.
+    let rejectStart!: (reason: unknown) => void;
+    sessionStartMock = vi.fn((events: DictationSessionEvents) => {
+      sessionEvents = events;
+      return new Promise<SessionStub>((_resolve, reject) => {
+        rejectStart = reject;
+      });
+    });
+    const ref = createRef<ComposerMicButtonHandle>();
+    render(
+      <CapabilitiesContext.Provider value={DICTATION_INFO}>
+        <ComposerMicButton ref={ref} onTranscript={vi.fn()} />
+      </CapabilitiesContext.Provider>,
+    );
+    const button = screen.getByRole("button", { name: "Voice dictation" });
+
+    await act(async () => {
+      fireEvent.click(button);
+    });
+    expect(button).toHaveAttribute("aria-busy", "true");
+    act(() => ref.current?.endTake());
+
+    await act(async () => {
+      rejectStart(new Error("socket refused"));
+    });
+    expect(button).toHaveAttribute("aria-busy", "false");
+    expect(button).toHaveAttribute("aria-pressed", "false");
+    expect(button).toHaveAttribute("title", "Voice dictation");
+    expect(showToastMock).not.toHaveBeenCalled();
+  });
+
+  it("drops the tail from an in-flight server stop ended on send", async () => {
+    vi.stubGlobal("SpeechRecognition", undefined);
+    vi.stubGlobal("webkitSpeechRecognition", undefined);
+    const onTranscript = vi.fn();
+    // Hold session.stop() open so the send (endTake) lands while the stop is
+    // still pending and no session is attached — its tail must not flush.
+    let resolveStop!: (tail: string) => void;
+    sessionStopMock = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveStop = resolve;
+        }),
+    );
+    const ref = createRef<ComposerMicButtonHandle>();
+    render(
+      <CapabilitiesContext.Provider value={DICTATION_INFO}>
+        <ComposerMicButton ref={ref} onTranscript={onTranscript} />
+      </CapabilitiesContext.Provider>,
+    );
+    const button = screen.getByRole("button", { name: "Voice dictation" });
+    await clickMic();
+    expect(button).toHaveAttribute("aria-pressed", "true");
+
+    // Tap the mic again to end the take: this begins the stop, but its promise
+    // stays pending, so the session is detached and serverBusyRef stays set.
+    await act(async () => {
+      fireEvent.click(button);
+    });
+    expect(sessionStopMock).toHaveBeenCalledTimes(1);
+
+    // The parent's Send lands while the stop is still in flight.
+    act(() => ref.current?.endTake());
+
+    // Resolving the stop with a trailing tail must not repopulate the composer.
+    await act(async () => {
+      resolveStop("tail words");
+    });
+    expect(onTranscript).not.toHaveBeenCalledWith("tail words");
+    expect(button).toHaveAttribute("aria-pressed", "false");
   });
 });

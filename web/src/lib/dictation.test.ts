@@ -1,11 +1,5 @@
-// Tests for the dictation socket protocol parsing. The DictationSession
-// transport itself (mic + AudioWorklet + WebSocket) can't run in jsdom;
-// its behavior against the component is pinned in ComposerMicButton.test.tsx
-// with a mocked session, and the full loop runs in the Playwright e2e test
-// against the server's fake engine.
-
-import { describe, expect, it } from "vitest";
-import { parseDictationEvent } from "./dictation";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { DictationSession, parseDictationEvent } from "./dictation";
 
 describe("parseDictationEvent", () => {
   it("parses the transcript event shapes", () => {
@@ -37,5 +31,67 @@ describe("parseDictationEvent", () => {
     expect(parseDictationEvent('{"type":"partial"}')).toBeNull();
     expect(parseDictationEvent('{"type":"partial","text":7}')).toBeNull();
     expect(parseDictationEvent('{"type":"error"}')).toBeNull();
+  });
+});
+
+describe("DictationSession startup cancellation", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("releases capture and rejects before the server becomes ready", async () => {
+    const stop = vi.fn();
+    const getUserMedia = vi.fn().mockResolvedValue({ getTracks: () => [{ stop }] });
+    vi.stubGlobal("navigator", { mediaDevices: { getUserMedia } });
+    const close = vi.fn();
+    vi.stubGlobal(
+      "WebSocket",
+      class {
+        binaryType = "";
+        close = close;
+      },
+    );
+    const controller = new AbortController();
+    const start = DictationSession.start(
+      { onPartial: vi.fn(), onFinal: vi.fn(), onError: vi.fn() },
+      controller.signal,
+    );
+    const rejected = expect(start).rejects.toMatchObject({ name: "AbortError" });
+    await Promise.resolve();
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+    expect(stop).not.toHaveBeenCalled();
+    controller.abort();
+    expect(stop).toHaveBeenCalled();
+    expect(close).toHaveBeenCalled();
+    await rejected;
+  });
+
+  it("releases a microphone acquired after cancellation without opening a socket", async () => {
+    const stop = vi.fn();
+    let grant!: (stream: unknown) => void;
+    vi.stubGlobal("navigator", {
+      mediaDevices: {
+        getUserMedia: vi.fn(
+          () =>
+            new Promise((resolve) => {
+              grant = resolve;
+            }),
+        ),
+      },
+    });
+    const socket = vi.fn();
+    vi.stubGlobal("WebSocket", socket);
+    const controller = new AbortController();
+    const start = DictationSession.start(
+      { onPartial: vi.fn(), onFinal: vi.fn(), onError: vi.fn() },
+      controller.signal,
+    );
+    const rejected = expect(start).rejects.toMatchObject({ name: "AbortError" });
+    controller.abort();
+    grant({ getTracks: () => [{ stop }] });
+    await rejected;
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(socket).not.toHaveBeenCalled();
   });
 });

@@ -7942,3 +7942,173 @@ describe("saved sandbox inference policy", () => {
     },
   );
 });
+
+describe("Composer voice dictation", () => {
+  let handlers: Record<string, (event: unknown) => void>;
+  let stopSpy: ReturnType<typeof vi.fn>;
+  let abortSpy: ReturnType<typeof vi.fn>;
+  let originalMediaDevices: PropertyDescriptor | undefined;
+
+  const finalResult = (transcript: string) => ({
+    resultIndex: 0,
+    results: { length: 1, 0: { length: 1, isFinal: true, 0: { transcript } } },
+  });
+
+  beforeEach(() => {
+    handlers = {};
+    stopSpy = vi.fn();
+    abortSpy = vi.fn();
+    class FakeRecognition {
+      continuous = false;
+      interimResults = false;
+      lang = "en-US";
+      start = vi.fn();
+      stop = stopSpy;
+      abort = abortSpy;
+      addEventListener(type: string, handler: (event: unknown) => void) {
+        handlers[type] = handler;
+      }
+      removeEventListener() {}
+    }
+    vi.stubGlobal("SpeechRecognition", FakeRecognition);
+    // The listening-state visualizer calls getUserMedia; reject so jsdom never
+    // constructs an AudioContext.
+    originalMediaDevices = Object.getOwnPropertyDescriptor(navigator, "mediaDevices");
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getUserMedia: vi.fn().mockRejectedValue(new Error("no mic")) },
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    if (originalMediaDevices) {
+      Object.defineProperty(navigator, "mediaDevices", originalMediaDevices);
+    } else {
+      delete (navigator as { mediaDevices?: unknown }).mediaDevices;
+    }
+  });
+
+  it("ends the voice take when the dictated message is sent from the touch layout", () => {
+    // On a coarse pointer the Send tap is the only way to submit.
+    onTestFinished(forceDesktopCoarsePointer());
+    const onSend = vi.fn();
+    render(<Composer {...composerProps({ onSend })} />);
+    const mic = screen.getByRole("button", { name: "Voice dictation" });
+    fireEvent.click(mic);
+    act(() => handlers.start?.({}));
+    expect(mic).toHaveAttribute("aria-pressed", "true");
+    act(() => handlers.result?.(finalResult("voice dictated message")));
+    expect(textarea().value).toBe("voice dictated message");
+
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(onSend).toHaveBeenCalledWith("voice dictated message", undefined);
+    expect(textarea().value).toBe("");
+    // Sending must tear the recognizer down; stop() and abort() both end the take.
+    expect(stopSpy.mock.calls.length + abortSpy.mock.calls.length).toBe(1);
+
+    // A real recognizer can still deliver a buffered result before it ends.
+    act(() => handlers.result?.(finalResult("words spoken after the send")));
+    expect(textarea().value).toBe("");
+
+    act(() => handlers.end?.({}));
+    expect(mic).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("sends the dictated message once when the mic is tapped again", () => {
+    onTestFinished(forceDesktopCoarsePointer());
+    const onSend = vi.fn();
+    render(<Composer {...composerProps({ onSend })} />);
+    const mic = screen.getByRole("button", { name: "Voice dictation" });
+    fireEvent.click(mic);
+    act(() => handlers.start?.({}));
+    act(() => handlers.result?.(finalResult("first part")));
+
+    // Tapping the live mic stops the recognizer; its last sentence lands before "end".
+    fireEvent.click(mic);
+    expect(stopSpy).toHaveBeenCalledTimes(1);
+    expect(onSend).not.toHaveBeenCalled();
+    act(() => handlers.result?.(finalResult("and the tail")));
+    act(() => handlers.end?.({}));
+
+    expect(onSend).toHaveBeenCalledExactlyOnceWith("first part and the tail", undefined);
+    expect(textarea().value).toBe("");
+    expect(mic).toHaveAttribute("aria-pressed", "false");
+    // The take already ended, so the send's endTake does not abort it again.
+    expect(abortSpy).not.toHaveBeenCalled();
+    act(() => handlers.result?.(finalResult("late words")));
+    expect(textarea().value).toBe("");
+  });
+
+  it.each([
+    { name: "deslop", input: "/deslop fix the bug", args: "fix the bug" },
+    // A multi-word skill whose first word is a built-in takes an earlier branch.
+    { name: "Help Desk", input: "/Help Desk summarize", args: "summarize" },
+  ])("ends the voice take when the known skill $name is sent", ({ name, input, args }) => {
+    // The slash-command branch clears the composer and returns before the
+    // plaintext send path, so the mic must still stop on this accepted send.
+    setComposerState({
+      conversationId: "conv_test",
+      skills: [{ name, description: "A catalog skill" }],
+    });
+    const onSend = vi.fn();
+    const onSendSlashCommand = vi.fn();
+    render(<Composer {...composerProps({ onSend, onSendSlashCommand })} />);
+    const mic = screen.getByRole("button", { name: "Voice dictation" });
+    fireEvent.click(mic);
+    act(() => handlers.start?.({}));
+    expect(mic).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.change(textarea(), { target: { value: input } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(onSendSlashCommand).toHaveBeenCalledExactlyOnceWith(name, args);
+    expect(onSend).not.toHaveBeenCalled();
+    expect(stopSpy.mock.calls.length + abortSpy.mock.calls.length).toBe(1);
+  });
+
+  it("keeps the voice take active when an informational slash command is sent", () => {
+    // /context prints usage info and returns without clearing the composer, so
+    // it is not an accepted send; the mic must stay live rather than ending the
+    // take the user is still dictating into.
+    setComposerState({ conversationId: "conv_test", skills: [] });
+    const onSend = vi.fn();
+    const onSendSlashCommand = vi.fn();
+    render(<Composer {...composerProps({ onSend, onSendSlashCommand })} />);
+    const mic = screen.getByRole("button", { name: "Voice dictation" });
+    fireEvent.click(mic);
+    act(() => handlers.start?.({}));
+    expect(mic).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.change(textarea(), { target: { value: "/context" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(onSend).not.toHaveBeenCalled();
+    expect(onSendSlashCommand).not.toHaveBeenCalled();
+    expect(stopSpy.mock.calls.length + abortSpy.mock.calls.length).toBe(0);
+    expect(mic).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("ends the voice take when a command is run from the slash menu", () => {
+    // Selecting a no-arg built-in from the menu clears the composer via
+    // setValue(""), unlike the typed path that leaves the text in place. A
+    // cleared composer must not keep the mic recording.
+    setComposerState({ conversationId: "conv_test", skills: [] });
+    const onSend = vi.fn();
+    const onSendSlashCommand = vi.fn();
+    render(<Composer {...composerProps({ onSend, onSendSlashCommand })} />);
+    const mic = screen.getByRole("button", { name: "Voice dictation" });
+    fireEvent.click(mic);
+    act(() => handlers.start?.({}));
+    expect(mic).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.focus(textarea());
+    fireEvent.change(textarea(), { target: { value: "/con" } });
+    fireEvent.click(screen.getByTestId("slash-menu-item-context"));
+
+    expect(onSend).not.toHaveBeenCalled();
+    expect(onSendSlashCommand).not.toHaveBeenCalled();
+    expect(textarea().value).toBe("");
+    expect(stopSpy.mock.calls.length + abortSpy.mock.calls.length).toBe(1);
+  });
+});

@@ -140,6 +140,7 @@ import {
   serializeReplyDraft,
   snapshotReplyDraft,
   type ComposerDraft,
+  type ReplyDraft,
   type StoredReplyDraft,
 } from "@/lib/replyDraft";
 // Re-exported so existing tests importing these from "./ChatPage" keep working
@@ -230,7 +231,7 @@ import {
   useWorkspaceDirectory,
   type WorkspaceFile,
 } from "@/hooks/useWorkspaceChangedFiles";
-import { ComposerMicButton } from "@/components/ComposerMicButton";
+import { ComposerMicButton, type ComposerMicButtonHandle } from "@/components/ComposerMicButton";
 import { ComposerAttachments } from "@/components/ComposerAttachments";
 import { isCostRoutingSession, isSubagentRoutingSession } from "@/components/CostRoutingControl";
 import {
@@ -2755,6 +2756,9 @@ function ComposerImpl(
   const dirtyRef = useRef(false);
   // Composer text captured when voice dictation starts, so Esc can revert to it.
   const voiceSnapshotRef = useRef("");
+  // Lets a Send end a live voice take: on touch devices Send is a button tap,
+  // which never reaches the mic's Enter-to-send handler.
+  const micRef = useRef<ComposerMicButtonHandle>(null);
   // On mobile, programmatic focus immediately summons the software keyboard.
   // Keep desktop's fast-type affordance, but let mobile users explicitly tap
   // the composer when switching back from Terminal or changing sessions.
@@ -3138,6 +3142,14 @@ function ComposerImpl(
     if (conversationId) setSessionDraft(conversationId, { text: "", files: [] });
   }, [restoredSendDraft, conversationId, settledConversationId, replaceText, draft]);
 
+  // End a live voice take as part of an accepted send, pinning any pending
+  // dictation first so a draft kept after a failed fork isn't clobbered when
+  // the next take's partial lifts the stale region out. No-op when idle.
+  const endVoiceTake = () => {
+    dictation.commitPending();
+    micRef.current?.endTake();
+  };
+
   /**
    * Execute a slash command by name + optional argument string.
    * Clears the input and error state on success (or sets an error on
@@ -3153,6 +3165,7 @@ function ComposerImpl(
         dirtyRef.current = true;
         setValue("");
         setCommandError(null);
+        endVoiceTake();
         onNewSession();
         return true;
       }
@@ -3168,6 +3181,7 @@ function ComposerImpl(
         dirtyRef.current = true;
         setValue("");
         setCommandError(null);
+        endVoiceTake();
         void useChatStore
           .getState()
           .clearContext()
@@ -3213,6 +3227,7 @@ function ComposerImpl(
         dirtyRef.current = true;
         setValue("");
         setCommandError(null);
+        endVoiceTake();
         if (
           sessionHarness === "claude-native" ||
           sessionHarness === "claude-sdk" ||
@@ -3244,6 +3259,7 @@ function ComposerImpl(
         dirtyRef.current = true;
         setValue("");
         setCommandError(null);
+        endVoiceTake();
         void useChatStore
           .getState()
           .setEffort(level)
@@ -3278,6 +3294,7 @@ function ComposerImpl(
         dirtyRef.current = true;
         setValue("");
         setCommandError(null);
+        endVoiceTake();
         // Confirmation is a durable `[System: model changed to X]` note the
         // server appends to the transcript (see _persist_model_change_note) —
         // not a transient composer hint. Surface only failures inline here.
@@ -3341,6 +3358,7 @@ function ComposerImpl(
         dirtyRef.current = true;
         setValue("");
         setCommandError(null);
+        endVoiceTake();
         setPermissionPickerOpenNonce((n) => n + 1);
         return true;
       }
@@ -3382,9 +3400,13 @@ function ComposerImpl(
       completeMenuSelection(cmd);
       holdCommandForArca();
     } else {
-      // Execute immediately — no argument needed.
-      // /compact clears its draft only after the busy guard accepts it.
-      if (cmd !== "/compact") setValue("");
+      // Execute immediately — no argument needed. Clearing the composer ends a
+      // live take so the mic can't keep recording into the emptied composer;
+      // /compact clears later, under its busy guard, and ends the take there.
+      if (cmd !== "/compact") {
+        endVoiceTake();
+        setValue("");
+      }
       setCommandError(null);
       executeSlashCommand(cmd, "");
     }
@@ -3618,10 +3640,17 @@ function ComposerImpl(
 
   const submit = ({
     resetNativeInputSession = false,
-  }: { resetNativeInputSession?: boolean } = {}) => {
+    voiceDraft,
+  }: { resetNativeInputSession?: boolean; voiceDraft?: ReplyDraft } = {}) => {
+    // A voice finish calls this in the same turn it inserts the tail. React
+    // has not re-rendered, so the closed-over draft would miss those words.
+    const sourceDraft = voiceDraft ?? draft;
+    const sourceText = voiceDraft === undefined ? fullText : serializeReplyDraft(voiceDraft);
+    const sourceStored =
+      voiceDraft === undefined ? storedReplyDraft : snapshotReplyDraft(voiceDraft);
     // The /btw overlay locks the composer — never send while it's open.
     if (composerLockedByBtw) return;
-    const trimmed = fullText.trim();
+    const trimmed = sourceText.trim();
     // Allow send if there's text, attached files, OR "@"-tagged paths.
     if (
       (!trimmed && files.length === 0 && mentionedItems.length === 0) ||
@@ -3645,6 +3674,7 @@ function ComposerImpl(
       const sourceId = useChatStore.getState().conversationId;
       if (sourceId === null) return;
       setCommandError(null);
+      endVoiceTake();
       createSideChat(sourceId).then(
         ({ childSessionId }) => {
           // Clear the composer only once the side chat exists, so a failed
@@ -3666,7 +3696,7 @@ function ComposerImpl(
       ? matchSlashCommandInvocation(trimmed, slashCommandNames)
       : null;
     if (
-      draft.quotes.length === 0 &&
+      sourceDraft.quotes.length === 0 &&
       (skill !== null || isSlashCommandText(trimmed)) &&
       files.length === 0 &&
       mentionedItems.length === 0
@@ -3675,6 +3705,7 @@ function ComposerImpl(
       const cmd = parts[0].toLowerCase();
       const arg = parts[1] ?? "";
       const sendSkill = (match: { command: string; args: string }) => {
+        endVoiceTake();
         appendEntry(trimmed);
         onSendSlashCommand?.(match.command.slice(1), match.args);
         dirtyRef.current = true;
@@ -3710,6 +3741,7 @@ function ComposerImpl(
           dirtyRef.current = true;
           setValue("");
           setCommandError(null);
+          endVoiceTake();
           setPickerOpenNonce((n) => n + 1);
         });
         return;
@@ -3760,22 +3792,23 @@ function ComposerImpl(
     // server queues the message and delivers it to the running task
     // (or starts a fresh one once the current drains). Escape still
     // interrupts.
-    if (trimmed) appendEntry(fullText, storedReplyDraft);
+    if (trimmed) appendEntry(sourceText, sourceStored);
     const sendFiles = files.length > 0 ? files : undefined;
-    if (draft.quotes.length > 0) {
+    if (sourceDraft.quotes.length > 0) {
       // Preserve authored whitespace and quote provenance, including mention markers.
       const outgoing = {
-        ...draft,
-        quotes: draft.quotes.map((quote, index) =>
+        ...sourceDraft,
+        quotes: sourceDraft.quotes.map((quote, index) =>
           index === 0 ? { ...quote, before: mentionPreamble + quote.before } : quote,
         ),
       };
       onSend(serializeReplyDraft(outgoing), sendFiles, snapshotReplyDraft(outgoing));
     } else {
-      const message = isSlashCommandText(trimmed) ? trimmed : fullText.trimEnd();
+      const message = isSlashCommandText(trimmed) ? trimmed : sourceText.trimEnd();
       onSend(mentionPreamble + message, sendFiles);
     }
     dirtyRef.current = true;
+    endVoiceTake();
     clearComposerAfterSend(resetNativeInputSession);
     clearAttachments();
     setMentionedItems([]);
@@ -4341,6 +4374,7 @@ function ComposerImpl(
                 />
               </div>
               <ComposerMicButton
+                ref={micRef}
                 className="size-8 md:size-7"
                 enableHotkey
                 disabled={disabled || isReadOnly || hasPendingElicitation || composerLockedByBtw}
@@ -4362,6 +4396,22 @@ function ComposerImpl(
                   dictation.replaceInterim(text);
                   dirtyRef.current = true;
                   resetCursor();
+                }}
+                onVoiceSend={() => {
+                  const spoken = dictation.readDraft();
+                  const voiceDraft: ReplyDraft =
+                    activeTextId === null
+                      ? { ...draft, text: spoken }
+                      : {
+                          ...draft,
+                          quotes: draft.quotes.map((quote) =>
+                            quote.id === activeTextId ? { ...quote, before: spoken } : quote,
+                          ),
+                        };
+                  // submit(), not the form handler: while a turn is running the
+                  // form's submit button is Interrupt, and ending dictation
+                  // must not abort that turn.
+                  submit({ voiceDraft, resetNativeInputSession: true });
                 }}
               />
               <TooltipProvider>

@@ -5246,7 +5246,10 @@ export function NewChatLandingScreen() {
   }, [pickerLoading, pickerSelectionError, pickerEdits]);
 
   // Keep the disabled reason and its recovery target in the same priority order.
-  const submitBlocker = ((): {
+  // Takes the prompt so a voice send can check the tail React has not rendered yet.
+  const submitBlockerFor = (
+    prompt: string,
+  ): {
     field: "sandboxRepo" | "other";
     message: string | null;
   } | null => {
@@ -5310,12 +5313,13 @@ export function NewChatLandingScreen() {
         message: "This project's configured agent is unavailable — pick an agent to continue",
       };
     }
-    if (message.trim().length === 0 && files.length === 0) {
+    if (prompt.trim().length === 0 && files.length === 0) {
       return { field: "other", message: "Enter a message to get started" };
     }
     if (selectedAgent == null || creating) return { field: "other", message: null };
     return null;
-  })();
+  };
+  const submitBlocker = submitBlockerFor(message);
   const canSubmit = submitBlocker === null;
   const submitDisabledReason = submitBlocker?.message ?? null;
   useLayoutEffect(() => {
@@ -5661,11 +5665,15 @@ export function NewChatLandingScreen() {
     }
   }
 
-  async function handleCreate() {
+  async function handleCreate(overrideMessage?: string) {
+    // A voice finish passes the draft the hook just wrote. ``message`` is still
+    // the previous render until React flushes that update, which would drop the
+    // tail or refuse a send that only the tail made non-empty.
+    const promptSource = overrideMessage ?? message;
     // Mirror the Send button's disabled condition (canSubmit) so the Enter-key
     // and form-submit paths that call this directly can't create a session with
     // a blank message, host, agent, or workspace.
-    if (!canSubmit) {
+    if (submitBlockerFor(promptSource) !== null) {
       handleBlockedSubmit();
       return;
     }
@@ -5846,7 +5854,7 @@ export function NewChatLandingScreen() {
       // prompt the agent actually receives, not the raw textarea value.
       const initialPrompt =
         buildMentionPreamble(mentionedItems, selectedAgent?.harness ?? null) +
-        sanitizeInitialPrompt(message);
+        sanitizeInitialPrompt(promptSource);
       // Native terminal agents open terminal-first: `omnigent.ui: terminal`
       // tells the UI to render the terminal wrapper, and `omnigent.wrapper`
       // selects which CLI bridge the runner launches — the values are the
@@ -7426,6 +7434,9 @@ export function NewChatLandingScreen() {
                       onVoiceDiscard={() => setMessage(voiceSnapshotRef.current)}
                       onTranscript={dictation.appendFinal}
                       onInterim={dictation.replaceInterim}
+                      onVoiceSend={() => {
+                        void handleCreate(dictation.readDraft());
+                      }}
                     />
                     <TooltipProvider>
                       <Tooltip

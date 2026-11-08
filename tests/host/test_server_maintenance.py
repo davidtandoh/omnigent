@@ -133,6 +133,7 @@ def test_maintenance_accepts_exited_server_waiting_for_parent_reap(
 
 def test_host_maintenance_detach_skips_ending_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
     record = Mock(pid=1234, target="http://127.0.0.1:8123")
+    monkeypatch.setattr(cli_module, "_record_daemon_stop_requested", Mock())
     monkeypatch.setattr(cli_module, "_selected_daemon_records", lambda **kwargs: [record])
     ended = Mock(side_effect=AssertionError("maintenance cannot end sessions"))
     monkeypatch.setattr(cli_module, "_stop_daemon_sessions", ended)
@@ -440,6 +441,7 @@ def test_unsupported_restart_refuses_before_stop(
 def test_local_mode_endpoint_detaches_exact_record(monkeypatch: pytest.MonkeyPatch) -> None:
     from types import SimpleNamespace
 
+    monkeypatch.setattr(cli_module, "_record_daemon_stop_requested", Mock())
     local = SimpleNamespace(
         target="local", mode="local", resolved_server_url="http://127.0.0.1:8123", pid=1234
     )

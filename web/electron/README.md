@@ -70,11 +70,11 @@ adds native niceties:
   image onto a text field reaches the web app's HTML5 drop handler with no
   extra configuration.
 - **Microphone permission for voice dictation.** The composer's dictation
-  button uses the Web Speech API plus a `getUserMedia` audio stream (the mic
-  level meter). Both go through Chromium's permission layer, which in Electron
-  asks the _embedder_ (us) rather than showing Chrome's prompt — with no
-  handler wired, Chromium denies by default, so `recognition.start()` fails
-  instantly with `not-allowed` and the button appears dead. The main process
+  button captures audio through `getUserMedia` for server transcription and
+  the mic level meter. Capture goes through Chromium's permission layer.
+  In Electron, Chromium asks the _embedder_ (us) rather than showing Chrome's
+  prompt. Without a handler, Chromium denies capture by default and
+  `getUserMedia` rejects with `NotAllowedError`. The main process
   now wires `setPermissionRequestHandler` / `setPermissionCheckHandler` to
   grant the audio permissions, and on macOS calls
   `systemPreferences.askForMediaAccess("microphone")` lazily — on the first
@@ -85,15 +85,9 @@ adds native niceties:
   > **Caveat — Web Speech does not transcribe in Electron.** Granting the
   > mic clears the _permission_ gate, but `SpeechRecognition` also depends on
   > Google's cloud speech backend keyed to official Google Chrome builds, which
-  > Electron's bundled Chromium does **not** ship. Electron therefore uses the
-  > **server-side dictation fallback** instead: when the connected server has
-  > the `dictation` extra and models installed (`GET /v1/info` reports
-  > `dictation_available`), a take that fails with Web Speech's `network`
-  > error falls back to streaming audio to `WS /v1/dictation/stream` and
-  > transcribing on the server — no cloud, no Chrome dependency. See
-  > `designs/server-dictation.md`. Without the server extra, the button still
-  > renders (the constructor exists) but shows "Dictation unavailable" when
-  > clicked, as before.
+  > Electron's bundled Chromium does **not** ship. Configure server dictation
+  > using the [server dictation design](../../designs/server-dictation.md),
+  > which owns transport selection, model setup, and fallback behavior.
 
 ## How it works (zero UI duplication)
 

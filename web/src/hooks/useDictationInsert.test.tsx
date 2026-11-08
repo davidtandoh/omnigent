@@ -109,6 +109,14 @@ describe("useDictationInsert", () => {
     expect(result.current.value).toBe("Hello, world. next");
   });
 
+  it("readDraft returns the inserted text in the same turn as the insert", () => {
+    const { result } = renderDictation("Hi");
+    act(() => {
+      result.current.appendFinal("there");
+      expect(result.current.readDraft()).toBe("Hi there");
+    });
+  });
+
   it("space-separates from an existing draft without doubling spaces", () => {
     const { result } = renderDictation("draft");
     act(() => result.current.replaceInterim("spoken"));
@@ -138,6 +146,23 @@ describe("useDictationInsert", () => {
     expect(result.current.value).toBe("after");
     act(() => result.current.appendFinal("After."));
     expect(result.current.value).toBe("After.");
+  });
+
+  it("commitPending settles the region so a kept draft survives the next take", () => {
+    const { result } = renderDictation();
+    act(() => result.current.replaceInterim("retained words"));
+    // An accepted send ends the take but keeps the draft (a failed fork).
+    act(() => result.current.commitPending());
+    // The next take appends after the retained words rather than lifting the
+    // now-settled region back out.
+    act(() => result.current.replaceInterim("and more"));
+    expect(result.current.value).toBe("retained words and more");
+  });
+
+  it("commitPending is inert with nothing pending", () => {
+    const { result } = renderDictation("typed draft");
+    act(() => result.current.commitPending());
+    expect(result.current.value).toBe("typed draft");
   });
 
   it("never deletes text the user typed after the interim", () => {

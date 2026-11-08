@@ -2121,7 +2121,7 @@ describe("Databricks auth mode wiring", () => {
       "expired",
       true,
     );
-    await tick();
+    await until(() => h.calls.loadFile.length === 1, "the server selector after failed renewal");
     assert.equal(h.api.windows.get(h.win).origin, null);
     assert.equal(h.calls.loadFile.length, 1);
     const params = new URLSearchParams(h.calls.loadFile[0][1].search);

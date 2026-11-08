@@ -5,6 +5,7 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useReducer,
   useRef,
   useState,
   type ClipboardEvent,
@@ -40,7 +41,7 @@ import {
   type ComposerKeyIntent,
 } from "@/components/composer/ChatComposer";
 import { ComposerAddMenu } from "@/components/composer/ComposerAddMenu";
-import { ComposerMicButton } from "@/components/ComposerMicButton";
+import { ComposerMicButton, type ComposerMicButtonHandle } from "@/components/ComposerMicButton";
 import {
   BUILTIN_SLASH_COMMANDS,
   SlashCommandMenu,
@@ -619,6 +620,9 @@ function SideChatComposer({
     },
     [activeTextId, childId, editText, reconcileVoiceEdits],
   );
+  // Lets a Send end a live voice take: a live side chat stays enabled while
+  // busy, so sending alone never disables the mic to auto-stop it.
+  const micRef = useRef<ComposerMicButtonHandle>(null);
   const dictation = useDictationInsert(activeText, setActiveText, textareaRef);
 
   // This tab's seeded text: on a pending tab the "Ask in side chat" selection
@@ -754,9 +758,18 @@ function SideChatComposer({
   const completeMenuSelection = (cmd: string) => {
     setText(slashCompletion.complete(cmd).text);
   };
+  // End a live voice take on an accepted send, pinning any pending dictation
+  // first so a draft kept for a failed-fork retry isn't clobbered by the next
+  // take's partial. No-op when idle.
+  const endVoiceTake = () => {
+    dictation.commitPending();
+    micRef.current?.endTake();
+  };
+
   // Insert a chosen skill at the caret; a built-in runs immediately (no args).
   const applyMenuSelection = (cmd: string) => {
     if (Object.hasOwn(sideChatBuiltins, cmd)) {
+      endVoiceTake();
       setText("");
       if (cmd === "/help") showHelp();
       return;
@@ -792,16 +805,17 @@ function SideChatComposer({
       .finally(() => setInterrupting(false));
   };
 
-  const submit = () => {
+  const submit = ({ allowWhileBusy = false }: { allowWhileBusy?: boolean } = {}) => {
     if (settingsSavePending()) return;
     const trimmed = isSlashCommandText(text) ? text.trim() : text.trimEnd();
     if (pending) {
       if (!canSend || starting || !onStart) return;
+      endVoiceTake();
       // Keep the text so a failed fork can be retried without re-typing.
       void onStart(serializeReplyDraft({ quotes, text: trimmed }));
       return;
     }
-    if ((busy && fullSession) || !canSend || agentId === null) return;
+    if ((busy && fullSession && !allowWhileBusy) || !canSend || agentId === null) return;
     // On in-process harnesses /help and skills resolve locally; native TUIs
     // (claude-native, codex-native) read the text themselves, and a quote or
     // attachment is always an ordinary message.
@@ -816,6 +830,7 @@ function SideChatComposer({
       ? matchSlashCommandInvocation(trimmed, Object.keys(skillCommands))
       : null;
     const runSkill = (match: { command: string; args: string }) => {
+      endVoiceTake();
       clearComposer(childId);
       void sendSlashCommand(match.command.slice(1), match.args, agentId, {
         pinnedConversationId: childId,
@@ -829,6 +844,7 @@ function SideChatComposer({
       return;
     }
     if (builtin !== null) {
+      endVoiceTake();
       setText("");
       if (builtin.command === "/help") showHelp();
       return;
@@ -853,15 +869,27 @@ function SideChatComposer({
         holdsInitialDraft(child),
       )
     ) {
+      endVoiceTake();
       clearComposer(childId);
       enqueueMessage(message, outgoing, snapshotReplyDraft({ quotes, text: trimmed }), childId);
       return;
     }
     // A running Codex chat refuses a steered /compact; keep the draft as the main composer does.
     if (isCompactControl(harness, message, outgoing) && rejectBusyCompact(childId)) return;
+    endVoiceTake();
     clearComposer(childId);
     void send(message, agentId, outgoing, { pinnedConversationId: childId }).finally(refreshLabels);
   };
+
+  // A voice send waits for the render that holds the flushed tail, so submit
+  // reads the whole draft. It never interrupts the side chat's running turn.
+  const voiceSendRef = useRef(false);
+  const [, requestVoiceSend] = useReducer((count: number) => count + 1, 0);
+  useEffect(() => {
+    if (!voiceSendRef.current) return;
+    voiceSendRef.current = false;
+    submit({ allowWhileBusy: true });
+  });
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>, intent: ComposerKeyIntent) => {
     // Mod+Enter submits any draft, then steers the whole queue into the running turn.
@@ -1038,6 +1066,7 @@ function SideChatComposer({
                 />
               )}
               <ComposerMicButton
+                ref={micRef}
                 className="size-8 md:size-7"
                 disabled={!ready}
                 onVoiceStart={() => voiceEditsRef.current.clear()}
@@ -1051,6 +1080,10 @@ function SideChatComposer({
                 }}
                 onTranscript={(spoken) => dictation.appendFinal(spoken)}
                 onInterim={(spoken) => dictation.replaceInterim(spoken)}
+                onVoiceSend={() => {
+                  voiceSendRef.current = true;
+                  requestVoiceSend();
+                }}
               />
               <ComposerSendButton
                 type="button"
@@ -1066,7 +1099,7 @@ function SideChatComposer({
                 interrupt={showInterrupt}
                 busy={showInterrupt && interrupting}
                 disabled={showInterrupt ? interrupting || !interruptReady : !canSend || !ready}
-                onClick={showInterrupt ? interruptSideChat : submit}
+                onClick={showInterrupt ? interruptSideChat : () => submit()}
                 data-testid={showInterrupt ? "side-chat-interrupt" : "side-chat-send"}
               />
             </>
