@@ -7989,7 +7989,7 @@ describe("Composer voice dictation", () => {
     }
   });
 
-  it("ends the voice take when the dictated message is sent from the touch layout", () => {
+  it("flushes the voice take before sending from the touch layout", () => {
     // On a coarse pointer the Send tap is the only way to submit.
     onTestFinished(forceDesktopCoarsePointer());
     const onSend = vi.fn();
@@ -8002,12 +8002,18 @@ describe("Composer voice dictation", () => {
     expect(textarea().value).toBe("voice dictated message");
 
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    expect(onSend).toHaveBeenCalledWith("voice dictated message", undefined);
+    expect(stopSpy).toHaveBeenCalledTimes(1);
+    expect(abortSpy).not.toHaveBeenCalled();
+    expect(onSend).not.toHaveBeenCalled();
+    act(() => handlers.result?.(finalResult("and the tail")));
+    act(() => handlers.end?.({}));
+    expect(onSend).toHaveBeenCalledExactlyOnceWith(
+      "voice dictated message and the tail",
+      undefined,
+    );
     expect(textarea().value).toBe("");
-    // Sending must tear the recognizer down; stop() and abort() both end the take.
-    expect(stopSpy.mock.calls.length + abortSpy.mock.calls.length).toBe(1);
 
-    // A real recognizer can still deliver a buffered result before it ends.
+    // Results delivered after the take ends cannot repopulate the composer.
     act(() => handlers.result?.(finalResult("words spoken after the send")));
     expect(textarea().value).toBe("");
 
@@ -8061,6 +8067,10 @@ describe("Composer voice dictation", () => {
 
     fireEvent.change(textarea(), { target: { value: input } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(onSendSlashCommand).not.toHaveBeenCalled();
+    expect(stopSpy).toHaveBeenCalledTimes(1);
+    expect(abortSpy).not.toHaveBeenCalled();
+    act(() => handlers.end?.({}));
 
     expect(onSendSlashCommand).toHaveBeenCalledExactlyOnceWith(name, args);
     expect(onSend).not.toHaveBeenCalled();
