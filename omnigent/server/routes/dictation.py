@@ -48,6 +48,17 @@ Decoding is CPU-bound, so concurrent takes are capped (default 2,
 ``OMNIGENT_DICTATION_MAX_STREAMS``). Over-cap connections are accepted
 and immediately closed with code 1013 (try again later) so the client
 can distinguish "busy" from "broken".
+
+Timing
+------
+
+Each take logs one ``dictation_take`` summary: ready latency, audio
+seconds received versus decode seconds (real-time factor), how far
+decode trailed real time when ``stop`` arrived, and the tail flush time.
+The ``relay`` field identifies streams forwarded to a remote worker. For
+relayed takes, decode timings measure relay operations; the worker's own
+``dictation_take`` log carries the actual decode time and real-time factor.
+For startup-preload configuration, see ``designs/server-dictation.md``.
 """
 
 from __future__ import annotations
@@ -58,6 +69,7 @@ import json
 import logging
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Final
 
 import anyio
@@ -67,10 +79,13 @@ from starlette import status
 from omnigent.debug_logging import debug_event
 from omnigent.server.auth import AuthProvider
 from omnigent.server.dictation import (
+    SAMPLE_RATE,
     DictationEngine,
     DictationStreamHandle,
+    _RemoteStream,
     get_engine,
     max_streams,
+    preload_engine_in_background,
 )
 
 _logger = logging.getLogger(__name__)
@@ -81,6 +96,56 @@ _WS_CLOSE_INTERNAL_ERROR: Final[int] = 1011
 #: Minimum interval between partial-transcript pushes. Keeps the socket
 #: chatty enough for live text without a frame per audio chunk.
 _PARTIAL_INTERVAL_S: Final[float] = 0.15
+_PCM_BYTES_PER_SECOND: Final[int] = SAMPLE_RATE * 2
+
+
+@dataclass
+class _TakeTiming:
+    """Per-take latency counters, logged once when the take ends."""
+
+    accepted_at: float
+    relay: bool = False
+    ready_s: float | None = None
+    audio_bytes: int = 0
+    decode_s: float = 0.0
+    first_audio_at: float | None = None
+    stop_lag_s: float | None = None
+    finish_s: float | None = None
+
+    @property
+    def audio_s(self) -> float:
+        return self.audio_bytes / _PCM_BYTES_PER_SECOND
+
+    def note_stop(self, now: float) -> None:
+        """Record how far decode trailed real-time audio when stop arrived.
+
+        Frames arrive in order, so by the time ``stop`` is read every frame
+        has decoded; positive lag means decode fell behind the speaker.
+        """
+        if self.first_audio_at is not None:
+            self.stop_lag_s = max(0.0, now - self.first_audio_at - self.audio_s)
+
+    def log(self) -> None:
+        audio_s = self.audio_s
+        rtf = self.decode_s / audio_s if audio_s else None
+        fields = {
+            "relay": self.relay,
+            "ready_s": _round(self.ready_s),
+            "audio_s": round(audio_s, 3),
+            "decode_s": round(self.decode_s, 3),
+            "rtf": _round(rtf),
+            "stop_lag_s": _round(self.stop_lag_s),
+            "finish_s": _round(self.finish_s),
+        }
+        _logger.info(
+            "dictation take: %s",
+            " ".join(f"{key}={value}" for key, value in fields.items()),
+            extra=debug_event("dictation_take", **fields),
+        )
+
+
+def _round(value: float | None) -> float | None:
+    return None if value is None else round(value, 3)
 
 
 def create_dictation_router(
@@ -105,6 +170,7 @@ def create_dictation_router(
     resolve_engine = engine_provider or get_engine
     # Router-scoped so each app (and each test app) gets its own cap.
     slots = asyncio.Semaphore(max_streams())
+    preload_engine_in_background(resolve_engine)
 
     @router.websocket("/dictation/stream")
     async def dictation_stream(websocket: WebSocket) -> None:
@@ -115,6 +181,7 @@ def create_dictation_router(
                 reason="authentication required",
             )
         await websocket.accept()
+        timing = _TakeTiming(accepted_at=time.monotonic())
         _logger.info(
             "dictation stream connected",
             extra=debug_event("dictation_stream", phase="connected"),
@@ -133,6 +200,7 @@ def create_dictation_router(
             try:
                 engine = await asyncio.to_thread(resolve_engine)
                 handle: DictationStreamHandle = await asyncio.to_thread(engine.create_stream)
+                timing.relay = isinstance(handle, _RemoteStream)
             except Exception:
                 _logger.exception(
                     "dictation engine failed to initialize",
@@ -150,8 +218,10 @@ def create_dictation_router(
             # close on the way out is enough.
             try:
                 await websocket.send_text(json.dumps({"type": "ready"}))
-                await _pump_dictation(websocket, handle)
+                timing.ready_s = time.monotonic() - timing.accepted_at
+                await _pump_dictation(websocket, handle, timing)
             finally:
+                timing.log()
                 _logger.info(
                     "dictation stream disconnected",
                     extra=debug_event("dictation_stream", phase="disconnected"),
@@ -175,11 +245,14 @@ def create_dictation_router(
     return router
 
 
-async def _pump_dictation(websocket: WebSocket, handle: DictationStreamHandle) -> None:
+async def _pump_dictation(
+    websocket: WebSocket, handle: DictationStreamHandle, timing: _TakeTiming
+) -> None:
     """Shuttle audio in and transcript events out until stop/disconnect.
 
     :param websocket: The accepted browser-facing WebSocket.
     :param handle: The per-connection recognizer stream.
+    :param timing: The take's latency counters, updated in place.
     """
     last_partial_sent = ""
     last_partial_at = 0.0
@@ -191,7 +264,12 @@ async def _pump_dictation(websocket: WebSocket, handle: DictationStreamHandle) -
 
             data = message.get("bytes")
             if data is not None:
+                started = time.monotonic()
+                if timing.first_audio_at is None:
+                    timing.first_audio_at = started - len(data) / _PCM_BYTES_PER_SECOND
                 update = await asyncio.to_thread(handle.feed_pcm16, data)
+                timing.decode_s += time.monotonic() - started
+                timing.audio_bytes += len(data)
                 if update.finalized:
                     await websocket.send_text(
                         json.dumps({"type": "final", "text": update.finalized})
@@ -218,7 +296,10 @@ async def _pump_dictation(websocket: WebSocket, handle: DictationStreamHandle) -
             except ValueError:
                 continue
             if isinstance(control, dict) and control.get("type") == "stop":
+                started = time.monotonic()
+                timing.note_stop(started)
                 tail = await asyncio.to_thread(handle.finish)
+                timing.finish_s = time.monotonic() - started
                 await websocket.send_text(json.dumps({"type": "stopped", "text": tail}))
                 await websocket.close()
                 return

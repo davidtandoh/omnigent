@@ -10,7 +10,11 @@ transcript by the number of PCM bytes they send.
 from __future__ import annotations
 
 import json
+import logging
+import threading
 import time
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -20,6 +24,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from omnigent.server import dictation as dictation_engine
 from omnigent.server.dictation import FAKE_SCRIPT, MAX_STREAMS_ENV, FakeDictationEngine
+from omnigent.server.routes import dictation as dictation_routes
 from omnigent.server.routes.dictation import create_dictation_router
 
 # One fake-engine "word" of audio: 100 ms of 16 kHz mono s16le.
@@ -88,15 +93,72 @@ def test_stream_partial_final_stop_flow() -> None:
         assert stopped == {"type": "stopped", "text": ""}
 
 
-def test_stream_stop_flushes_tail() -> None:
-    """stop mid-utterance returns the un-finalized words as the tail."""
-    with TestClient(_fake_app()) as tc, tc.websocket_connect("/v1/dictation/stream") as ws:
+@pytest.mark.parametrize("relay", [False, True])
+def test_stream_stop_flushes_tail(caplog: pytest.LogCaptureFixture, relay: bool) -> None:
+    """stop mid-utterance returns the tail and logs the take's timing."""
+    caplog.set_level(logging.INFO, logger="omnigent.server.routes.dictation")
+    handle = FakeDictationEngine().create_stream()
+    if relay:
+        handle = Mock(spec=dictation_engine._RemoteStream, wraps=handle)
+    engine = Mock(create_stream=Mock(return_value=handle))
+    with (
+        TestClient(_fake_app(engine_provider=lambda: engine)) as tc,
+        tc.websocket_connect("/v1/dictation/stream") as ws,
+    ):
         assert json.loads(ws.receive_text())["type"] == "ready"
         ws.send_bytes(_WORD_BYTES * 3)
         assert json.loads(ws.receive_text())["type"] == "partial"
         ws.send_text(json.dumps({"type": "stop"}))
         stopped = json.loads(ws.receive_text())
         assert stopped == {"type": "stopped", "text": " ".join(_SCRIPT_WORDS[:3])}
+
+    deadline = time.monotonic() + 5
+    while "dictation take:" not in caplog.text and time.monotonic() < deadline:
+        time.sleep(0.02)
+    summary = next(r.getMessage() for r in caplog.records if "dictation take:" in r.getMessage())
+    fields = dict(part.split("=") for part in summary.split(": ", 1)[1].split())
+    assert fields["relay"] == str(relay)
+    assert fields["audio_s"] == "0.3"
+    for key in ("ready_s", "decode_s", "rtf", "stop_lag_s", "finish_s"):
+        assert float(fields[key]) >= 0, key
+
+
+async def test_stop_lag_includes_first_chunk_duration(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 100 ms take decoded in 150 ms reports 150 ms of stop lag."""
+    clock = SimpleNamespace(now=10.0)
+    monkeypatch.setattr(dictation_routes, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    websocket = AsyncMock()
+    websocket.receive.side_effect = [
+        {"bytes": _WORD_BYTES},
+        {"text": json.dumps({"type": "stop"})},
+    ]
+
+    def feed(data: bytes) -> dictation_engine.DictationUpdate:
+        clock.now += 0.15
+        return dictation_engine.DictationUpdate(partial="server")
+
+    handle = Mock(feed_pcm16=feed, finish=Mock(return_value="server"))
+    timing = dictation_routes._TakeTiming(accepted_at=clock.now)
+    await dictation_routes._pump_dictation(websocket, handle, timing)
+
+    assert timing.audio_s == pytest.approx(0.1)
+    assert timing.decode_s == pytest.approx(0.15)
+    assert timing.stop_lag_s == pytest.approx(0.15)
+    websocket.send_text.assert_any_await(json.dumps({"type": "stopped", "text": "server"}))
+
+
+def test_router_preloads_engine_when_flagged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OMNIGENT_DICTATION_PRELOAD loads the engine when the router is built."""
+    monkeypatch.setenv(dictation_engine.ENGINE_ENV, dictation_engine.ENGINE_FAKE)
+    monkeypatch.setenv(dictation_engine.PRELOAD_ENV, "1")
+    loaded = threading.Event()
+
+    def _provider() -> FakeDictationEngine:
+        loaded.set()
+        return FakeDictationEngine()
+
+    _fake_app(engine_provider=_provider)
+    assert loaded.wait(timeout=5)
 
 
 def test_stream_ignores_unknown_control_messages() -> None:

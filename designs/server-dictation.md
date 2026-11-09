@@ -81,7 +81,7 @@ shared across connections — the ~650 MB weights load once — plus one
 recognizer *stream* per WebSocket. Endpointing folds completed utterances
 into `finalized` and resets the stream, exactly the loop proven in pi-voice.
 An optional `OnlinePunctuation` model re-punctuates partials/finals
-(lowercase + strip punctuation before re-adding, throttled) so the live
+(lowercase + strip punctuation before re-adding) so the live
 preview reads like a sentence. This punctuation is **internal** to the
 sherpa engine — the raw transducer emits lowercase, unpunctuated text, so
 the streams beautify before returning; it is not part of the protocol.
@@ -98,8 +98,17 @@ connections (default 2, `OMNIGENT_DICTATION_MAX_STREAMS`).
 | `OMNIGENT_DICTATION_MODEL_DIR` | `~/.omnigent/models/dictation/asr` | dir containing `encoder*.onnx`, `decoder*.onnx`, `joiner*.onnx`, `tokens.txt` |
 | `OMNIGENT_DICTATION_PUNCT_DIR` | `~/.omnigent/models/dictation/punct` | optional online-punctuation model dir (`model*.onnx` + `bpe.vocab`) |
 | `OMNIGENT_DICTATION_MAX_STREAMS` | `2` | concurrent dictation WebSockets |
+| `OMNIGENT_DICTATION_THREADS` | `4` | Positive integer ASR decode-thread count for the sherpa engine; invalid or non-positive values use the default |
+| `OMNIGENT_DICTATION_PRELOAD` | unset | Only `1` enables background engine loading when the server or worker builds its router; other values leave loading until the first take |
 | `OMNIGENT_DICTATION_ENGINE` | unset (`sherpa`) | engine to use by registered name (`sherpa`, `remote`, `fake`) |
 | `OMNIGENT_DICTATION_REMOTE_URL` | unset | worker stream URL for the `remote` engine, e.g. `ws://venus:8100/v1/dictation/stream` |
+
+Preloading avoids first-take model loading only if it finishes before the take
+starts. A take waits for a load still in progress. Unavailable engines skip
+preloading; a failed preload logs a warning and the first take retries loading.
+
+For model-load and per-take timing logs, see the engine implementation and the
+Timing section in the [route module](../omnigent/server/routes/dictation.py).
 
 `scripts/fetch-dictation-models.sh` downloads a known-good pair (streaming
 Nemotron 0.6 B int8 + English online punctuation, both Apache-2.0 upstream)
