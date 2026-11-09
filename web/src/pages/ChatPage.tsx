@@ -3821,6 +3821,8 @@ function ComposerImpl(
       onStop();
       return;
     }
+    // A live take sends through the mic, which first flushes its last words.
+    if (micRef.current?.sendTake()) return;
     submit({ resetNativeInputSession: true });
   };
 

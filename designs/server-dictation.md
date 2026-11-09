@@ -252,6 +252,8 @@ turn, before React re-renders, so a send can include the tail.
 
 The user controls are documented in the [composer feature map](../feature-map/composer.md#sub-features).
 A mic click or Enter flushes the tail before calling optional `onVoiceSend`.
+The composer's Send button calls `sendTake()` first, so a tap during a live
+take takes the same flush-then-send path instead of sending the last partial.
 The parent sends without invoking Interrupt, including in busy editable
 subagent tabs. Other accepted sends end the take through `endTake()` without
 flushing a trailing utterance. Late recognizer results after send are dropped.

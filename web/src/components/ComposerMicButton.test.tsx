@@ -1141,3 +1141,106 @@ describe("ComposerMicButton (endTake)", () => {
     expect(button).toHaveAttribute("aria-pressed", "false");
   });
 });
+
+// The composer's Send control calls sendTake during a live take. The mic then
+// flushes the take (stop, wait for the tail) and sends once via onVoiceSend, so
+// words spoken after the last partial are not lost.
+describe("ComposerMicButton (sendTake)", () => {
+  it("flushes a server take sent before its final partial, then sends once", async () => {
+    const onTranscript = vi.fn();
+    const onInterim = vi.fn();
+    const onVoiceSend = vi.fn();
+    let resolveStop!: (tail: string) => void;
+    sessionStopMock = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveStop = resolve;
+        }),
+    );
+    const ref = createRef<ComposerMicButtonHandle>();
+    renderServerMode({ ref, onTranscript, onInterim, onVoiceSend });
+    await clickMic();
+    act(() => sessionEvents?.onPartial("send the last"));
+
+    let taken = false;
+    await act(async () => {
+      taken = ref.current?.sendTake() ?? false;
+    });
+
+    // The mic owns the send: it stops (flushes) instead of cancelling.
+    expect(taken).toBe(true);
+    expect(sessionStopMock).toHaveBeenCalledTimes(1);
+    expect(sessionCancelMock).not.toHaveBeenCalled();
+    expect(onVoiceSend).not.toHaveBeenCalled();
+
+    // A second tap while the tail is in flight waits for the same send.
+    let retaken = false;
+    act(() => {
+      retaken = ref.current?.sendTake() ?? false;
+    });
+    expect(retaken).toBe(true);
+    expect(sessionStopMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveStop("send the last words");
+    });
+    expect(onTranscript).toHaveBeenCalledWith("send the last words");
+    expect(onVoiceSend).toHaveBeenCalledTimes(1);
+    expect(onTranscript.mock.invocationCallOrder[0]).toBeLessThan(
+      onVoiceSend.mock.invocationCallOrder[0],
+    );
+    expect(screen.getByRole("button", { name: "Voice dictation" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+
+    // The send already ended the take; the parent's endTake is a no-op.
+    act(() => ref.current?.endTake());
+    expect(sessionCancelMock).not.toHaveBeenCalled();
+  });
+
+  it("stops a Web Speech take so its final lands before the single send", () => {
+    const onTranscript = vi.fn();
+    const onVoiceSend = vi.fn();
+    const ref = createRef<ComposerMicButtonHandle>();
+    render(<ComposerMicButton ref={ref} onTranscript={onTranscript} onVoiceSend={onVoiceSend} />);
+    fireEvent.click(screen.getByRole("button", { name: "Voice dictation" }));
+    act(() => handlers.start?.({}));
+
+    let taken = false;
+    act(() => {
+      taken = ref.current?.sendTake() ?? false;
+    });
+
+    expect(taken).toBe(true);
+    expect(stopSpy).toHaveBeenCalledTimes(1);
+    expect(abortSpy).not.toHaveBeenCalled();
+    act(() => handlers.result?.(resultEvent("last words")));
+    act(() => handlers.end?.({}));
+    expect(onTranscript).toHaveBeenCalledWith("last words");
+    expect(onVoiceSend).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves the send to the caller when no take is recording", async () => {
+    const ref = createRef<ComposerMicButtonHandle>();
+    let resolveStart!: (s: SessionStub) => void;
+    sessionStartMock = vi.fn((events: DictationSessionEvents) => {
+      sessionEvents = events;
+      return new Promise<SessionStub>((resolve) => {
+        resolveStart = resolve;
+      });
+    });
+    renderServerMode({ ref });
+    expect(ref.current?.sendTake()).toBe(false);
+
+    // Mid-handshake nothing has been spoken, so the caller sends directly.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Voice dictation" }));
+    });
+    expect(ref.current?.sendTake()).toBe(false);
+    await act(async () => {
+      resolveStart({ stop: sessionStopMock, cancel: sessionCancelMock });
+    });
+    expect(sessionStopMock).not.toHaveBeenCalled();
+  });
+});

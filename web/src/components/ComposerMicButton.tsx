@@ -110,6 +110,10 @@ export interface ComposerMicButtonHandle {
   /** End the current take, preserving dictated text without flushing a trailing
    *  utterance into the just-cleared composer. No-op when idle. */
   endTake: () => void;
+  /** Send from the composer's Send control during a live take: flush the last
+   *  words, then send once via onVoiceSend. Returns false when no take is
+   *  recording, so the caller sends the draft itself. */
+  sendTake: () => boolean;
 }
 
 /** getUserMedia permission failures, distinct from transport failures. */
@@ -189,6 +193,9 @@ function ComposerMicButtonImpl(
   // The stop in progress should send. The mic click and Enter set this; the
   // ⌘⌥V hotkey does not, so the chord still only ends the take.
   const sendOnStopRef = useRef(false);
+  // True while a server stop that will send is waiting for its tail, so a
+  // second Send tap waits for that send instead of sending without the tail.
+  const stopSendingRef = useRef(false);
   // Synced prop ref so the recognition result handler (closure over the
   // mount-time effect) can drop late events when the composer goes
   // disabled mid-utterance.
@@ -437,7 +444,9 @@ function ComposerMicButtonImpl(
       const send = sendOnStopRef.current;
       sendOnStopRef.current = false;
       sessionRef.current = null;
+      stopSendingRef.current = send;
       const tail = (await session.stop()).trim();
+      stopSendingRef.current = false;
       const drop = disabledRef.current || discardingRef.current;
       if (!drop) {
         // A non-empty tail supersedes the pending interim via onTranscript; an
@@ -616,7 +625,19 @@ function ComposerMicButtonImpl(
       // Already stopping — the end event will reconcile state.
     }
   }, [isListening]);
-  useImperativeHandle(ref, () => ({ endTake }), [endTake]);
+
+  const sendTake = useCallback((): boolean => {
+    if (disabledRef.current || sentRef.current) return false;
+    // A mic click or Enter already started a stop that sends.
+    if (stopSendingRef.current || pendingSendRef.current) return true;
+    const recording =
+      sessionRef.current !== null ||
+      (isListening && !transitionRef.current && !serverBusyRef.current);
+    if (!recording) return false;
+    toggle(true);
+    return true;
+  }, [isListening, toggle]);
+  useImperativeHandle(ref, () => ({ endTake, sendTake }), [endTake, sendTake]);
 
   // ⌘⌥V starts a take or ends it and keeps the text. A click or Enter sends.
   // Inert unless dictation can run and the composer is enabled.

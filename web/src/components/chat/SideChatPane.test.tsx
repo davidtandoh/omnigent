@@ -28,11 +28,12 @@ vi.mock("@/store/chatStore", async (importOriginal) => ({
 vi.mock("@/components/composer/ComposerAddMenu", () => ({ ComposerAddMenu: () => null }));
 const mic = vi.hoisted(() => ({ current: null as ComposerMicButtonProps | null }));
 const micEndTake = vi.hoisted(() => vi.fn());
+const micSendTake = vi.hoisted(() => vi.fn(() => false));
 vi.mock("@/components/ComposerMicButton", () => ({
   // A real endTake handle so a test can assert the pane ends the take on send.
   ComposerMicButton: forwardRef((props: ComposerMicButtonProps, ref) => {
     mic.current = props;
-    useImperativeHandle(ref, () => ({ endTake: micEndTake }));
+    useImperativeHandle(ref, () => ({ endTake: micEndTake, sendTake: micSendTake }));
     return null;
   }),
 }));
@@ -80,6 +81,7 @@ beforeEach(() => {
   mockSession.labels = {};
   mockSession.snapshot = {};
   micEndTake.mockClear();
+  micSendTake.mockReset().mockReturnValue(false);
   loadingSession.id = null;
   conversationRegistry.clear();
   send.mockReset().mockResolvedValue(undefined);
@@ -1266,6 +1268,28 @@ describe("unsent composer state survives the pane moving", () => {
       pinnedConversationId: childId,
     });
     expect(screen.getByTestId("side-chat-input")).toHaveValue("");
+  });
+
+  it("hands a Send tap during a live take to the mic so its last words are sent", async () => {
+    conversationRegistry.acquire(childId).setState({ sessionStatus: "idle" });
+    micSendTake.mockReturnValue(true);
+    renderPane(<SideChatPane childId={childId} />);
+    act(() => mic.current!.onInterim!("dictated ques"));
+
+    fireEvent.click(screen.getByTestId("side-chat-send"));
+    // The mic is flushing; the pane must not send the partial draft itself.
+    expect(micSendTake).toHaveBeenCalledTimes(1);
+    expect(send).not.toHaveBeenCalled();
+    expect(micEndTake).not.toHaveBeenCalled();
+
+    act(() => {
+      mic.current!.onTranscript("dictated question");
+      mic.current!.onVoiceSend!();
+    });
+    await waitFor(() => expect(send).toHaveBeenCalledOnce());
+    expect(send).toHaveBeenCalledWith("dictated question", "agent_side", undefined, {
+      pinnedConversationId: childId,
+    });
   });
 
   it("sends dictated text once in a busy editable subagent tab without interrupting", async () => {
