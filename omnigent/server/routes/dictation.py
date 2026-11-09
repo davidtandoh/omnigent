@@ -58,8 +58,7 @@ decode trailed real time when ``stop`` arrived, and the tail flush time.
 The ``relay`` field identifies streams forwarded to a remote worker. For
 relayed takes, decode timings measure relay operations; the worker's own
 ``dictation_take`` log carries the actual decode time and real-time factor.
-With ``OMNIGENT_DICTATION_PRELOAD`` set, the engine loads when the router
-is built instead of on the first take.
+For startup-preload configuration, see ``designs/server-dictation.md``.
 """
 
 from __future__ import annotations

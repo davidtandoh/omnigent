@@ -45,6 +45,9 @@ display-ready text directly; punctuation is an internal detail, not part
 of the engine protocol (most models — Whisper, Parakeet — punctuate
 themselves).
 
+Each stream caches its last raw partial and punctuated result. An unchanged
+partial reuses that result without calling the punctuation model again.
+
 Recognizer calls are CPU-bound and sherpa streams are not documented
 thread-safe, so every recognizer/punctuation call holds the engine's
 ``threading.Lock``; callers run them via ``asyncio.to_thread`` to keep
@@ -58,9 +61,10 @@ Env var                                 Default
 ======================================  ==========================================
 ``OMNIGENT_DICTATION_MODEL_DIR``        ``~/.omnigent/models/dictation/asr``
 ``OMNIGENT_DICTATION_PUNCT_DIR``        ``~/.omnigent/models/dictation/punct``
-``OMNIGENT_DICTATION_THREADS``          ``4`` (ASR decode threads)
-``OMNIGENT_DICTATION_PRELOAD``          unset (``1`` loads the engine at startup)
 ======================================  ==========================================
+
+For decode-thread and startup-preload settings, see the Configuration
+section in ``designs/server-dictation.md``.
 
 The ASR dir must contain ``encoder*.onnx``, ``decoder*.onnx``,
 ``joiner*.onnx`` and ``tokens.txt`` (int8 variants preferred when both
@@ -95,8 +99,7 @@ PUNCT_DIR_ENV = "OMNIGENT_DICTATION_PUNCT_DIR"
 MAX_STREAMS_ENV = "OMNIGENT_DICTATION_MAX_STREAMS"
 #: ASR decode threads for the sherpa engine.
 THREADS_ENV = "OMNIGENT_DICTATION_THREADS"
-#: Truthy value loads the engine in a background thread at startup so the
-#: first take does not pay the model load.
+#: Startup-preload flag; see designs/server-dictation.md for configuration.
 PRELOAD_ENV = "OMNIGENT_DICTATION_PRELOAD"
 #: Worker stream URL for the ``remote`` engine, e.g.
 #: ``ws://venus:8100/v1/dictation/stream``.
@@ -371,12 +374,12 @@ def get_engine() -> DictationEngine:
 def preload_engine_in_background(
     resolve: Callable[[], DictationEngine] = get_engine,
 ) -> threading.Thread | None:
-    """Load the engine off-thread when :data:`PRELOAD_ENV` is set.
+    """Load the engine off-thread when startup preloading is enabled.
 
-    Called at router construction (main server and dictation worker), so
-    the first take skips the model load. Skipped when the flag is unset or
-    the engine is unavailable; a failed load is logged and the first take
-    retries it.
+    Called at router construction (main server and dictation worker).
+    Takes wait for any load still in progress. Skipped when preloading is
+    disabled or the engine is unavailable; a failed load is logged and the
+    first take retries it.
 
     :param resolve: Engine loader; the route's provider.
     :returns: The started daemon thread, or ``None`` when not preloading.
@@ -789,8 +792,8 @@ class _FakeStream:
 
 
 # Built-in engines register themselves at import. The sherpa factory is
-# lazy (weights load on first take), so importing this module costs no
-# model RAM.
+# lazy (weights load on first use or preload), so importing this module
+# costs no model RAM.
 register_engine(
     ENGINE_SHERPA,
     lambda: SherpaDictationEngine(_asr_dir(), _punct_dir()),
