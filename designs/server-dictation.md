@@ -213,8 +213,9 @@ endpoint; the UI needs one boolean, once per page load.
       throttled to ~6 Hz.
     - `{"type": "final", "text": ...}` — an utterance completed by
       endpointing; the client appends it and clears the partial region.
-    - `{"type": "stopped", "text": ...}` — response to `stop`: the flushed
-      tail utterance (possibly empty). The server closes after sending it.
+    - `{"type": "stopped", "text": ...}` — response to `stop`: the remaining
+      transcript text from `finish()` (possibly empty). The server closes
+      after sending it.
     - `{"type": "error", "message": ...}` — fatal; server closes.
 
 The route holds no session state; a connection is one dictation take.
