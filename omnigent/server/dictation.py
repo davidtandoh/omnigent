@@ -58,6 +58,8 @@ Env var                                 Default
 ======================================  ==========================================
 ``OMNIGENT_DICTATION_MODEL_DIR``        ``~/.omnigent/models/dictation/asr``
 ``OMNIGENT_DICTATION_PUNCT_DIR``        ``~/.omnigent/models/dictation/punct``
+``OMNIGENT_DICTATION_THREADS``          ``4`` (ASR decode threads)
+``OMNIGENT_DICTATION_PRELOAD``          unset (``1`` loads the engine at startup)
 ======================================  ==========================================
 
 The ASR dir must contain ``encoder*.onnx``, ``decoder*.onnx``,
@@ -83,12 +85,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from omnigent.debug_logging import debug_event
+
 _logger = logging.getLogger(__name__)
 
 ENGINE_ENV = "OMNIGENT_DICTATION_ENGINE"
 MODEL_DIR_ENV = "OMNIGENT_DICTATION_MODEL_DIR"
 PUNCT_DIR_ENV = "OMNIGENT_DICTATION_PUNCT_DIR"
 MAX_STREAMS_ENV = "OMNIGENT_DICTATION_MAX_STREAMS"
+#: ASR decode threads for the sherpa engine.
+THREADS_ENV = "OMNIGENT_DICTATION_THREADS"
+#: Truthy value loads the engine in a background thread at startup so the
+#: first take does not pay the model load.
+PRELOAD_ENV = "OMNIGENT_DICTATION_PRELOAD"
 #: Worker stream URL for the ``remote`` engine, e.g.
 #: ``ws://venus:8100/v1/dictation/stream``.
 REMOTE_URL_ENV = "OMNIGENT_DICTATION_REMOTE_URL"
@@ -115,6 +124,7 @@ REASON_UNKNOWN_ENGINE = "unknown_engine"
 REASON_REMOTE_URL_MISSING = "remote_url_missing"
 
 DEFAULT_MAX_STREAMS = 2
+DEFAULT_THREADS = 4
 
 # Endpoint rules mirror sherpa-onnx defaults tuned for dictation: a long
 # hard stop (rule1, silence with no text yet), a shorter pause once
@@ -240,6 +250,21 @@ def max_streams() -> int:
     return value if value > 0 else DEFAULT_MAX_STREAMS
 
 
+def num_threads() -> int:
+    """ASR decode threads for the sherpa recognizer."""
+    raw = os.environ.get(THREADS_ENV, "")
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_THREADS
+    return value if value > 0 else DEFAULT_THREADS
+
+
+def preload_enabled() -> bool:
+    """Whether ``OMNIGENT_DICTATION_PRELOAD`` asks for a startup load."""
+    return os.environ.get(PRELOAD_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _pick_model_file(model_dir: Path, stem: str) -> Path | None:
     """Find ``<stem>*.onnx`` in *model_dir*, preferring int8 variants.
 
@@ -331,8 +356,47 @@ def get_engine() -> DictationEngine:
         available, reason = entry.available()
         if not available:
             raise RuntimeError(f"dictation unavailable: {reason}")
+        started = time.monotonic()
         _engine = entry.factory()
+        load_s = time.monotonic() - started
+        _logger.info(
+            "dictation engine %r loaded in %.2fs",
+            name,
+            load_s,
+            extra=debug_event("dictation_engine_loaded", engine=name, load_s=round(load_s, 3)),
+        )
         return _engine
+
+
+def preload_engine_in_background(
+    resolve: Callable[[], DictationEngine] = get_engine,
+) -> threading.Thread | None:
+    """Load the engine off-thread when :data:`PRELOAD_ENV` is set.
+
+    Called at router construction (main server and dictation worker), so
+    the first take skips the model load. Skipped when the flag is unset or
+    the engine is unavailable; a failed load is logged and the first take
+    retries it.
+
+    :param resolve: Engine loader; the route's provider.
+    :returns: The started daemon thread, or ``None`` when not preloading.
+    """
+    if not preload_enabled():
+        return None
+    available, reason = engine_availability()
+    if not available:
+        _logger.info("dictation preload skipped: %s", reason)
+        return None
+
+    def _load() -> None:
+        try:
+            resolve()
+        except Exception:  # the first take retries the load
+            _logger.warning("dictation preload failed", exc_info=True)
+
+    thread = threading.Thread(target=_load, name="dictation-preload", daemon=True)
+    thread.start()
+    return thread
 
 
 class SherpaDictationEngine:
@@ -357,7 +421,7 @@ class SherpaDictationEngine:
             encoder=str(files["encoder"]),
             decoder=str(files["decoder"]),
             joiner=str(files["joiner"]),
-            num_threads=4,
+            num_threads=num_threads(),
             sample_rate=SAMPLE_RATE,
             feature_dim=80,
             enable_endpoint_detection=True,
@@ -422,6 +486,17 @@ class _SherpaStream:
     def __init__(self, engine: SherpaDictationEngine, stream: Any) -> None:
         self._engine = engine
         self._stream = stream
+        # Last raw partial and its punctuated form: an unchanged partial
+        # (common while decode waits for more audio) skips re-punctuation.
+        self._last_raw_partial = ""
+        self._last_display_partial = ""
+
+    def _beautify_partial(self, raw: str) -> str:
+        """Punctuate *raw*, reusing the previous result when unchanged."""
+        if raw != self._last_raw_partial:
+            self._last_display_partial = self._engine._beautify(raw)
+            self._last_raw_partial = raw
+        return self._last_display_partial
 
     def feed_pcm16(self, data: bytes) -> DictationUpdate:
         """Decode one PCM chunk; fold an endpoint into ``finalized``."""
@@ -450,7 +525,7 @@ class _SherpaStream:
         # takes the lock itself). Emit display-ready text so the route and
         # protocol stay engine-agnostic.
         return DictationUpdate(
-            partial=engine._beautify(partial),
+            partial=self._beautify_partial(partial),
             finalized=engine._beautify(finalized) if finalized else None,
         )
 

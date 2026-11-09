@@ -10,6 +10,8 @@ transcript by the number of PCM bytes they send.
 from __future__ import annotations
 
 import json
+import logging
+import threading
 import time
 
 import httpx
@@ -88,8 +90,9 @@ def test_stream_partial_final_stop_flow() -> None:
         assert stopped == {"type": "stopped", "text": ""}
 
 
-def test_stream_stop_flushes_tail() -> None:
-    """stop mid-utterance returns the un-finalized words as the tail."""
+def test_stream_stop_flushes_tail(caplog: pytest.LogCaptureFixture) -> None:
+    """stop mid-utterance returns the tail and logs the take's timing."""
+    caplog.set_level(logging.INFO, logger="omnigent.server.routes.dictation")
     with TestClient(_fake_app()) as tc, tc.websocket_connect("/v1/dictation/stream") as ws:
         assert json.loads(ws.receive_text())["type"] == "ready"
         ws.send_bytes(_WORD_BYTES * 3)
@@ -97,6 +100,29 @@ def test_stream_stop_flushes_tail() -> None:
         ws.send_text(json.dumps({"type": "stop"}))
         stopped = json.loads(ws.receive_text())
         assert stopped == {"type": "stopped", "text": " ".join(_SCRIPT_WORDS[:3])}
+
+    deadline = time.monotonic() + 5
+    while "dictation take:" not in caplog.text and time.monotonic() < deadline:
+        time.sleep(0.02)
+    summary = next(r.getMessage() for r in caplog.records if "dictation take:" in r.getMessage())
+    fields = dict(part.split("=") for part in summary.split(": ", 1)[1].split())
+    assert fields["audio_s"] == "0.3"
+    for key in ("ready_s", "decode_s", "rtf", "stop_lag_s", "finish_s"):
+        assert float(fields[key]) >= 0, key
+
+
+def test_router_preloads_engine_when_flagged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OMNIGENT_DICTATION_PRELOAD loads the engine when the router is built."""
+    monkeypatch.setenv(dictation_engine.ENGINE_ENV, dictation_engine.ENGINE_FAKE)
+    monkeypatch.setenv(dictation_engine.PRELOAD_ENV, "1")
+    loaded = threading.Event()
+
+    def _provider() -> FakeDictationEngine:
+        loaded.set()
+        return FakeDictationEngine()
+
+    _fake_app(engine_provider=_provider)
+    assert loaded.wait(timeout=5)
 
 
 def test_stream_ignores_unknown_control_messages() -> None:

@@ -21,6 +21,8 @@ def _clean_engine_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(dictation.MODEL_DIR_ENV, raising=False)
     monkeypatch.delenv(dictation.PUNCT_DIR_ENV, raising=False)
     monkeypatch.delenv(dictation.MAX_STREAMS_ENV, raising=False)
+    monkeypatch.delenv(dictation.THREADS_ENV, raising=False)
+    monkeypatch.delenv(dictation.PRELOAD_ENV, raising=False)
 
 
 def _touch_asr_files(model_dir: Path) -> None:
@@ -80,10 +82,130 @@ def test_max_streams_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
     assert dictation.max_streams() == dictation.DEFAULT_MAX_STREAMS
 
 
+def test_num_threads_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The decode-thread setting defaults to 4 and rejects bad values."""
+    assert dictation.num_threads() == dictation.DEFAULT_THREADS == 4
+    monkeypatch.setenv(dictation.THREADS_ENV, "2")
+    assert dictation.num_threads() == 2
+    for bad in ("0", "-1", "many", ""):
+        monkeypatch.setenv(dictation.THREADS_ENV, bad)
+        assert dictation.num_threads() == dictation.DEFAULT_THREADS
+
+
+def test_preload_disabled_by_default() -> None:
+    """Without the flag nothing loads at startup."""
+
+    def _must_not_load() -> dictation.DictationEngine:
+        raise AssertionError("preload ran without the flag")
+
+    assert dictation.preload_engine_in_background(_must_not_load) is None
+
+
+@pytest.mark.parametrize("flag", ["1", "true", "YES", "on"])
+def test_preload_loads_engine_in_background(monkeypatch: pytest.MonkeyPatch, flag: str) -> None:
+    """A truthy flag loads the engine on a daemon thread."""
+    monkeypatch.setenv(dictation.ENGINE_ENV, dictation.ENGINE_FAKE)
+    monkeypatch.setenv(dictation.PRELOAD_ENV, flag)
+    loaded: list[dictation.DictationEngine] = []
+
+    def _resolve() -> dictation.DictationEngine:
+        engine = dictation.FakeDictationEngine()
+        loaded.append(engine)
+        return engine
+
+    thread = dictation.preload_engine_in_background(_resolve)
+    assert thread is not None and thread.daemon
+    thread.join(timeout=5)
+    assert len(loaded) == 1
+
+
+def test_preload_skips_unavailable_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unavailable engine is not preloaded (no model, no thread)."""
+    monkeypatch.setenv(dictation.ENGINE_ENV, "does-not-exist")
+    monkeypatch.setenv(dictation.PRELOAD_ENV, "1")
+    assert dictation.preload_engine_in_background(dictation.FakeDictationEngine) is None
+
+
+def test_preload_failure_is_logged_not_raised(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failed preload leaves the first take to retry the load."""
+    monkeypatch.setenv(dictation.ENGINE_ENV, dictation.ENGINE_FAKE)
+    monkeypatch.setenv(dictation.PRELOAD_ENV, "1")
+
+    def _broken() -> dictation.DictationEngine:
+        raise RuntimeError("weights corrupt")
+
+    thread = dictation.preload_engine_in_background(_broken)
+    assert thread is not None
+    thread.join(timeout=5)
+    assert "dictation preload failed" in caplog.text
+
+
+class _StubRecognizer:
+    """Recognizer double whose transcript the test sets directly."""
+
+    def __init__(self) -> None:
+        self.text = ""
+
+    def is_ready(self, stream: object) -> bool:
+        return False
+
+    def get_result(self, stream: object) -> str:
+        return self.text
+
+    def is_endpoint(self, stream: object) -> bool:
+        return False
+
+
+class _CountingPunct:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def add_punctuation_with_case(self, text: str) -> str:
+        self.calls.append(text)
+        return text.capitalize() + "."
+
+
+class _StubWaveStream:
+    def accept_waveform(self, sample_rate: int, samples: object) -> None:
+        pass
+
+
+def test_sherpa_stream_skips_repunctuating_unchanged_partial() -> None:
+    """An unchanged raw partial reuses the cached punctuated text."""
+    pytest.importorskip("numpy")
+    import threading
+
+    engine = object.__new__(dictation.SherpaDictationEngine)
+    recognizer = _StubRecognizer()
+    punct = _CountingPunct()
+    engine._recognizer = recognizer
+    engine._punct = punct
+    engine._lock = threading.Lock()
+    stream = dictation._SherpaStream(engine, _StubWaveStream())
+    chunk = b"\x00\x00" * 160
+
+    recognizer.text = "hello world"
+    assert stream.feed_pcm16(chunk).partial == "Hello world."
+    assert stream.feed_pcm16(chunk).partial == "Hello world."
+    assert punct.calls == ["hello world"]
+
+    recognizer.text = "hello world again"
+    assert stream.feed_pcm16(chunk).partial == "Hello world again."
+    assert punct.calls == ["hello world", "hello world again"]
+
+    # Empty partial needs no model call and is not stale-cached.
+    recognizer.text = ""
+    assert stream.feed_pcm16(chunk).partial == ""
+    assert len(punct.calls) == 2
+
+
 def test_get_engine_is_a_singleton_and_failure_caches_nothing(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """One engine per process; a failed load leaves the slot empty for retry."""
+    caplog.set_level("INFO", logger=dictation.__name__)
     monkeypatch.setattr(dictation, "_engine", None)
     # Unavailable (empty model dir) → raises and caches nothing.
     monkeypatch.setattr(dictation.importlib.util, "find_spec", lambda name: object())
@@ -95,6 +217,7 @@ def test_get_engine_is_a_singleton_and_failure_caches_nothing(
     monkeypatch.setenv(dictation.ENGINE_ENV, dictation.ENGINE_FAKE)
     first = dictation.get_engine()
     assert isinstance(first, dictation.FakeDictationEngine)
+    assert "dictation engine 'fake' loaded in" in caplog.text
     assert dictation.get_engine() is first
 
 
