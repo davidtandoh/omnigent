@@ -169,7 +169,7 @@ class DictationStreamHandle(Protocol):
         ...
 
     def finish(self) -> str:
-        """Flush trailing audio and return the final tail utterance."""
+        """Flush trailing audio and return all remaining transcript text."""
         ...
 
     def close(self) -> None:
@@ -678,13 +678,16 @@ class _RemoteStream:
             return DictationUpdate(partial=self._partial, finalized=finalized)
 
     def finish(self) -> str:
-        """Ask the worker to flush; return its tail utterance."""
+        """Flush the worker; drain pending finals followed by the tail."""
         with contextlib.suppress(Exception):
             self._ws.send(json.dumps({"type": "stop"}))
         self._stopped.wait(timeout=_REMOTE_STOP_TIMEOUT_S)
         self.close()
         with self._lock:
-            return self._tail
+            text = " ".join(t for t in [*self._finals, self._tail] if t).strip()
+            self._finals.clear()
+            self._tail = ""
+            return text
 
     def close(self) -> None:
         """Close the worker socket, releasing its capacity slot.

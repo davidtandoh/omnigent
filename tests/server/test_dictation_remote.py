@@ -9,9 +9,11 @@ runs the fake engine.
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from collections.abc import Iterator
+from unittest.mock import Mock
 
 import pytest
 import uvicorn
@@ -88,6 +90,65 @@ def test_remote_engine_relays_finalized_utterances(worker_url: str) -> None:
     else:
         raise AssertionError("finalized never arrived")
     assert handle.finish() == ""
+
+
+@pytest.mark.parametrize(
+    ("finals", "tail", "drain_before_stop"),
+    [
+        (["First utterance."], "Remaining tail.", False),
+        (["First utterance.", "Second utterance."], "Remaining tail.", False),
+        (["First utterance.", "Second utterance."], "", False),
+        (["First utterance.", "Second utterance."], "Remaining tail.", True),
+        ([], "Remaining tail.", False),
+        ([], "", False),
+    ],
+)
+def test_remote_finish_drains_pending_finals_once(
+    monkeypatch: pytest.MonkeyPatch,
+    finals: list[str],
+    tail: str,
+    drain_before_stop: bool,
+) -> None:
+    """Finals received after the last frame precede the stop-flushed tail."""
+    release_finals = threading.Event()
+    finals_read = threading.Event()
+    stop_requested = threading.Event()
+
+    def worker_events() -> Iterator[str]:
+        yield json.dumps({"type": "ready"})
+        assert release_finals.wait(timeout=5)
+        for text in finals:
+            yield json.dumps({"type": "final", "text": text})
+        # The reader requests the next event only after storing every final.
+        finals_read.set()
+        assert stop_requested.wait(timeout=5)
+        yield json.dumps({"type": "stopped", "text": tail})
+
+    def receive_stop(message: str | bytes) -> None:
+        if isinstance(message, str) and json.loads(message) == {"type": "stop"}:
+            stop_requested.set()
+
+    worker = Mock()
+    worker.recv.side_effect = worker_events()
+    worker.send.side_effect = receive_stop
+    monkeypatch.setattr("websockets.sync.client.connect", lambda *args, **kwargs: worker)
+    handle = dictation.RemoteDictationEngine("ws://worker.test").create_stream()
+    try:
+        assert handle.feed_pcm16(_WORD) == dictation.DictationUpdate(partial="")
+        release_finals.set()
+        assert finals_read.wait(timeout=5)
+        if drain_before_stop:
+            assert handle.feed_pcm16(_WORD) == dictation.DictationUpdate(
+                partial="", finalized=" ".join(finals)
+            )
+            assert handle.feed_pcm16(_WORD) == dictation.DictationUpdate(partial="")
+        pending = [] if drain_before_stop else finals
+        assert handle.finish() == " ".join(text for text in [*pending, tail] if text)
+        assert handle.finish() == ""
+    finally:
+        release_finals.set()
+        stop_requested.set()
+        handle.close()
 
 
 def test_remote_stream_close_releases_worker_slot(worker_url: str) -> None:
