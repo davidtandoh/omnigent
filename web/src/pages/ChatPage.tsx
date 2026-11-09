@@ -3673,6 +3673,7 @@ function ComposerImpl(
     const openGenericSideChat = (question: string) => {
       const sourceId = useChatStore.getState().conversationId;
       if (sourceId === null) return;
+      if (micRef.current?.sendTake()) return;
       setCommandError(null);
       endVoiceTake();
       createSideChat(sourceId).then(
@@ -3705,6 +3706,7 @@ function ComposerImpl(
       const cmd = parts[0].toLowerCase();
       const arg = parts[1] ?? "";
       const sendSkill = (match: { command: string; args: string }) => {
+        if (micRef.current?.sendTake()) return;
         endVoiceTake();
         appendEntry(trimmed);
         onSendSlashCommand?.(match.command.slice(1), match.args);
@@ -3780,6 +3782,8 @@ function ComposerImpl(
       }
     }
 
+    // Flush only accepted sends; local informational commands keep recording.
+    if (micRef.current?.sendTake()) return;
     setCommandError(null);
     // Prepend each "@"-tagged path as an attachment marker on its own line —
     // the same format the native executors emit for attachments and that

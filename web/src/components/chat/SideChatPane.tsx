@@ -884,6 +884,10 @@ function SideChatComposer({
   // A voice send waits for the render that holds the flushed tail, so submit
   // reads the whole draft. It never interrupts the side chat's running turn.
   const voiceSendRef = useRef(false);
+  // A Send tap during a live take sends through the mic after it flushes.
+  const sendFromButton = () => {
+    if (!micRef.current?.sendTake()) submit();
+  };
   const [, requestVoiceSend] = useReducer((count: number) => count + 1, 0);
   useEffect(() => {
     if (!voiceSendRef.current) return;
@@ -1099,7 +1103,7 @@ function SideChatComposer({
                 interrupt={showInterrupt}
                 busy={showInterrupt && interrupting}
                 disabled={showInterrupt ? interrupting || !interruptReady : !canSend || !ready}
-                onClick={showInterrupt ? interruptSideChat : () => submit()}
+                onClick={showInterrupt ? interruptSideChat : sendFromButton}
                 data-testid={showInterrupt ? "side-chat-interrupt" : "side-chat-send"}
               />
             </>

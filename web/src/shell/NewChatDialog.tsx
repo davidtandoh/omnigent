@@ -381,7 +381,7 @@ import {
 import { BrandLogo } from "@/components/BrandLogo";
 import { PoweredByOmnigent } from "@/components/PoweredByOmnigent";
 import { SkillPills } from "@/components/SkillPills";
-import { ComposerMicButton } from "@/components/ComposerMicButton";
+import { ComposerMicButton, type ComposerMicButtonHandle } from "@/components/ComposerMicButton";
 import type { CostControlMode } from "@/components/CostRoutingControl";
 import {
   composerSendShortcutKeys,
@@ -2313,6 +2313,7 @@ export function NewChatLandingScreen() {
   const [mcpAuthorizing, setMcpAuthorizing] = useState(false);
   // Composer text captured when voice dictation starts, so Esc can revert to it.
   const voiceSnapshotRef = useRef("");
+  const micRef = useRef<ComposerMicButtonHandle>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const submitTooltipTriggerRef = useRef<HTMLSpanElement>(null);
   const [submitTooltipState, setSubmitTooltipState] = useState<"closed" | "open" | "pinned">(
@@ -6870,7 +6871,7 @@ export function NewChatLandingScreen() {
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              void handleCreate();
+              if (!micRef.current?.sendTake()) void handleCreate();
             }}
             className="relative z-30"
           >
@@ -6927,7 +6928,7 @@ export function NewChatLandingScreen() {
                     // The mention menu is briefly closed while its listing loads;
                     // swallow Enter so the in-progress "@dir/" token isn't sent.
                     if (mentionListingPending) return;
-                    void handleCreate();
+                    if (!micRef.current?.sendTake()) void handleCreate();
                   }
                 },
                 onPaste,
@@ -7425,6 +7426,7 @@ export function NewChatLandingScreen() {
                       />
                     </div>
                     <ComposerMicButton
+                      ref={micRef}
                       className="size-8 md:size-7"
                       enableHotkey
                       disabled={creating}
