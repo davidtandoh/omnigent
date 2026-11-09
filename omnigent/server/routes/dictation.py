@@ -55,6 +55,9 @@ Timing
 Each take logs one ``dictation_take`` summary: ready latency, audio
 seconds received versus decode seconds (real-time factor), how far
 decode trailed real time when ``stop`` arrived, and the tail flush time.
+The ``relay`` field identifies streams forwarded to a remote worker. For
+relayed takes, decode timings measure relay operations; the worker's own
+``dictation_take`` log carries the actual decode time and real-time factor.
 With ``OMNIGENT_DICTATION_PRELOAD`` set, the engine loads when the router
 is built instead of on the first take.
 """
@@ -80,6 +83,7 @@ from omnigent.server.dictation import (
     SAMPLE_RATE,
     DictationEngine,
     DictationStreamHandle,
+    _RemoteStream,
     get_engine,
     max_streams,
     preload_engine_in_background,
@@ -101,6 +105,7 @@ class _TakeTiming:
     """Per-take latency counters, logged once when the take ends."""
 
     accepted_at: float
+    relay: bool = False
     ready_s: float | None = None
     audio_bytes: int = 0
     decode_s: float = 0.0
@@ -125,6 +130,7 @@ class _TakeTiming:
         audio_s = self.audio_s
         rtf = self.decode_s / audio_s if audio_s else None
         fields = {
+            "relay": self.relay,
             "ready_s": _round(self.ready_s),
             "audio_s": round(audio_s, 3),
             "decode_s": round(self.decode_s, 3),
@@ -195,6 +201,7 @@ def create_dictation_router(
             try:
                 engine = await asyncio.to_thread(resolve_engine)
                 handle: DictationStreamHandle = await asyncio.to_thread(engine.create_stream)
+                timing.relay = isinstance(handle, _RemoteStream)
             except Exception:
                 _logger.exception(
                     "dictation engine failed to initialize",

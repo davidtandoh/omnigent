@@ -93,10 +93,18 @@ def test_stream_partial_final_stop_flow() -> None:
         assert stopped == {"type": "stopped", "text": ""}
 
 
-def test_stream_stop_flushes_tail(caplog: pytest.LogCaptureFixture) -> None:
+@pytest.mark.parametrize("relay", [False, True])
+def test_stream_stop_flushes_tail(caplog: pytest.LogCaptureFixture, relay: bool) -> None:
     """stop mid-utterance returns the tail and logs the take's timing."""
     caplog.set_level(logging.INFO, logger="omnigent.server.routes.dictation")
-    with TestClient(_fake_app()) as tc, tc.websocket_connect("/v1/dictation/stream") as ws:
+    handle = FakeDictationEngine().create_stream()
+    if relay:
+        handle = Mock(spec=dictation_engine._RemoteStream, wraps=handle)
+    engine = Mock(create_stream=Mock(return_value=handle))
+    with (
+        TestClient(_fake_app(engine_provider=lambda: engine)) as tc,
+        tc.websocket_connect("/v1/dictation/stream") as ws,
+    ):
         assert json.loads(ws.receive_text())["type"] == "ready"
         ws.send_bytes(_WORD_BYTES * 3)
         assert json.loads(ws.receive_text())["type"] == "partial"
@@ -109,6 +117,7 @@ def test_stream_stop_flushes_tail(caplog: pytest.LogCaptureFixture) -> None:
         time.sleep(0.02)
     summary = next(r.getMessage() for r in caplog.records if "dictation take:" in r.getMessage())
     fields = dict(part.split("=") for part in summary.split(": ", 1)[1].split())
+    assert fields["relay"] == str(relay)
     assert fields["audio_s"] == "0.3"
     for key in ("ready_s", "decode_s", "rtf", "stop_lag_s", "finish_s"):
         assert float(fields[key]) >= 0, key
