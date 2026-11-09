@@ -1261,6 +1261,49 @@ describe("ComposerMicButton (sendTake)", () => {
     expect(sessionCancelMock).not.toHaveBeenCalled();
   });
 
+  it("accepts Send during a Web Speech keep-text stop but not startup", () => {
+    const onTranscript = vi.fn();
+    const ref = createRef<ComposerMicButtonHandle>();
+    const onVoiceSend = vi.fn(() => ref.current?.endTake());
+    render(
+      <ComposerMicButton
+        ref={ref}
+        enableHotkey
+        onTranscript={onTranscript}
+        onVoiceSend={onVoiceSend}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Voice dictation" }));
+    expect(ref.current?.sendTake()).toBe(false);
+    act(() => handlers.start?.({}));
+    act(() => handlers.result?.(resultEvent("First sentence.")));
+
+    fireEvent.keyDown(window, {
+      code: "KeyV",
+      ctrlKey: !isMacPlatform(),
+      metaKey: isMacPlatform(),
+      altKey: true,
+    });
+    expect(stopSpy).toHaveBeenCalledTimes(1);
+    act(() => {
+      expect(ref.current?.sendTake()).toBe(true);
+      expect(ref.current?.sendTake()).toBe(true);
+    });
+    expect(onVoiceSend).not.toHaveBeenCalled();
+    expect(stopSpy).toHaveBeenCalledTimes(1);
+    act(() => handlers.result?.(resultEvent("Last words.")));
+    act(() => handlers.end?.({}));
+
+    expect(onTranscript.mock.calls).toEqual([["First sentence."], ["Last words."]]);
+    expect(onVoiceSend).toHaveBeenCalledTimes(1);
+    expect(onTranscript.mock.invocationCallOrder[1]).toBeLessThan(
+      onVoiceSend.mock.invocationCallOrder[0],
+    );
+    expect(abortSpy).not.toHaveBeenCalled();
+    act(() => handlers.end?.({}));
+    expect(onVoiceSend).toHaveBeenCalledTimes(1);
+  });
+
   it("stops a Web Speech take so its final lands before the single send", () => {
     const onTranscript = vi.fn();
     const onVoiceSend = vi.fn();

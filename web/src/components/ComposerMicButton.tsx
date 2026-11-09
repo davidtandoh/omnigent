@@ -628,6 +628,10 @@ function ComposerMicButtonImpl(
       sendOnStopRef.current = true;
       return true;
     }
+    if (isListening && transitionRef.current) {
+      pendingSendRef.current = true;
+      return true;
+    }
     if (pendingSendRef.current) return true;
     const recording =
       sessionRef.current !== null ||
