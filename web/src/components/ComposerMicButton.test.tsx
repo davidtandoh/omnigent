@@ -18,6 +18,7 @@
 
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { createRef } from "react";
+import { isMacPlatform } from "@/lib/hotkeys";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { CapabilitiesContext } from "@/lib/CapabilitiesContext";
 import type { ServerInfo } from "@/lib/capabilities";
@@ -1146,6 +1147,67 @@ describe("ComposerMicButton (endTake)", () => {
 // flushes the take (stop, wait for the tail) and sends once via onVoiceSend, so
 // words spoken after the last partial are not lost.
 describe("ComposerMicButton (sendTake)", () => {
+  it.each([false, true])("preserves a partial when stop has no tail (send: %s)", async (send) => {
+    const onTranscript = vi.fn();
+    const onInterim = vi.fn();
+    const onVoiceSend = vi.fn();
+    const ref = createRef<ComposerMicButtonHandle>();
+    renderServerMode({ ref, onTranscript, onInterim, onVoiceSend, enableHotkey: true });
+    await clickMic();
+    act(() => sessionEvents?.onPartial("pending words"));
+    onInterim.mockClear();
+    await act(async () => {
+      if (send) ref.current?.sendTake();
+      else
+        fireEvent.keyDown(window, {
+          code: "KeyV",
+          ctrlKey: !isMacPlatform(),
+          metaKey: isMacPlatform(),
+          altKey: true,
+        });
+    });
+    expect(onTranscript).toHaveBeenCalledExactlyOnceWith("pending words");
+    expect(onInterim).not.toHaveBeenCalled();
+    expect(onVoiceSend).toHaveBeenCalledTimes(send ? 1 : 0);
+  });
+
+  it("accepts Send during a keep-text stop and waits for the tail once", async () => {
+    let resolveStop!: (tail: string) => void;
+    sessionStopMock = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveStop = resolve;
+        }),
+    );
+    const onTranscript = vi.fn();
+    const onVoiceSend = vi.fn();
+    const ref = createRef<ComposerMicButtonHandle>();
+    renderServerMode({ ref, onTranscript, onVoiceSend, enableHotkey: true });
+    await clickMic();
+    await act(async () => {
+      fireEvent.keyDown(window, {
+        code: "KeyV",
+        ctrlKey: !isMacPlatform(),
+        metaKey: isMacPlatform(),
+        altKey: true,
+      });
+    });
+    expect(sessionStopMock).toHaveBeenCalledTimes(1);
+    act(() => {
+      expect(ref.current?.sendTake()).toBe(true);
+      expect(ref.current?.sendTake()).toBe(true);
+    });
+    expect(onVoiceSend).not.toHaveBeenCalled();
+    await act(async () => resolveStop("last words"));
+    expect(onTranscript).toHaveBeenCalledExactlyOnceWith("last words");
+    expect(onVoiceSend).toHaveBeenCalledTimes(1);
+    expect(onTranscript.mock.invocationCallOrder[0]).toBeLessThan(
+      onVoiceSend.mock.invocationCallOrder[0],
+    );
+    expect(sessionStopMock).toHaveBeenCalledTimes(1);
+    expect(sessionCancelMock).not.toHaveBeenCalled();
+  });
+
   it("flushes a server take sent before its final partial, then sends once", async () => {
     const onTranscript = vi.fn();
     const onInterim = vi.fn();

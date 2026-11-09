@@ -193,9 +193,7 @@ function ComposerMicButtonImpl(
   // The stop in progress should send. The mic click and Enter set this; the
   // ⌘⌥V hotkey does not, so the chord still only ends the take.
   const sendOnStopRef = useRef(false);
-  // True while a server stop that will send is waiting for its tail, so a
-  // second Send tap waits for that send instead of sending without the tail.
-  const stopSendingRef = useRef(false);
+  const stoppingRef = useRef(false);
   // Synced prop ref so the recognition result handler (closure over the
   // mount-time effect) can drop late events when the composer goes
   // disabled mid-utterance.
@@ -435,23 +433,20 @@ function ComposerMicButtonImpl(
   // handshake are up, so isListening flips exactly when audio flows.
   const toggleServer = useCallback(async () => {
     if (serverBusyRef.current) {
-      sendOnStopRef.current = false;
       return;
     }
     serverBusyRef.current = true;
     const session = sessionRef.current;
     if (session) {
+      sessionRef.current = null;
+      stoppingRef.current = true;
+      const tail = (await session.stop()).trim() || interimRef.current.trim();
+      interimRef.current = "";
+      stoppingRef.current = false;
       const send = sendOnStopRef.current;
       sendOnStopRef.current = false;
-      sessionRef.current = null;
-      stopSendingRef.current = send;
-      const tail = (await session.stop()).trim();
-      stopSendingRef.current = false;
       const drop = disabledRef.current || discardingRef.current;
       if (!drop) {
-        // A non-empty tail supersedes the pending interim via onTranscript; an
-        // empty one just clears the interim region. discardingRef suppresses the
-        // tail when the take was ended on send while this stop was in flight.
         if (tail) onTranscriptRef.current(tail);
         else onInterimRef.current?.("");
       }
@@ -557,6 +552,7 @@ function ComposerMicButtonImpl(
       // whichever mode started it.
       if (sessionRef.current || serverBusyRef.current) {
         if (sessionRef.current) sendOnStopRef.current = send;
+        else if (stoppingRef.current && send) sendOnStopRef.current = true;
         void toggleServer();
         return;
       }
@@ -628,8 +624,11 @@ function ComposerMicButtonImpl(
 
   const sendTake = useCallback((): boolean => {
     if (disabledRef.current || sentRef.current) return false;
-    // A mic click or Enter already started a stop that sends.
-    if (stopSendingRef.current || pendingSendRef.current) return true;
+    if (stoppingRef.current) {
+      sendOnStopRef.current = true;
+      return true;
+    }
+    if (pendingSendRef.current) return true;
     const recording =
       sessionRef.current !== null ||
       (isListening && !transitionRef.current && !serverBusyRef.current);

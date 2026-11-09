@@ -38,6 +38,14 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 
+import type { DictationSessionEvents } from "@/lib/dictation";
+
+const dictationMocks = vi.hoisted(() => ({ start: vi.fn() }));
+vi.mock("@/lib/dictation", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/dictation")>()),
+  DictationSession: { start: dictationMocks.start },
+}));
+
 import { authenticatedFetch } from "@/lib/identity";
 import { authorizeRegistryService, registryRequest } from "@/lib/mcpRegistry";
 import { readLastMcpServices, writeLastMcpServices } from "@/lib/mcpPreferences";
@@ -438,10 +446,53 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
   localStorage.clear();
 });
 
 describe("NewChatLandingScreen create flow", () => {
+  it("flushes a live dictation take before creating a session once", async () => {
+    vi.stubGlobal("SpeechRecognition", undefined);
+    vi.stubGlobal("webkitSpeechRecognition", undefined);
+    let events!: DictationSessionEvents;
+    let resolveStop!: (tail: string) => void;
+    const stop = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveStop = resolve;
+        }),
+    );
+    const cancel = vi.fn();
+    dictationMocks.start.mockImplementation(async (callbacks: DictationSessionEvents) => {
+      events = callbacks;
+      return { stop, cancel };
+    });
+    vi.mocked(authenticatedFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "conv_voice" }),
+    } as unknown as Response);
+    renderLanding([], { dictation_available: true });
+    await waitForWorkspaceSeed();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Voice dictation" }));
+    });
+    act(() => events.onPartial("keep the last"));
+    fireEvent.click(screen.getByTestId("new-chat-landing-submit"));
+    fireEvent.click(screen.getByTestId("new-chat-landing-submit"));
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(authenticatedFetch).not.toHaveBeenCalled();
+    expect(cancel).not.toHaveBeenCalled();
+    await act(async () => resolveStop("keep the last words"));
+    await waitFor(() => expect(authenticatedFetch).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(setPendingInitialPromptMock).toHaveBeenCalledExactlyOnceWith("conv_voice", {
+        text: "keep the last words",
+        skill: null,
+        files: [],
+      }),
+    );
+  });
+
   it.each([
     { query: "canvas=main", canvasId: "main", project: undefined },
     {
