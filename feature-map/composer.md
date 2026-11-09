@@ -163,7 +163,10 @@ apply only to that side chat. See the [side-chat settings recipe](sessions.md).
   terminal or code editor. While listening, tapping the mic or pressing Enter
   sends the dictated text once and turns the mic off; Escape discards it, and
   the hotkey stops while keeping the text. The Send button also flushes the
-  last words before sending once. Sending any other way also ends the take. Cmd/Ctrl+Enter also sends a live take; Shift+Enter and Alt/Option+Enter
+  last words before sending once in the session, new-session, and side-chat
+  composers. If Send is tapped while the hotkey's stop is still pending, the
+  composer waits for the last words and sends once. Sending any other way also
+  ends the take. Cmd/Ctrl+Enter also sends a live take; Shift+Enter and Alt/Option+Enter
   insert newlines. Voice sends do not invoke Interrupt. A send still requires
   the composer's normal prerequisites, such as a selected host and agent.
   The button is absent when neither the browser nor the server can transcribe.

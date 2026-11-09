@@ -100,9 +100,9 @@ export interface ComposerMicButtonProps {
   /** Fired when Esc ends dictation. The parent should restore the text it
    *  snapshotted in {@link onVoiceStart}, discarding what was dictated. */
   onVoiceDiscard?: () => void;
-  /** Fired after a mic click or Enter has flushed the tail into the composer.
-   *  The parent sends that draft once. Esc does not call this, and neither
-   *  does the ⌘⌥V hotkey (that chord only ends the take and keeps the text). */
+  /** Fired after a requested voice send has flushed the tail into the composer.
+   *  The parent sends that draft once. Esc and a keep-text stop alone do not
+   *  call this; sendTake can request a send while a keep-text stop is pending. */
   onVoiceSend?: () => void;
 }
 
@@ -110,9 +110,9 @@ export interface ComposerMicButtonHandle {
   /** End the current take, preserving dictated text without flushing a trailing
    *  utterance into the just-cleared composer. No-op when idle. */
   endTake: () => void;
-  /** Send from the composer's Send control during a live take: flush the last
-   *  words, then send once via onVoiceSend. Returns false when no take is
-   *  recording, so the caller sends the draft itself. */
+  /** Request one send via onVoiceSend after a live or stopping take flushes.
+   *  Returns true when the mic owns the send; false leaves it to the caller,
+   *  including during startup. */
   sendTake: () => boolean;
 }
 
@@ -190,8 +190,8 @@ function ComposerMicButtonImpl(
   // Web Speech emits the final result and then "end". A send waits for end so
   // that result is already in the draft.
   const pendingSendRef = useRef(false);
-  // The stop in progress should send. The mic click and Enter set this; the
-  // ⌘⌥V hotkey does not, so the chord still only ends the take.
+  // A pending stop sends only when a send control requests it. The hotkey
+  // alone keeps the text; sendTake can request a send before the stop completes.
   const sendOnStopRef = useRef(false);
   const stoppingRef = useRef(false);
   // Synced prop ref so the recognition result handler (closure over the

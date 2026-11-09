@@ -251,12 +251,14 @@ text forms live while speaking. `readDraft()` returns that text in the same
 turn, before React re-renders, so a send can include the tail.
 
 The user controls are documented in the [composer feature map](../feature-map/composer.md#sub-features).
-A mic click or Enter flushes the tail before calling optional `onVoiceSend`.
-The composer's Send button calls `sendTake()` first, so a tap during a live
-take takes the same flush-then-send path instead of sending the last partial.
-The parent sends without invoking Interrupt, including in busy editable
-subagent tabs. Other accepted sends end the take through `endTake()` without
-flushing a trailing utterance. Late recognizer results after send are dropped.
+`ChatPage`, `NewChatDialog`, and `SideChatPane` call `sendTake()` before direct
+submission. A true return value transfers submission to `onVoiceSend` after
+the tail is inserted. A send requested during a pending keep-text stop uses
+that same stop; repeated requests do not create another send. A take still
+starting returns false so the caller submits directly.
+If a server stop returns no tail, the button finalizes the pending partial.
+Other accepted sends end the take through `endTake()` without flushing a
+trailing utterance. Late recognizer results after send are dropped.
 Send, disabling the mic, or unmounting cancels pending server startup.
 Unmounting also suppresses delivery from an in-flight stop.
 
