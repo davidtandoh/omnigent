@@ -101,11 +101,10 @@ def test_preload_disabled_by_default() -> None:
     assert dictation.preload_engine_in_background(_must_not_load) is None
 
 
-@pytest.mark.parametrize("flag", ["1", "true", "YES", "on"])
-def test_preload_loads_engine_in_background(monkeypatch: pytest.MonkeyPatch, flag: str) -> None:
-    """A truthy flag loads the engine on a daemon thread."""
+def test_preload_loads_engine_in_background(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The documented flag loads the engine on a daemon thread."""
     monkeypatch.setenv(dictation.ENGINE_ENV, dictation.ENGINE_FAKE)
-    monkeypatch.setenv(dictation.PRELOAD_ENV, flag)
+    monkeypatch.setenv(dictation.PRELOAD_ENV, "1")
     loaded: list[dictation.DictationEngine] = []
 
     def _resolve() -> dictation.DictationEngine:

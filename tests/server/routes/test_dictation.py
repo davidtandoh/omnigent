@@ -13,6 +13,8 @@ import json
 import logging
 import threading
 import time
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -22,6 +24,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from omnigent.server import dictation as dictation_engine
 from omnigent.server.dictation import FAKE_SCRIPT, MAX_STREAMS_ENV, FakeDictationEngine
+from omnigent.server.routes import dictation as dictation_routes
 from omnigent.server.routes.dictation import create_dictation_router
 
 # One fake-engine "word" of audio: 100 ms of 16 kHz mono s16le.
@@ -109,6 +112,30 @@ def test_stream_stop_flushes_tail(caplog: pytest.LogCaptureFixture) -> None:
     assert fields["audio_s"] == "0.3"
     for key in ("ready_s", "decode_s", "rtf", "stop_lag_s", "finish_s"):
         assert float(fields[key]) >= 0, key
+
+
+async def test_stop_lag_includes_first_chunk_duration(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 100 ms take decoded in 150 ms reports 150 ms of stop lag."""
+    clock = SimpleNamespace(now=10.0)
+    monkeypatch.setattr(dictation_routes, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    websocket = AsyncMock()
+    websocket.receive.side_effect = [
+        {"bytes": _WORD_BYTES},
+        {"text": json.dumps({"type": "stop"})},
+    ]
+
+    def feed(data: bytes) -> dictation_engine.DictationUpdate:
+        clock.now += 0.15
+        return dictation_engine.DictationUpdate(partial="server")
+
+    handle = Mock(feed_pcm16=feed, finish=Mock(return_value="server"))
+    timing = dictation_routes._TakeTiming(accepted_at=clock.now)
+    await dictation_routes._pump_dictation(websocket, handle, timing)
+
+    assert timing.audio_s == pytest.approx(0.1)
+    assert timing.decode_s == pytest.approx(0.15)
+    assert timing.stop_lag_s == pytest.approx(0.15)
+    websocket.send_text.assert_any_await(json.dumps({"type": "stopped", "text": "server"}))
 
 
 def test_router_preloads_engine_when_flagged(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -260,7 +260,7 @@ async def _pump_dictation(
             if data is not None:
                 started = time.monotonic()
                 if timing.first_audio_at is None:
-                    timing.first_audio_at = started
+                    timing.first_audio_at = started - len(data) / _PCM_BYTES_PER_SECOND
                 update = await asyncio.to_thread(handle.feed_pcm16, data)
                 timing.decode_s += time.monotonic() - started
                 timing.audio_bytes += len(data)

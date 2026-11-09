@@ -262,7 +262,7 @@ def num_threads() -> int:
 
 def preload_enabled() -> bool:
     """Whether ``OMNIGENT_DICTATION_PRELOAD`` asks for a startup load."""
-    return os.environ.get(PRELOAD_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+    return os.environ.get(PRELOAD_ENV) == "1"
 
 
 def _pick_model_file(model_dir: Path, stem: str) -> Path | None:
