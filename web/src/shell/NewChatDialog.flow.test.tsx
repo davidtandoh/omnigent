@@ -39,10 +39,11 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import type { ReactNode } from "react";
 
 import type { DictationSessionEvents } from "@/lib/dictation";
+import type * as DictationModule from "@/lib/dictation";
 
 const dictationMocks = vi.hoisted(() => ({ start: vi.fn() }));
 vi.mock("@/lib/dictation", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/dictation")>()),
+  ...(await importOriginal<typeof DictationModule>()),
   DictationSession: { start: dictationMocks.start },
 }));
 
