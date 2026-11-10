@@ -174,6 +174,9 @@ omnigent server ...
 to the route, protocol, or selection logic). `_RemoteStream` bridges the
 worker's async push events into the synchronous handle interface via a daemon
 reader thread, and `close()` releases the worker's capacity slot promptly.
+On stop, `finish()` returns any completed utterances not yet delivered by
+`feed_pcm16()`, followed by the worker's tail, and clears that text. The route
+forwards the remaining text in its `stopped` event.
 Fallback is per take: if the worker is unreachable and local models are
 installed, a lazily-built local sherpa engine serves the take instead (its
 weights cost no RAM until the worker actually goes down); each new take
@@ -210,8 +213,9 @@ endpoint; the UI needs one boolean, once per page load.
       throttled to ~6 Hz.
     - `{"type": "final", "text": ...}` — an utterance completed by
       endpointing; the client appends it and clears the partial region.
-    - `{"type": "stopped", "text": ...}` — response to `stop`: the flushed
-      tail utterance (possibly empty). The server closes after sending it.
+    - `{"type": "stopped", "text": ...}` — response to `stop`: the remaining
+      transcript text from `finish()` (possibly empty). The server closes
+      after sending it.
     - `{"type": "error", "message": ...}` — fatal; server closes.
 
 The route holds no session state; a connection is one dictation take.
