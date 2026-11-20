@@ -760,7 +760,7 @@ def test_mobile_typography_and_settings_header_render(
     if saved_size is not None:
         page.add_init_script(f"localStorage.setItem('omnigent:ui-font-size', '{saved_size}')")
     _open_appearance(page, appearance_url)
-    size = saved_size if saved_size is not None else 14
+    size = saved_size if saved_size is not None else 15
     expect(page.get_by_test_id("ui-font-size-input")).to_have_value(str(size))
     expect(page.locator("body")).to_have_css("font-size", f"{size}px")
     sizes = page.evaluate("""() => {
@@ -774,7 +774,9 @@ def test_mobile_typography_and_settings_header_render(
         sample.remove();
         return sizes;
     }""")
-    assert sizes == pytest.approx([size * factor for factor in (0.9, 1, 1, 1.125, 1.25, 1.5)])
+    # Captions sit 1px below body text; the larger steps scale with it.
+    scaled = [size * factor for factor in (1, 1, 1.125, 1.25, 1.5)]
+    assert sizes == pytest.approx([size - 1, *scaled])
     title = page.get_by_role("heading", name="Appearance", exact=True)
     expect(title).to_have_css("position", "fixed")
     expect(title).to_have_css("text-align", "center")
@@ -884,19 +886,20 @@ def test_mac_shell_clearance_renders_with_zoom(
     assert geometry["strip"] == pytest.approx({"x": 0, "y": 0, "width": 1280, "height": height})
     assert geometry["region"] == "drag"
     assert geometry["browserRegion"] == "none"
-    assert geometry["rowHeight"] == pytest.approx(height)
+    # The drag strip plus the 3rem brand row below it.
+    assert geometry["rowHeight"] == pytest.approx(height + 48)
     assert geometry["peekTop"] == pytest.approx(height + 8)
     assert geometry["peekRow"] == "none"
     assert geometry["settingsTop"] == pytest.approx(height + 8)
-    assert geometry["closedPadding"] == pytest.approx(88 / zoom + 80, abs=0.01)
+    assert geometry["closedPadding"] == pytest.approx(88 / zoom + 108, abs=0.01)
     assert geometry["openPadding"] == 0
     assert geometry["sidebarMargin"] == "0px"
-    assert geometry["brandDisplay"] == "none"
+    assert geometry["brandDisplay"] != "none"
     assert geometry["sidebarActions"] == "none"
     assert geometry["stripActions"] != "none"
     assert geometry["stripPosition"] == "absolute"
     assert geometry["toggleDisplay"] == "none"
-    assert geometry["order"] == ["Collapse", "Search", "Settings"]
+    assert geometry["order"] == ["Search", "Settings", "Collapse"]
     assert geometry["controlsAboveSidebar"] is True
     assert geometry["browserBrand"] != "none"
     assert geometry["browserSidebarActions"] != "none"

@@ -182,7 +182,7 @@ def test_native_portaled_field_preserves_typography(
     field = dialog.get_by_placeholder("Project name…")
     expect(field).to_be_visible()
     assert field.evaluate("el => el.closest('.app-shell') === null")
-    expect(field).to_have_css("font-size", "13px" if shell else "16px")
+    expect(field).to_have_css("font-size", "14px" if shell else "16px")
     expect(field).to_have_css("touch-action", "auto" if shell else "manipulation")
     expect(dialog.get_by_role("button", name="Cancel", exact=True)).to_have_css(
         "touch-action", "auto" if shell else "manipulation"

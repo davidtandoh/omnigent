@@ -183,8 +183,10 @@ def test_message_font_size_survives_rotation_and_reload(
                 expect(assistant.locator(selector)).to_have_css(
                     "font-size", f"{message_px * 0.875:g}px"
                 )
+            # Touch browsers floor the draft at 16px so Safari does not zoom on focus.
+            composer_px = max(16, interface_px) if touch else interface_px
             expect(page.get_by_role("textbox", name="Message the agent", exact=True)).to_have_css(
-                "font-size", f"{interface_px}px"
+                "font-size", f"{composer_px}px"
             )
             assert page.evaluate("localStorage.getItem('omnigent:ui-font-size')") == (
                 None if saved_size is None else str(saved_size)

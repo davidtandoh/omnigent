@@ -1,14 +1,15 @@
-"""End-to-end test: Stop must clear a stale ``running`` on an idle session with a live runner.
+"""End-to-end test: a stale ``running`` on an idle session with a live runner settles to ``idle``.
 
 A finished session can keep ``live_status = running`` on its row while its runner is healthy
 and idle, for example when a turn's ``idle`` edge is lost across a reconnect. The snapshot and
-the session list trust that row, so the UI shows "Working…" until Stop clears it, and Stop
-reaches the runner with no turn to cancel. ``test_orphaned_running_session_stop`` covers the
-same symptom when the runner is gone; this covers it with the runner still connected.
+the session list trust that row, so the UI shows "Working…" until something re-asserts idle.
+``test_orphaned_running_session_stop`` covers the same symptom when the runner is gone; this
+covers it with the runner still connected.
 
 Journey: run one in-process turn to completion, persist ``running`` on the row, restart the
-server so its status cache is cold, then send ``interrupt`` or ``stop_session`` and expect the
-snapshot, session list, and stored row to report ``idle``.
+server so its status cache is cold, and expect the runner's reconnect resync to settle the
+snapshot, session list, and stored row to ``idle``. A later ``interrupt`` or ``stop_session``
+with no turn to cancel must leave the session ``idle``.
 
 Excluded from default ``pytest`` runs via ``--ignore=tests/e2e``. Invoke with::
 
@@ -66,7 +67,7 @@ def _listed_status(client: httpx.Client, session_id: str) -> str | None:
 def test_stop_clears_a_stale_running_session(
     tmp_path: Path, isolated_mock_llm_server_url: str, stop_type: str
 ) -> None:
-    """Stop on an idle session whose row still says ``running`` settles it to ``idle``."""
+    """A planted stale ``running`` settles on reconnect, and Stop with no turn keeps ``idle``."""
     mock = isolated_mock_llm_server_url
     env = {
         "OMNIGENT_AUTH_PROVIDER": "header",
@@ -115,8 +116,15 @@ def test_stop_clears_a_stale_running_session(
             stored = store.get_conversation(session_id)
             assert stored is not None and stored.live_status == "running", "precondition"
             stack.restart_server()
-            assert _snapshot_status(client, session_id) == "running", "precondition"
-            assert _listed_status(client, session_id) == "running", "precondition"
+            poll_until(lambda: _snapshot_status(client, session_id) == "idle", timeout_s=30)
+            assert _listed_status(client, session_id) == "idle"
+            poll_until(
+                lambda: (
+                    (stored := store.get_conversation(session_id)) is not None
+                    and stored.live_status == "idle"
+                ),
+                timeout_s=30,
+            )
 
             stopped = client.post(f"/v1/sessions/{session_id}/events", json={"type": stop_type})
             assert stopped.status_code < 400, stopped.text
