@@ -6827,6 +6827,13 @@ async def _launch_runner_on_host_locked(
                     and replacement is not host_conn
                 ):
                     # send_text rejected before enqueue; reuse this binding and frame once.
+                    if (refusal := account_launch_refusal(conv.account, replacement)) is not None:
+                        _logger.error("Host refused account launch: %s", refusal)
+                        return _HostLaunchAttempt(
+                            runner_id=new_runner_id,
+                            error_code=HARNESS_NOT_CONFIGURED_ERROR_CODE,
+                            error=shared_account_error,
+                        )
                     await host_registry.admit_launch(replacement, conv.id)
                     host_conn = replacement
                     continue

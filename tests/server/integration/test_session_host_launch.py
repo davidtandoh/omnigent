@@ -4846,6 +4846,51 @@ async def test_relaunch_recovers_only_a_rejected_enqueue(
     assert all(future.done() for future in pending_futures)
 
 
+async def test_relaunch_refuses_a_replacement_that_cannot_select_the_account(db_uri: str) -> None:
+    """An account launch is not resent to a replacement host without account support.
+
+    Such a host drops the frame's ``account`` and would start the session on
+    its default Claude login.
+    """
+    from omnigent.server.host_registry import HostRegistry
+    from omnigent.server.routes import sessions as sessions_module
+
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(account="work")
+    store.set_host_id(conv.id, _HOST_ID, workspace=_WORKSPACE)
+    conv = store.get_conversation(conv.id)
+    assert conv is not None
+    registry = HostRegistry()
+    original = registry.register(
+        _HOST_ID,
+        _NoopRunnerWS(),
+        HostHelloFrame(
+            version="0.1.0-test",
+            frame_protocol_version=1,
+            name="laptop",
+            capabilities=[CAP_CLAUDE_ACCOUNT],
+        ),
+        owner=None,
+    )
+    older_hello = HostHelloFrame(version="0.1.0-test", frame_protocol_version=1, name="laptop")
+    real_send = registry.send_text
+    launch_targets: list[HostConnection] = []
+
+    def reconnect_as_older_build_on_first_send(conn: HostConnection, payload: str) -> None:
+        launch_targets.append(conn)
+        if len(launch_targets) == 1:
+            registry.register(_HOST_ID, _NoopRunnerWS(), older_hello, owner=None)
+        real_send(conn, payload)
+
+    registry.send_text = reconnect_as_older_build_on_first_send  # type: ignore[method-assign]
+
+    attempt = await sessions_module._launch_runner_on_host(conv, store, registry, original)
+
+    assert launch_targets == [original]
+    assert attempt.error_code == HARNESS_NOT_CONFIGURED_ERROR_CODE
+    assert not original.pending_launches
+
+
 async def test_rider_of_a_refused_relaunch_surfaces_the_refusal(
     client: httpx.AsyncClient,
     app: FastAPI,
