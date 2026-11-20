@@ -72,17 +72,17 @@ runs:
         sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
     - name: Install Claude Code CLI
-      uses: omnigent-ai/omnigent/.github/actions/setup-harness-cli@c76912dd5f9cfe9e2e11572eae45ad657243232f
+      uses: davidtandoh/omnigent/.github/actions/setup-harness-cli@1c45254fec98e8e7b3c95c0c82e46fc4eb60b254
       with:
         harness: claude
 
     - name: Install Codex CLI
-      uses: omnigent-ai/omnigent/.github/actions/setup-harness-cli@c76912dd5f9cfe9e2e11572eae45ad657243232f
+      uses: davidtandoh/omnigent/.github/actions/setup-harness-cli@1c45254fec98e8e7b3c95c0c82e46fc4eb60b254
       with:
         harness: codex
 
     - name: Install Pi CLI
-      uses: omnigent-ai/omnigent/.github/actions/setup-harness-cli@c76912dd5f9cfe9e2e11572eae45ad657243232f
+      uses: davidtandoh/omnigent/.github/actions/setup-harness-cli@1c45254fec98e8e7b3c95c0c82e46fc4eb60b254
       with:
         harness: pi
 

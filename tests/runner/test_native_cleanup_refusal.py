@@ -176,7 +176,7 @@ async def test_opencode_launch_cancellation_preserves_refused_dependencies(
     monkeypatch.setattr(provider, "resolve_bound_opencode_gateway", lambda **_kw: None)
     monkeypatch.setattr(provider, "resolve_databricks_gateway", lambda *_a, **_kw: None)
     monkeypatch.setattr(provider, "managed_connect_opencode_config", lambda *_a: None)
-    monkeypatch.setattr(provider, "maybe_merge_user_provider_config", lambda config: config)
+    monkeypatch.setattr(provider, "maybe_merge_user_provider_config", lambda config, **_kw: config)
     monkeypatch.delenv("RUNNER_SERVER_URL", raising=False)
     server = SimpleNamespace(
         start=AsyncMock(),

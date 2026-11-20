@@ -50,7 +50,7 @@ class HostSkillDiscovery:
         self._lock = threading.Lock()
         # Each entry: expiry, catalog, and the warnings that make the catalog incomplete.
         self._cache: OrderedDict[
-            tuple[str | tuple[str, ...] | None, ...],
+            tuple[str | tuple[str, ...] | bool | None, ...],
             tuple[float, list[dict[str, str]], list[str]],
         ] = OrderedDict()
 
@@ -77,6 +77,7 @@ class HostSkillDiscovery:
             frame.agent_id,
             frame.agent_version,
             frame.sub_agent_name,
+            frame.workflows_enabled,
             tuple(frame.skills_filter)
             if isinstance(frame.skills_filter, list)
             else frame.skills_filter,
@@ -123,6 +124,7 @@ class HostSkillDiscovery:
                         directory,
                         launch_env=launch_env,
                         warnings=problems,
+                        workflows_enabled=frame.workflows_enabled,
                     )
             result = [
                 {"name": skill.name, "description": skill.description}

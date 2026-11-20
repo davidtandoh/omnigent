@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import threading
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -486,8 +487,7 @@ async def test_watcher_probe_does_not_exclude_lifecycle_operations(
             assert finish.wait(3)
         return pane_dead
 
-    monkeypatch.setattr(instance, "_capture_pane_for_idle_or_none", lambda: "pane")
-    monkeypatch.setattr(instance, "_pane_is_dead", probe)
+    monkeypatch.setattr(instance, "_capture_pane_state_or_none", lambda: (probe(), "pane"))
     snapshot = Mock()
     monkeypatch.setattr(instance, "_capture_exit_snapshot_sync", snapshot)
     # Exercise close's existing bounded-join path while the probe is paused.
@@ -558,8 +558,7 @@ async def test_watcher_exit_transition_keeps_lifecycle_exclusion(tmp_path: Path)
         entered.set()
         assert release.wait(3)
 
-    instance._capture_pane_for_idle_or_none = lambda: "pane"
-    instance._pane_is_dead = lambda: True
+    instance._capture_pane_state_or_none = lambda: (True, "pane")
     instance._capture_exit_snapshot_sync = capture_exit
     instance.start_idle_watcher_thread(on_exit=exited.set, poll_interval_s=0.001)
     try:
@@ -610,8 +609,7 @@ async def test_watcher_exit_defers_to_an_in_progress_close(tmp_path: Path) -> No
 
     instance.close = close
     instance._tmux = AsyncMock()
-    instance._capture_pane_for_idle_or_none = lambda: "pane"
-    instance._pane_is_dead = probe
+    instance._capture_pane_state_or_none = lambda: (probe(), "pane")
     task = asyncio.create_task(registry.close("source", "claude", "main"))
     try:
         await asyncio.wait_for(closing.wait(), 3)
@@ -1367,3 +1365,74 @@ def test_multiple_terminals_per_conversation(tmp_path: Path) -> None:
 
     for (name, key), inst in instances.items():
         assert reg.get("conv_a", name, key) is inst
+
+
+def test_publish_if_registered_runs_only_for_the_registered_instance(tmp_path: Path) -> None:
+    """Publication is skipped once the key belongs to another instance or to none."""
+    reg = TerminalRegistry()
+    mine = TerminalInstance(
+        name="claude",
+        session_key="main",
+        socket_path=tmp_path / "mine" / "tmux.sock",
+        private_dir=tmp_path / "mine",
+    )
+    successor = TerminalInstance(
+        name="claude",
+        session_key="main",
+        socket_path=tmp_path / "successor" / "tmux.sock",
+        private_dir=tmp_path / "successor",
+    )
+    reg._by_conversation["conv_publish"] = {("claude", "main"): mine}
+    published: list[str] = []
+
+    assert reg.publish_if_registered(
+        "conv_publish", "claude", "main", mine, lambda: published.append("mine")
+    )
+    reg._by_conversation["conv_publish"] = {("claude", "main"): successor}
+    assert not reg.publish_if_registered(
+        "conv_publish", "claude", "main", mine, lambda: published.append("retired")
+    )
+    assert not reg.publish_if_registered(
+        "conv_missing", "claude", "main", mine, lambda: published.append("missing")
+    )
+    assert published == ["mine"]
+
+
+def test_publish_if_registered_holds_the_lock_while_publishing(tmp_path: Path) -> None:
+    """A successor registered concurrently waits until the publication has finished."""
+    reg = TerminalRegistry()
+    mine = TerminalInstance(
+        name="claude",
+        session_key="main",
+        socket_path=tmp_path / "mine" / "tmux.sock",
+        private_dir=tmp_path / "mine",
+    )
+    successor = TerminalInstance(
+        name="claude",
+        session_key="main",
+        socket_path=tmp_path / "successor" / "tmux.sock",
+        private_dir=tmp_path / "successor",
+    )
+    reg._by_conversation["conv_publish"] = {("claude", "main"): mine}
+    replacing = threading.Event()
+    published = threading.Event()
+    replaced_after_publish: list[bool] = []
+
+    def _replace_like_launch() -> None:
+        replacing.set()
+        with reg._lock:  # launch() registers a successor under this same lock
+            reg._by_conversation["conv_publish"] = {("claude", "main"): successor}
+        replaced_after_publish.append(published.is_set())
+
+    replacer = threading.Thread(target=_replace_like_launch)
+
+    def _publish() -> None:
+        replacer.start()
+        assert replacing.wait(5)
+        time.sleep(0.1)  # let the replacer block on the lock before publication ends
+        published.set()
+
+    assert reg.publish_if_registered("conv_publish", "claude", "main", mine, _publish)
+    replacer.join(5)
+    assert replaced_after_publish == [True], "the replacement must wait for the publication"
+    assert reg.get("conv_publish", "claude", "main") is successor
