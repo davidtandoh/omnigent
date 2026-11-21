@@ -523,10 +523,14 @@ async def test_child_create_keeps_account_private_from_parent_readers(
     )
     assert parent_resp.status_code == 201, parent_resp.text
     parent_id = parent_resp.json()["id"]
-    for session_id in (parent_id, agent["_session_id"]):
+    # Binding Alice's session-scoped agent needs EDIT on the agent's own session.
+    for session_id, grant_level in (
+        (parent_id, level),
+        (agent["_session_id"], max(level, LEVEL_EDIT)),
+    ):
         grant = await auth_client.put(
             f"/v1/sessions/{session_id}/permissions",
-            json={"user_id": BOB, "level": level},
+            json={"user_id": BOB, "level": grant_level},
             headers={"X-Forwarded-Email": ALICE},
         )
         assert grant.status_code == 200, grant.text

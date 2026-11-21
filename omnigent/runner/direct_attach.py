@@ -190,6 +190,7 @@ def create_direct_attach_app(
         session_id: str,
         terminal_id: str,
         read_only: bool = Query(default=False),
+        await_launch: bool = Query(default=False),
     ) -> None:
         """Token-gated wrapper around the runner's attach handler."""
         if not _authorized(websocket):
@@ -200,6 +201,7 @@ def create_direct_attach_app(
             session_id,
             terminal_id,
             read_only=read_only,
+            await_launch=await_launch,
         )
 
     return app
