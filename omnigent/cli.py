@@ -3078,7 +3078,7 @@ def _daemon_tunnel_recovers(
     let a daemon mid-reconnect (after a transient tunnel drop) re-register.
 
     :param record: Daemon record to probe.
-    :param grace_s: Seconds to keep polling for recovery, e.g. ``5.0``.
+    :param grace_s: Seconds to keep polling for recovery, e.g. ``30.0``.
     :returns: ``True`` if the host reports online within the grace window.
     """
     if _daemon_host_online(record):
