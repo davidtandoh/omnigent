@@ -3147,10 +3147,13 @@ class _DaemonReuseDecision:
         Distinct from a transparent tunnel-health heal — only a config
         change forces the caller to ask the user to re-run, because the
         server was restarted into a different auth posture mid-command.
+    :param offline_owner: Live daemon record that did not come online within
+        the readiness wait. It is left running, so the caller must not spawn.
     """
 
     reuse: bool
     config_changed: bool
+    offline_owner: _HostDaemonRecord | None = None
 
 
 def _daemon_owner_is_live(record: _HostDaemonRecord) -> bool:
@@ -3181,8 +3184,9 @@ def _reuse_existing_daemon_record(target: str) -> _DaemonReuseDecision:
     Liveness is judged by the record's flock, falling back to a PID check (see
     :func:`_daemon_owner_is_live`). An offline local daemon gets a bounded
     readiness wait. If its owner is still alive at timeout, leave it running
-    and fail the launch. A changed server configuration still requires a
-    restart, with ``config_changed`` telling the caller to request a re-run.
+    and return it as ``offline_owner`` so the caller fails the launch. A
+    changed server configuration still requires a restart, with
+    ``config_changed`` telling the caller to request a re-run.
 
     Self-healing is limited to daemons this CLI spawned in the background
     (they carry a ``log_path``). Foreground ``host`` daemons
@@ -3247,11 +3251,7 @@ def _reuse_existing_daemon_record(target: str) -> _DaemonReuseDecision:
     age_s = time.time() - existing.started_at
     if age_s >= _DAEMON_REUSE_MIN_AGE_S and not _daemon_tunnel_recovers(existing):
         if _daemon_owner_is_live(existing):
-            raise click.ClickException(
-                f"Host daemon for {_host_display_url(existing.target)!r} is still running "
-                f"but did not come online within {_DAEMON_OWNER_WAIT_S:.0f}s. "
-                "It was left running to preserve its sessions. Retry when it is ready."
-            )
+            return _DaemonReuseDecision(reuse=False, config_changed=False, offline_owner=existing)
         _delete_daemon_record(existing)
         return _DaemonReuseDecision(reuse=False, config_changed=False)
     return _DaemonReuseDecision(reuse=True, config_changed=False)
@@ -3875,6 +3875,15 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
     if decision.reuse:
         _record_host_state("reused")
         return False
+    if decision.offline_owner is not None:
+        _record_host_state("owner_alive_offline", running_before=True)
+        raise click.ClickException(
+            f"Host daemon for {_host_display_url(decision.offline_owner.target)!r} "
+            f"({_describe_pid(decision.offline_owner.pid)}) is still running but did not "
+            f"come online within {_DAEMON_OWNER_WAIT_S:.0f}s. It was left running to "
+            "preserve its sessions. Retry when it is ready, or run "
+            f"`{_host_stop_command('')}` to stop it."
+        )
     if not decision.config_changed and _local_daemon_serves_target(target, server_url):
         _record_host_state("reused_local_daemon", running_before=True)
         return False

@@ -875,14 +875,25 @@ def test_ensure_host_daemon_waits_for_live_offline_owner(
     monkeypatch.setattr(
         cli, "_terminate_host_unit", lambda record, *, reason: torn_down.append(reason)
     )
+    monkeypatch.delenv("OMNIGENT_WRAPPER_COMMAND", raising=False)
+    host_actions: list[str] = []
+    monkeypatch.setattr(
+        cli,
+        "record_startup_event",
+        lambda name, *, details: host_actions.append(details["host_process_action"]),
+    )
 
     if recovery_at is None:
-        with pytest.raises(click.ClickException, match="still running"):
+        with pytest.raises(click.ClickException, match="still running") as raised:
             _ensure_host_daemon(None)
         assert 5.0 < elapsed <= 30.0
+        assert "pid=4242" in raised.value.message
+        assert '`omnigent host stop --server ""`' in raised.value.message
+        assert host_actions == ["owner_alive_offline"]
     else:
         assert _ensure_host_daemon(None) is False
         assert elapsed >= recovery_at
+        assert host_actions == ["reused"]
 
     assert torn_down == []
     assert "args" not in captured
