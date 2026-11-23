@@ -832,15 +832,15 @@ def test_ensure_host_daemon_respawns_on_config_drift(
     assert "args" in captured  # fresh daemon spawned
 
 
-def test_ensure_host_daemon_heals_offline_tunnel(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize("owner_signal", ["lock", "pid"])
+@pytest.mark.parametrize("recovery_at", [8.0, None])
+def test_ensure_host_daemon_waits_for_live_offline_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    owner_signal: str,
+    recovery_at: float | None,
 ) -> None:
-    """A live-but-offline background daemon (zombie) is torn down + respawned.
-
-    The flaky-runs fix: PID alive and config matches, but the host tunnel
-    is down (server restart / ungraceful death). Rather than reuse a zombie
-    and let the caller poll until timeout, tear the unit down and respawn.
-    """
+    """A slow health answer must not replace a daemon with a live owner."""
     captured: dict[str, object] = {}
     _patch_daemon_spawn(monkeypatch, tmp_path, captured)
     _write_daemon_registry_record(
@@ -854,20 +854,77 @@ def test_ensure_host_daemon_heals_offline_tunnel(
         config_sig=cli.server_config_signature(),
         resolved_server_url="http://127.0.0.1:8123",
     )
+    monkeypatch.setattr(cli, "_record_flock_is_held", lambda path: owner_signal == "lock")
+    monkeypatch.setattr(cli, "_pid_alive", lambda pid: owner_signal == "pid")
     monkeypatch.setattr(cli, "_pid_is_recorded_daemon", lambda record: cli._pid_alive(record.pid))
-    monkeypatch.setattr(cli, "_pid_alive", lambda pid: True)
-    # Old enough to be past the min-age grace; tunnel does not recover.
     monkeypatch.setattr(cli.time, "time", lambda: 1_000_100.0)
-    monkeypatch.setattr(cli, "_daemon_tunnel_recovers", lambda record, **_kw: False)
+    elapsed = 0.0
+
+    def sleep(seconds: float) -> None:
+        nonlocal elapsed
+        elapsed += seconds
+
+    monkeypatch.setattr(cli.time, "monotonic", lambda: elapsed)
+    monkeypatch.setattr(cli.time, "sleep", sleep)
+    monkeypatch.setattr(
+        cli,
+        "_daemon_host_online",
+        lambda record, **kwargs: recovery_at is not None and elapsed >= recovery_at,
+    )
     torn_down: list[str] = []
     monkeypatch.setattr(
         cli, "_terminate_host_unit", lambda record, *, reason: torn_down.append(reason)
     )
+    monkeypatch.delenv("OMNIGENT_WRAPPER_COMMAND", raising=False)
+    host_actions: list[str] = []
+    monkeypatch.setattr(
+        cli,
+        "record_startup_event",
+        lambda name, *, details: host_actions.append(details["host_process_action"]),
+    )
 
-    _ensure_host_daemon(None)
+    if recovery_at is None:
+        with pytest.raises(click.ClickException, match="still running") as raised:
+            _ensure_host_daemon(None)
+        assert 5.0 < elapsed <= 30.0
+        assert "pid=4242" in raised.value.message
+        assert '`omnigent host stop --server ""`' in raised.value.message
+        assert host_actions == ["owner_alive_offline"]
+    else:
+        assert _ensure_host_daemon(None) is False
+        assert elapsed >= recovery_at
+        assert host_actions == ["reused"]
 
-    assert len(torn_down) == 1 and "offline" in torn_down[0]
-    assert "args" in captured  # fresh daemon spawned
+    assert torn_down == []
+    assert "args" not in captured
+    record = cli._find_daemon_record("local")
+    assert record is not None and record.pid == 4242
+
+
+@pytest.mark.parametrize("server_url", [None, "https://server.example.com"])
+def test_ensure_host_daemon_spawns_after_stale_pid(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, server_url: str | None
+) -> None:
+    """A free lock and dead recorded PID still allow a fresh daemon."""
+    captured: dict[str, object] = {}
+    _patch_daemon_spawn(monkeypatch, tmp_path, captured)
+    target = server_url or "local"
+    _write_daemon_registry_record(
+        tmp_path,
+        pid=4242,
+        target=target,
+        mode="server" if server_url else "local",
+        server_url=server_url,
+    )
+    monkeypatch.setattr(cli, "_record_flock_is_held", lambda path: False)
+    monkeypatch.setattr(cli, "_pid_alive", lambda pid: False)
+
+    assert _ensure_host_daemon(server_url) is False
+
+    calls = captured["calls"]
+    assert isinstance(calls, list) and len(calls) == 1
+    record = cli._find_daemon_record(target)
+    assert record is not None and record.pid == _Proc.pid
 
 
 def test_ensure_host_daemon_young_offline_daemon_not_torn_down(

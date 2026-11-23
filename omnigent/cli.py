@@ -699,13 +699,12 @@ _HOST_SESSION_ACTIVE_STATUSES = frozenset({"running", "waiting"})
 # How often ``omni upgrade`` re-polls the local server for in-flight
 # (connected) sessions while draining before it stops the server.
 _UPGRADE_DRAIN_POLL_S = 2.0
-# When reusing an existing daemon, how long to let a live-but-offline daemon
-# (re)establish its server tunnel before treating it as a zombie and
-# respawning. Covers the daemon's reconnect backoff after a transient drop.
+# Grace for probing a daemon serving another URL in the same workspace.
 _DAEMON_RECONNECT_GRACE_S = 5.0
-# Don't tear down a daemon younger than this for an offline tunnel: it may be
-# a freshly-spawned daemon (possibly from a concurrent invocation) still
-# bringing its tunnel up. Avoids racing/thrashing sibling invocations.
+# Local daemon recovery can outlast a short health probe. A live owner is
+# preserved even if this wait expires.
+_DAEMON_OWNER_WAIT_S = 30.0
+# Let freshly spawned daemons connect before probing their tunnel.
 _DAEMON_REUSE_MIN_AGE_S = 6.0
 
 _LOCAL_DAEMON_ENV_ALLOWLIST: frozenset[str] = frozenset(
@@ -2879,9 +2878,9 @@ def _daemon_host_online(record: _HostDaemonRecord, *, timeout_s: float = 2.0) ->
     tunnel to the Omnigent server is up: the server only reports the host
     ``online`` while a daemon holds an authenticated tunnel and has
     heartbeated within ``HOST_LIVENESS_TTL_S``. After a server restart,
-    an ungraceful daemon death, or a flapping tunnel, the daemon can be a
-    "zombie" — alive but not registered. This probe distinguishes the two
-    so reuse can heal instead of polling a zombie until timeout.
+    an ungraceful daemon death, or a flapping tunnel, the daemon can be
+    alive but not registered. This probe checks readiness independently
+    of process ownership.
 
     :param record: Daemon record to probe.
     :param timeout_s: Per-request HTTP timeout in seconds, e.g. ``2.0``.
@@ -3070,17 +3069,16 @@ def _load_existing_host_id() -> str | None:
 def _daemon_tunnel_recovers(
     record: _HostDaemonRecord,
     *,
-    grace_s: float = _DAEMON_RECONNECT_GRACE_S,
+    grace_s: float = _DAEMON_OWNER_WAIT_S,
 ) -> bool:
     """
     Return whether a daemon's host tunnel is (or quickly becomes) online.
 
     Probes the host status immediately, then polls for up to *grace_s* to
-    let a daemon mid-reconnect (after a transient tunnel drop) re-register
-    before we judge it a zombie.
+    let a daemon mid-reconnect (after a transient tunnel drop) re-register.
 
     :param record: Daemon record to probe.
-    :param grace_s: Seconds to keep polling for recovery, e.g. ``5.0``.
+    :param grace_s: Seconds to keep polling for recovery, e.g. ``30.0``.
     :returns: ``True`` if the host reports online within the grace window.
     """
     if _daemon_host_online(record):
@@ -3149,10 +3147,13 @@ class _DaemonReuseDecision:
         Distinct from a transparent tunnel-health heal — only a config
         change forces the caller to ask the user to re-run, because the
         server was restarted into a different auth posture mid-command.
+    :param offline_owner: Live daemon record that did not come online within
+        the readiness wait. It is left running, so the caller must not spawn.
     """
 
     reuse: bool
     config_changed: bool
+    offline_owner: _HostDaemonRecord | None = None
 
 
 def _daemon_owner_is_live(record: _HostDaemonRecord) -> bool:
@@ -3181,17 +3182,11 @@ def _reuse_existing_daemon_record(target: str) -> _DaemonReuseDecision:
     Decide whether an existing daemon for *target* can be reused.
 
     Liveness is judged by the record's flock, falling back to a PID check (see
-    :func:`_daemon_owner_is_live`). Reuse requires more than a live owner: a
-    daemon whose process is alive
-    but whose server tunnel is down (server restart, ungraceful death,
-    flapping tunnel) is a zombie — the host reads ``offline`` and the
-    caller would poll until timeout. And a daemon spawned under a
-    different server config (e.g. the user flipped
-    ``OMNIGENT_AUTH_ENABLED``) would silently keep its old auth
-    mode. In both cases we tear the unit down here and return
-    ``reuse=False`` so the caller spawns a fresh one — flagging
-    ``config_changed`` for the auth-drift case so the caller can ask the
-    user to re-run against the freshly-restarted server.
+    :func:`_daemon_owner_is_live`). An offline local daemon gets a bounded
+    readiness wait. If its owner is still alive at timeout, leave it running
+    and return it as ``offline_owner`` so the caller fails the launch. A
+    changed server configuration still requires a restart, with
+    ``config_changed`` telling the caller to request a re-run.
 
     Self-healing is limited to daemons this CLI spawned in the background
     (they carry a ``log_path``). Foreground ``host`` daemons
@@ -3251,12 +3246,13 @@ def _reuse_existing_daemon_record(target: str) -> _DaemonReuseDecision:
         _terminate_host_unit(existing, reason="config changed (auth)")
         return _DaemonReuseDecision(reuse=False, config_changed=True)
 
-    # Tunnel health → don't reuse a zombie. Skip very young daemons (a
-    # concurrent invocation may have just spawned one still connecting). This
-    # is a transparent heal, NOT a config change — the caller continues.
+    # A health timeout does not prove the owner is dead. Preserve its lock
+    # and record so concurrent starters continue to recognize it.
     age_s = time.time() - existing.started_at
     if age_s >= _DAEMON_REUSE_MIN_AGE_S and not _daemon_tunnel_recovers(existing):
-        _terminate_host_unit(existing, reason="host tunnel is offline")
+        if _daemon_owner_is_live(existing):
+            return _DaemonReuseDecision(reuse=False, config_changed=False, offline_owner=existing)
+        _delete_daemon_record(existing)
         return _DaemonReuseDecision(reuse=False, config_changed=False)
     return _DaemonReuseDecision(reuse=True, config_changed=False)
 
@@ -3879,6 +3875,15 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
     if decision.reuse:
         _record_host_state("reused")
         return False
+    if decision.offline_owner is not None:
+        _record_host_state("owner_alive_offline", running_before=True)
+        raise click.ClickException(
+            f"Host daemon for {_host_display_url(decision.offline_owner.target)!r} "
+            f"({_describe_pid(decision.offline_owner.pid)}) is still running but did not "
+            f"come online within {_DAEMON_OWNER_WAIT_S:.0f}s. It was left running to "
+            "preserve its sessions. Retry when it is ready, or run "
+            f"`{_host_stop_command('')}` to stop it."
+        )
     if not decision.config_changed and _local_daemon_serves_target(target, server_url):
         _record_host_state("reused_local_daemon", running_before=True)
         return False
