@@ -1538,6 +1538,7 @@ async def _persist_antigravity_launch_config(
         patch["model_override"] = model
     if not patch:
         return
+    patch["silent"] = True
     resp = await client.patch(f"/v1/sessions/{url_component(session_id)}", json=patch)
     if resp.status_code >= 400:
         raise click.ClickException(

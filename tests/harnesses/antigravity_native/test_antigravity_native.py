@@ -617,7 +617,7 @@ async def test_daemon_fresh_launch_persists_args_and_model_before_bind(
     assert prepared.reattached is True
     assert events == [
         ("create", list(_FIRSTMATE_STYLE_ARGS)),
-        ("patch", {"model_override": "gemini-test-model"}),
+        ("patch", {"model_override": "gemini-test-model", "silent": True}),
         ("bind", None),
     ]
 
@@ -678,6 +678,7 @@ async def test_daemon_cold_resume_persists_args_and_model_before_bind(
             {
                 "terminal_launch_args": list(_FIRSTMATE_STYLE_ARGS),
                 "model_override": "gemini-test-model",
+                "silent": True,
             },
         ),
         ("bind", None),
