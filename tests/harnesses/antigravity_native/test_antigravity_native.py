@@ -560,15 +560,16 @@ def _running_terminal_response(terminal_id: str) -> httpx.Response:
     )
 
 
-async def test_daemon_fresh_launch_persists_args_and_model_before_bind(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize("via_daemon", [False, True], ids=["local", "daemon"])
+@pytest.mark.parametrize("model", ["gemini-test-model", "Gemini 3.1 Pro (High)"])
+async def test_fresh_launch_persists_args_and_model_before_bind(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, via_daemon: bool, model: str
 ) -> None:
     """
     The runner-owned terminal receives the caller's agy flags and model.
 
-    The runner builds agy's argv only from the session's ``terminal_launch_args``
-    and ``model_override``, so both must be stored before the bind that makes the
-    runner create the terminal.
+    The model label and flags must be stored in ``terminal_launch_args`` before
+    the bind that makes the runner create the terminal.
     """
     monkeypatch.setattr(bridge_mod, "_BRIDGE_ROOT", tmp_path / "antigravity-native")
     terminal_id = antigravity_terminal_resource_id()
@@ -576,9 +577,6 @@ async def test_daemon_fresh_launch_persists_args_and_model_before_bind(
 
     def _handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        if request.method == "PATCH" and path == "/v1/sessions/conv_fresh123":
-            events.append(("patch", json.loads(request.content)))
-            return httpx.Response(200, json={})
         if request.method == "GET" and path.endswith(f"/resources/terminals/{terminal_id}"):
             return _running_terminal_response(terminal_id)
         raise AssertionError(f"unexpected request: {request.method} {path}")
@@ -599,31 +597,40 @@ async def test_daemon_fresh_launch_persists_args_and_model_before_bind(
     monkeypatch.setattr(_mod, "launch_or_reuse_daemon_runner", _noop)
     monkeypatch.setattr(_mod, "_bind_session_runner", _bind)
 
+    prepare = (
+        _mod._prepare_antigravity_terminal_via_daemon
+        if via_daemon
+        else _mod._prepare_antigravity_terminal
+    )
     async with _mock_client(_handler) as client:
         _patch_prepare_client(monkeypatch, client)
-        prepared = await _mod._prepare_antigravity_terminal_via_daemon(
+        prepared = await prepare(
             base_url="http://127.0.0.1:0",
             headers={},
             session_id=None,
             session_bundle=b"bundle",
             antigravity_args=_FIRSTMATE_STYLE_ARGS,
             command="agy",
-            model="gemini-test-model",
-            host_id="host_1",
-            workspace="/tmp/ws",
+            model=model,
+            **(
+                {"host_id": "host_1", "workspace": "/tmp/ws"}
+                if via_daemon
+                else {"runner_id": "runner_1"}
+            ),
             startup_progress=None,
         )
 
     assert prepared.reattached is True
     assert events == [
-        ("create", list(_FIRSTMATE_STYLE_ARGS)),
-        ("patch", {"model_override": "gemini-test-model", "silent": True}),
+        ("create", ["--model", model, *_FIRSTMATE_STYLE_ARGS]),
         ("bind", None),
     ]
 
 
-async def test_daemon_cold_resume_persists_args_and_model_before_bind(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize("via_daemon", [False, True], ids=["local", "daemon"])
+@pytest.mark.parametrize("model", ["gemini-test-model", "Gemini 3.1 Pro (High)"])
+async def test_cold_resume_persists_args_and_model_before_bind(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, via_daemon: bool, model: str
 ) -> None:
     """A cold resume stores the new launch config before the runner relaunches agy."""
     monkeypatch.setattr(bridge_mod, "_BRIDGE_ROOT", tmp_path / "antigravity-native")
@@ -657,18 +664,26 @@ async def test_daemon_cold_resume_persists_args_and_model_before_bind(
     monkeypatch.setattr(_mod, "launch_or_reuse_daemon_runner", _noop)
     monkeypatch.setattr(_mod, "_bind_session_runner", _bind)
 
+    prepare = (
+        _mod._prepare_antigravity_terminal_via_daemon
+        if via_daemon
+        else _mod._prepare_antigravity_terminal
+    )
     async with _mock_client(_handler) as client:
         _patch_prepare_client(monkeypatch, client)
-        await _mod._prepare_antigravity_terminal_via_daemon(
+        await prepare(
             base_url="http://127.0.0.1:0",
             headers={},
             session_id="conv_abc123",
             session_bundle=None,
             antigravity_args=_FIRSTMATE_STYLE_ARGS,
             command="agy",
-            model="gemini-test-model",
-            host_id="host_1",
-            workspace="/tmp/ws",
+            model=model,
+            **(
+                {"host_id": "host_1", "workspace": "/tmp/ws"}
+                if via_daemon
+                else {"runner_id": "runner_1"}
+            ),
             startup_progress=None,
         )
 
@@ -676,8 +691,7 @@ async def test_daemon_cold_resume_persists_args_and_model_before_bind(
         (
             "patch",
             {
-                "terminal_launch_args": list(_FIRSTMATE_STYLE_ARGS),
-                "model_override": "gemini-test-model",
+                "terminal_launch_args": ["--model", model, *_FIRSTMATE_STYLE_ARGS],
                 "silent": True,
             },
         ),

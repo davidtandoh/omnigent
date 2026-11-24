@@ -626,6 +626,9 @@ async def _prepare_antigravity_terminal(
     :returns: Prepared terminal details.
     :raises click.ClickException: If any server operation fails.
     """
+    persist_args = list(antigravity_args)
+    if model is not None:
+        persist_args[:0] = ["--model", model]
     timeout = httpx.Timeout(30.0, read=120.0)
     from omnigent.cli_auth import open_server_client
 
@@ -645,9 +648,8 @@ async def _prepare_antigravity_terminal(
                 client,
                 session_bundle,
                 bridge_id=bridge_id,
-                terminal_launch_args=list(antigravity_args),
+                terminal_launch_args=persist_args,
             )
-            await _persist_antigravity_launch_config(client, session_id, model=model)
         else:
             _update_progress(startup_progress, "Loading Antigravity session...")
             payload = await _fetch_antigravity_session(client, session_id)
@@ -681,7 +683,7 @@ async def _prepare_antigravity_terminal(
             conversation_id = external if isinstance(external, str) and external else bridge_id
             resume = isinstance(external, str) and bool(external)
             await _persist_antigravity_launch_config(
-                client, session_id, terminal_launch_args=list(antigravity_args), model=model
+                client, session_id, terminal_launch_args=persist_args
             )
 
         if runner_id is not None:
@@ -820,6 +822,9 @@ async def _prepare_antigravity_terminal_via_daemon(
     :returns: Prepared terminal details for attaching.
     :raises click.ClickException: If setup fails.
     """
+    persist_args = list(antigravity_args)
+    if model is not None:
+        persist_args[:0] = ["--model", model]
     timeout = httpx.Timeout(30.0, read=120.0)
     async with open_daemon_client(base_url, headers, host_id, timeout=timeout) as client:
         bridge_id: str
@@ -839,11 +844,10 @@ async def _prepare_antigravity_terminal_via_daemon(
                     client,
                     session_bundle,
                     bridge_id=bridge_id,
-                    terminal_launch_args=list(antigravity_args),
+                    terminal_launch_args=persist_args,
                 ),
                 wait_for_host_online(client, host_id, timeout_s=_DAEMON_HOST_ONLINE_TIMEOUT_S),
             )
-            await _persist_antigravity_launch_config(client, session_id, model=model)
         else:
             _update_progress(startup_progress, "Loading Antigravity session...")
             payload = await _fetch_antigravity_session(client, session_id)
@@ -891,7 +895,7 @@ async def _prepare_antigravity_terminal_via_daemon(
             conversation_id = external if isinstance(external, str) and external else bridge_id
             resume = isinstance(external, str) and bool(external)
             await _persist_antigravity_launch_config(
-                client, session_id, terminal_launch_args=list(antigravity_args), model=model
+                client, session_id, terminal_launch_args=persist_args
             )
 
         if not fresh_session:
@@ -1515,27 +1519,22 @@ async def _persist_antigravity_launch_config(
     session_id: str,
     *,
     terminal_launch_args: list[str] | None = None,
-    model: str | None = None,
 ) -> None:
     """
     Persist the launch config the runner-owned agy terminal reads at launch.
 
-    The runner builds agy's argv from the session's ``terminal_launch_args`` and
-    ``model_override``, so this must run before the runner bind that creates it.
+    The runner reads the session's ``terminal_launch_args`` at launch, so this
+    must run before the runner bind that creates the terminal.
 
     :param client: HTTP client pointed at the Omnigent server.
     :param session_id: Omnigent session id, e.g. ``"conv_abc123"``.
     :param terminal_launch_args: agy pass-through args; empty or ``None`` keeps
         the stored value.
-    :param model: agy model id, e.g. ``"gemini-2.5-pro"``; ``None`` keeps the
-        stored value.
     :raises click.ClickException: If the server rejects the update.
     """
     patch: dict[str, object] = {}
     if terminal_launch_args:
         patch["terminal_launch_args"] = terminal_launch_args
-    if model is not None:
-        patch["model_override"] = model
     if not patch:
         return
     patch["silent"] = True
