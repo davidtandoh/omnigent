@@ -9,7 +9,7 @@ name: E2E UI Tests
 #
 # Triggers:
 #   pull_request        ALL PRs (same-repo + fork). Draft PRs skip.
-#   schedule            09:00 UTC daily, alongside nightly.yml.
+#   schedule            09:00 UTC daily, alongside nightly.yml; skipped on the fork.
 #   workflow_dispatch   manual run on the selected workflow ref.
 
 on:
@@ -73,6 +73,7 @@ jobs:
   # Security gate: untrusted PRs wait on the deterministic scan
   # (security-gate.yml); trusted authors and non-PR events pass instantly.
   gate:
+    if: github.event_name != 'schedule' || github.repository != 'davidtandoh/omnigent'
     uses: ./.github/workflows/security-gate.yml
     permissions:
       contents: read
@@ -546,7 +547,7 @@ jobs:
 
   result:
     name: E2E UI result
-    if: always()
+    if: always() && (github.event_name != 'schedule' || github.repository != 'davidtandoh/omnigent')
     needs: [setup, build-sidecar, browser-contract-shard, browser-contract, e2e-ui]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
