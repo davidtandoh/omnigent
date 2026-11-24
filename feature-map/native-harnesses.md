@@ -47,7 +47,9 @@ implements them separately, so a fix for one harness does not reach the others.
   launch logs a warning naming the missing entry. claude-sdk applies the same
   check (see [Composer](./composer.md)).
 - `launch-cli`: `omnigent <name>` starts the harness in the user's terminal with
-  an Omnigent session behind it. With `OMNIGENT_SESSION_ENV_PASSTHROUGH=NAME,...`
+  an Omnigent session behind it. See the [README CLI usage](../README.md#2-start-your-first-agent)
+  for Antigravity initial briefs and saved launch settings.
+  With `OMNIGENT_SESSION_ENV_PASSTHROUGH=NAME,...`
   the named shell variables reach only the new runner that command launches; a
   reused live runner keeps its launch values, and a later server-driven restart
   starts without them.
