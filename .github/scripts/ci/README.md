@@ -20,11 +20,9 @@ their existing workflows. This selects tests; it does not grant automerge.
 
 Selection reads a depth-two checkout of the exact GitHub PR merge revision,
 verifies its head parent against the event, and diffs its tree against the base
-parent. It needs no API inventory or additional token permissions. When a
-workflow admits a push, scheduled or manually dispatched run, dependency
-selection retains full coverage. Existing workflow path filters still apply.
-See each workflow's trigger comments and job gates for event eligibility,
-including [E2E UI](../../workflows/e2e-ui.yml).
+parent. It needs no API inventory or additional token permissions. Push,
+scheduled and manually dispatched runs retain full coverage. Existing workflow
+path filters still apply.
 
 Whenever the web test job runs, it also tests and builds the VS Code extension,
 checks the web extension SDK and example, and runs the Electron Node suites.
@@ -36,8 +34,7 @@ The UI filter uses pytest's resolved fixture closure, so tests depending on
 sharding. An empty selection or a skipped selected test fails. Keep new sidecar
 consumers behind this fixture, or update the selector when adding another one.
 
-For runs admitted by the workflow gates, `CI result` and `E2E UI result` always
-run after selection and the test jobs.
+`CI result` and `E2E UI result` always run after selection and the test jobs.
 They require success from every selected consumer; an unexpected skip, missing
 job, failure or cancellation fails the result. Intentional skips remain valid.
 Merge Ready requires these results once their selection jobs exist, and never
