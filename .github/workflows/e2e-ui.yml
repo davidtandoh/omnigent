@@ -547,20 +547,23 @@ jobs:
 
   result:
     name: E2E UI result
-    if: always() && (github.event_name != 'schedule' || github.repository != 'davidtandoh/omnigent')
+    if: always()
     needs: [setup, build-sidecar, browser-contract-shard, browser-contract, e2e-ui]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require successful test selection
+        if: github.event_name != 'schedule' || github.repository != 'davidtandoh/omnigent'
         env:
           SELECTION_RESULT: ${{ needs.setup.result }}
         run: test "$SELECTION_RESULT" = success
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        if: github.event_name != 'schedule' || github.repository != 'davidtandoh/omnigent'
         with:
           sparse-checkout: .github/scripts/ci
           persist-credentials: false
       - name: Require selected consumer results
+        if: github.event_name != 'schedule' || github.repository != 'davidtandoh/omnigent'
         env:
           NEEDS: ${{ toJSON(needs) }}
           IS_DRAFT: ${{ github.event.pull_request.draft }}
