@@ -305,6 +305,18 @@ omnigent pi                          # Pi
 omnigent copilot                     # GitHub Copilot (SDK harness, via `omnigent run`)
 ```
 
+For Antigravity, pass an initial brief after `--`:
+
+```bash
+omnigent agy -- --prompt-interactive "Review the current changes" --effort high
+```
+
+Omnigent sends `--prompt-interactive` (or `-i`) as a session message before
+attaching the terminal. The brief is not stored in terminal launch arguments,
+so restarting the terminal does not submit it again. Other agy arguments and
+the selected model are saved for new sessions and resumes whose terminal is
+not running. Reattaching to a running terminal keeps its current launch settings.
+
 For new and resumed daemon-backed Claude sessions, the CLI reports a recorded
 terminal startup failure without waiting for the terminal-readiness timeout.
 It ignores earlier failures and informational notices. If no failure is

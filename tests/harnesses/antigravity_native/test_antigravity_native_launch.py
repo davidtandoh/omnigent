@@ -17,6 +17,7 @@ from omnigent.harnesses.antigravity_native.launch import (
     build_agy_launch,
     resolve_native_antigravity_launch,
     should_skip_permissions,
+    split_initial_prompt,
 )
 
 
@@ -413,3 +414,42 @@ class TestShouldSkipPermissions:
     def test_none_mode_headless_true(self) -> None:
         """``None`` mode + headless skips (headless wins regardless of mode)."""
         assert should_skip_permissions(permission_mode=None, headless=True) is True
+
+
+class TestSplitInitialPrompt:
+    """Tests for :func:`split_initial_prompt`."""
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ("--prompt-interactive", "brief\nline two"),
+            ("--prompt-interactive=brief\nline two",),
+            ("-i", "brief\nline two"),
+            ("-prompt-interactive", "brief\nline two"),
+            ("--i=brief\nline two",),
+        ],
+    )
+    def test_extracts_each_flag_spelling(self, args: tuple[str, ...]) -> None:
+        prompt, rest = split_initial_prompt(("--effort", "high", *args, _SKIP_FLAG))
+        assert prompt == "brief\nline two"
+        assert rest == ("--effort", "high", _SKIP_FLAG)
+
+    def test_no_prompt_keeps_args_unchanged(self) -> None:
+        assert split_initial_prompt(()) == (None, ())
+        assert split_initial_prompt((_SKIP_FLAG,)) == (None, (_SKIP_FLAG,))
+
+    def test_last_prompt_wins_and_all_are_removed(self) -> None:
+        prompt, rest = split_initial_prompt(("-i", "first", "--prompt-interactive", "second"))
+        assert prompt == "second"
+        assert rest == ()
+
+    def test_flag_without_value_is_left_for_agy(self) -> None:
+        assert split_initial_prompt(("--prompt-interactive",)) == (
+            None,
+            ("--prompt-interactive",),
+        )
+
+    def test_prompt_value_that_looks_like_a_flag_is_kept_as_prompt(self) -> None:
+        prompt, rest = split_initial_prompt(("-i", _SKIP_FLAG))
+        assert prompt == _SKIP_FLAG
+        assert rest == ()

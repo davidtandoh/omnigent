@@ -57,6 +57,8 @@ _logger = logging.getLogger(__name__)
 _SKIP_PERMISSIONS_FLAG = "--dangerously-skip-permissions"
 # Omnigent permission mode that maps to agy's all-or-nothing bypass.
 _BYPASS_PERMISSION_MODE = "bypassPermissions"
+# agy's flag parser accepts one or two leading dashes for every flag.
+_PROMPT_INTERACTIVE_FLAGS = frozenset({"-i", "--i", "-prompt-interactive", "--prompt-interactive"})
 # Fallback binary path when ``agy`` is not on PATH.
 _AGY_FALLBACK_PATH = Path.home() / ".local" / "bin" / "agy"
 # Install instructions surfaced in the RuntimeError when agy is missing.
@@ -190,6 +192,38 @@ def should_skip_permissions(
     if permission_mode == _BYPASS_PERMISSION_MODE:
         return True
     return headless
+
+
+def split_initial_prompt(args: tuple[str, ...]) -> tuple[str | None, tuple[str, ...]]:
+    """Separate agy's initial-prompt flag from the other pass-through args.
+
+    The runner-owned terminal replays persisted launch args on every relaunch,
+    so the initial prompt is delivered once as the first session message instead.
+    Accepts each spelling agy's flag parser does; when repeated, the last wins.
+
+    :param args: Raw agy pass-through args, e.g.
+        ``("--prompt-interactive", "hello", "--effort", "high")``.
+    :returns: ``(prompt, remaining_args)``; ``prompt`` is ``None`` when no
+        complete initial-prompt flag is present.
+    """
+    prompt: str | None = None
+    remaining: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        name, separator, value = arg.partition("=")
+        if name in _PROMPT_INTERACTIVE_FLAGS:
+            if separator:
+                prompt = value
+                index += 1
+                continue
+            if index + 1 < len(args):
+                prompt = args[index + 1]
+                index += 2
+                continue
+        remaining.append(arg)
+        index += 1
+    return prompt, tuple(remaining)
 
 
 def build_agy_launch(

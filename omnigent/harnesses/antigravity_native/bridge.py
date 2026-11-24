@@ -1201,7 +1201,7 @@ def update_conversation_id(
 # large worktree while still healthy — 10s matches every other native bridge.
 _TMUX_SEND_TIMEOUT_S = 10.0
 # Per-readiness-gate wait (tmux.json advertised, then the agy input box mounted).
-_TMUX_READY_TIMEOUT_S = 30.0
+_TMUX_READY_TIMEOUT_S = 90.0
 # Poll cadence for the readiness / paste-commit / submit-verify loops.
 _TMUX_POLL_INTERVAL_S = 0.2
 # How long to wait for the pasted draft to render in the input box before Enter.
