@@ -36,6 +36,7 @@ from omnigent.server.scheduled.telemetry import (
     start_fire_stage,
 )
 from omnigent.server.schemas import SessionEventInput, SessionStartupInput
+from omnigent.server.snapshot_reads import run_snapshot_read
 from omnigent.stores.conversation_store import (
     PENDING_INPUT_RESPONSE_ID,
     ConversationNotFoundError,
@@ -405,12 +406,12 @@ class ManagedStartupInputs:
             ``failed`` holds inputs no launch or delivery could hand over, so
             clients can show them as undelivered instead of dropping them.
         """
-        conv = await asyncio.to_thread(self.conversations.get_conversation, session_id)
+        conv = await run_snapshot_read(self.conversations.get_conversation, session_id)
         if conv is None or conv.labels.get(STARTUP_LABEL) == "cancelled":
             return [], []
         queued: list[dict[str, Any]] = []
         failed: list[dict[str, Any]] = []
-        for item in await asyncio.to_thread(self.conversations.list_pending_inputs, session_id):
+        for item in await run_snapshot_read(self.conversations.list_pending_inputs, session_id):
             entry = {
                 "pending_id": pending_inputs.make_pending_id(session_id, item.id),
                 "content": input_content(item),

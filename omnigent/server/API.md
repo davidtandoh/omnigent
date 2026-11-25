@@ -792,6 +792,14 @@ committed items, and any queued (unconsumed) inputs. Combined with the
 live stream, this is the reconnect contract — see "Reconnect
 Contract" below.
 
+Snapshot authorization and projection reads use a separate worker pool, so
+polling cannot fill the default worker queue used by runner registration and
+recovery. Context-window display metadata uses its own pool. Concurrent snapshots
+share one lookup per workspace and resolver input, cached for 60 seconds. Cold
+snapshots still await that lookup.
+Declared windows, model overrides, and compaction resolution retain their existing
+precedence. Transcript, authorization, binding, and usage reads remain fresh.
+
   include_items (query param, boolean, default `true`)
     When `false`, the committed-items read is skipped and `items` is
     `[]` (an empty list, not an absent field). For callers that

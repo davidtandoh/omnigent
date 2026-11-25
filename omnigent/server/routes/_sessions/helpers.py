@@ -320,6 +320,7 @@ from omnigent.server.schemas import (
     ToolOutputDeltaEvent,
 )
 from omnigent.server.session_metadata_logging import harness_attributes
+from omnigent.server.snapshot_reads import run_snapshot_read
 from omnigent.server.startup_inputs import ManagedStartupInputs, StartupInputContext
 from omnigent.spec.types import (
     AgentSpec,
@@ -5978,7 +5979,7 @@ async def _runner_supports_side_chat_settings(
         or not conv.parent_conversation_id
     ):
         return False
-    parent = await asyncio.to_thread(
+    parent = await run_snapshot_read(
         conversation_store.get_conversation, conv.parent_conversation_id
     )
     connection = (
