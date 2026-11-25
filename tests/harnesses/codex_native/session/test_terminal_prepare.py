@@ -486,11 +486,12 @@ def test_run_with_local_server_threads_raw_instructions_to_prepare_terminal_resu
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("ensure_status", [200, 503])
+@pytest.mark.parametrize(("ensure_status", "read_timeouts"), [(200, 0), (503, 0), (200, 1)])
 async def test_prepare_codex_terminal_via_daemon_creates_runner_and_ensures_terminal(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     ensure_status: int,
+    read_timeouts: int,
 ) -> None:
     """
     Daemon preparation owns session create, runner launch, and terminal ensure.
@@ -509,6 +510,7 @@ async def test_prepare_codex_terminal_via_daemon_creates_runner_and_ensures_term
     caplog.set_level("INFO", logger="omnigent.startup")
     original_async_client = httpx.AsyncClient
     calls: list[tuple[str, str, object]] = []
+    terminal_reads = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
         """
@@ -517,6 +519,7 @@ async def test_prepare_codex_terminal_via_daemon_creates_runner_and_ensures_term
         :param request: Incoming mock HTTP request.
         :returns: Mock Omnigent response.
         """
+        nonlocal terminal_reads
         path = request.url.path
         body: object = None
         if request.content:
@@ -542,6 +545,9 @@ async def test_prepare_codex_terminal_via_daemon_creates_runner_and_ensures_term
         if request.method == "POST" and path.endswith("/resources/terminals"):
             return httpx.Response(ensure_status, json={"id": "terminal_codex_main"})
         if request.method == "GET" and path.endswith("/resources/terminals/terminal_codex_main"):
+            terminal_reads += 1
+            if terminal_reads <= read_timeouts:
+                raise httpx.ReadTimeout("temporary terminal lookup stall", request=request)
             return httpx.Response(
                 200,
                 json={
@@ -593,6 +599,7 @@ async def test_prepare_codex_terminal_via_daemon_creates_runner_and_ensures_term
         return
 
     assert prepared.session_id == "conv_new"
+    assert terminal_reads == read_timeouts + 1
     assert prepared.terminal_id == "terminal_codex_main"
     assert prepared.tmux_socket == Path("/tmp/codex.sock")
     assert prepared.tmux_target == "codex:main"
@@ -642,6 +649,36 @@ async def test_prepare_codex_terminal_via_daemon_creates_runner_and_ensures_term
         for r in caplog.records
         if r.name == "omnigent.startup" and r.attributes["event"] != "launch_started"
     )
+
+
+@pytest.mark.asyncio
+async def test_codex_terminal_ready_timeout_reports_phase_and_request(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from omnigent import _startup_events as startup
+
+    def stalled(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("private error text", request=request)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(stalled), base_url="http://example.test"
+    ) as client:
+        with pytest.raises(click.ClickException, match="did not create the Codex terminal"):
+            with startup.native_startup_attempt(harness="codex-native"):
+                await codex_native._wait_for_codex_terminal_ready(
+                    client, "private-session", timeout_s=0.01
+                )
+
+    failure = next(
+        record.attributes
+        for record in caplog.records
+        if record.name == "omnigent.startup" and record.attributes["event"] == "launch_failed"
+    )
+    assert failure["phase"] == "terminal_ready"
+    assert failure["request_method"] == "GET"
+    assert failure["request_route"] == "/v1/sessions/{id}/resources/terminals/{id}"
+    assert failure["error_type"] == "ReadTimeout"
+    assert "private" not in json.dumps(failure)
 
 
 @pytest.mark.asyncio
