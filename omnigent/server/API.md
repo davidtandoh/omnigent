@@ -825,7 +825,9 @@ Contract" below.
     and Codex-native model options) are refreshed from the bound runner
     instead of served from AP-process memory. Browser reload/bind
     requests use this so a page refresh pierces stale capability
-    caches after a server-side bug fix.
+    caches after a server-side bug fix. After a model-options fetch
+    exhausts its retries, refetches wait for a recovery cooldown (60s,
+    growing to 300s) until a fetch succeeds or the runner binding changes.
 
 When runner liveness is wired (and not skipped via
 `include_liveness=false`), the snapshot includes:
