@@ -12,6 +12,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping
@@ -114,6 +115,7 @@ class _Attempt:
     session_id: str | None = None
     events: set[str] = field(default_factory=set)
     attached: bool = False
+    phase: str = "launch_started"
 
     def record(
         self,
@@ -128,6 +130,8 @@ class _Attempt:
         if session_id is not None:
             self.session_id = session_id
         self.events.add(event)
+        if event not in {"launch_failed", "launch_cancelled", "launch_incomplete"}:
+            self.phase = event
         if event == "terminal_attach_started":
             self.attached = True
         attributes: dict[str, object] = {
@@ -165,6 +169,49 @@ class _Attempt:
 
 
 _attempt: ContextVar[_Attempt | None] = ContextVar("startup_attempt", default=None)
+
+
+def set_startup_phase(phase: str) -> None:
+    """Name the active startup operation without adding another milestone."""
+    attempt = _attempt.get()
+    if attempt is not None:
+        attempt.phase = phase
+
+
+def _http_failure_details(exc: BaseException) -> dict[str, object]:
+    """Describe an HTTP failure without emitting URLs, identifiers or content."""
+    import httpx
+
+    error = exc if isinstance(exc, httpx.HTTPError) else exc.__cause__
+    if not isinstance(error, httpx.HTTPError):
+        return {}
+    details: dict[str, object] = {"error_type": type(error).__name__}
+    try:
+        request = error.request
+    except RuntimeError:
+        return details
+    routes = (
+        "/v1/sessions",
+        "/v1/sessions/{id}",
+        "/v1/sessions/{id}/resources/terminals",
+        "/v1/sessions/{id}/resources/terminals/{id}",
+        "/v1/hosts/{id}",
+        "/v1/hosts/{id}/runners",
+        "/v1/runners/{id}/status",
+        "/v1/runners/{id}/token",
+    )
+    details["request_method"] = (
+        request.method
+        if request.method in {"GET", "POST", "PATCH", "PUT", "DELETE", "HEAD", "OPTIONS"}
+        else "other"
+    )
+    details["request_route"] = "other"
+    for route in routes:
+        pattern = re.escape(route).replace(r"\{id\}", r"[^/]+")
+        if re.search(pattern + "$", request.url.path):
+            details["request_route"] = route
+            break
+    return details
 
 
 def record_startup_event(
@@ -208,7 +255,10 @@ def native_startup_attempt(
         }
         if isinstance(exc, SystemExit) and exc.code in (None, 0):
             cancelled = True
-        attempt.record("launch_cancelled" if cancelled else "launch_failed")
+        details: dict[str, object] = {"phase": attempt.phase, "error_type": type(exc).__name__}
+        with contextlib.suppress(Exception):
+            details.update(_http_failure_details(exc))
+        attempt.record("launch_cancelled" if cancelled else "launch_failed", details=details)
         raise
     else:
         if not attempt.attached:

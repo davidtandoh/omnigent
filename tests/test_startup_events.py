@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from omnigent import _startup_events as startup
@@ -224,6 +225,51 @@ def test_runtime_failure_does_not_reclassify_startup(caplog: pytest.LogCaptureFi
         "terminal_attach_exited",
     ]
     assert records(caplog)[-1]["exit_code"] == 1
+
+
+@pytest.mark.parametrize(
+    ("path", "route"),
+    [
+        ("/prefix/v1/sessions/private-id", "/v1/sessions/{id}"),
+        ("/v1/hosts/private-id/runners", "/v1/hosts/{id}/runners"),
+        ("/v1/runners/private-token/token", "/v1/runners/{id}/token"),
+        ("/private-unknown-route", "other"),
+    ],
+)
+def test_http_failure_names_phase_and_request_without_private_content(
+    path: str, route: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    request = httpx.Request(
+        "POST",
+        f"https://example.test{path}?private-query=value",
+        headers={"Authorization": "Bearer private-bearer"},
+        content="private-body",
+    )
+    with pytest.raises(httpx.ReadTimeout):
+        with startup.native_startup_attempt(harness="codex-native"):
+            startup.record_startup_event("runner_requested")
+            raise httpx.ReadTimeout("private-error-text", request=request)
+
+    failure = records(caplog)[-1]
+    assert failure["phase"] == "runner_requested"
+    assert failure["error_type"] == "ReadTimeout"
+    assert failure["request_method"] == "POST"
+    assert failure["request_route"] == route
+    assert "private" not in json.dumps(failure)
+
+
+def test_http_failure_without_request_keeps_launch_exception(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    error = httpx.ReadTimeout("private-error-text")
+    with pytest.raises(httpx.ReadTimeout) as caught:
+        with startup.native_startup_attempt(harness="claude-native"):
+            raise error
+    assert caught.value is error
+    failure = records(caplog)[-1]
+    assert failure["phase"] == "launch_started"
+    assert failure["error_type"] == "ReadTimeout"
+    assert "request_route" not in failure
 
 
 def test_uploader_and_logger_failure_do_not_break_launch(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -26,7 +26,7 @@ import httpx
 import yaml
 
 from omnigent._runner_startup import RunnerStartupProgress, runner_startup_progress
-from omnigent._startup_events import record_startup_event
+from omnigent._startup_events import record_startup_event, set_startup_phase
 from omnigent._wrapper_labels import (
     CODEX_NATIVE_WRAPPER_VALUE as _WRAPPER_LABEL_VALUE,
 )
@@ -1019,6 +1019,7 @@ async def _prepare_codex_terminal_via_daemon(
             if session_bundle is None:
                 raise click.ClickException("Creating a Codex session requires a session bundle.")
             _update_startup_progress(startup_progress, "Creating Codex session...")
+            set_startup_phase("session_create_and_host_wait")
             session_id, _ = await asyncio.gather(
                 _create_codex_session(
                     client,
@@ -1030,6 +1031,7 @@ async def _prepare_codex_terminal_via_daemon(
             )
         else:
             _update_startup_progress(startup_progress, "Loading Codex session...")
+            set_startup_phase("session_lookup")
             payload = await _fetch_codex_session(client, session_id)
             record_startup_event("session_resolved", session_id=session_id)
             labels = payload.get("labels") if isinstance(payload, dict) else None
@@ -1040,6 +1042,7 @@ async def _prepare_codex_terminal_via_daemon(
                 raise click.ClickException(
                     f"Conversation {session_id!r} is not a codex-native session."
                 )
+            set_startup_phase("terminal_lookup")
             existing_terminal = await _find_running_codex_terminal(client, session_id)
             if existing_terminal is not None:
                 if launch_env:
@@ -1076,6 +1079,7 @@ async def _prepare_codex_terminal_via_daemon(
                 patch["model_override"] = model
             if patch:
                 _update_startup_progress(startup_progress, "Updating Codex session...")
+                set_startup_phase("session_update")
                 resp = await client.patch(
                     f"/v1/sessions/{url_component(session_id)}",
                     json=patch,
@@ -1087,9 +1091,11 @@ async def _prepare_codex_terminal_via_daemon(
                     )
 
         if not fresh_session:
+            set_startup_phase("host_online")
             await wait_for_host_online(client, host_id, timeout_s=_DAEMON_HOST_ONLINE_TIMEOUT_S)
         _update_startup_progress(startup_progress, "Starting runner...")
         record_startup_event("runner_requested", session_id=session_id)
+        set_startup_phase("runner_launch")
         runner_id = await launch_or_reuse_daemon_runner(
             client,
             host_id=host_id,
@@ -1099,15 +1105,18 @@ async def _prepare_codex_terminal_via_daemon(
             **({"native_env": launch_env} if launch_env else {}),
         )
         _update_startup_progress(startup_progress, "Waiting for runner...")
+        set_startup_phase("runner_online")
         await wait_for_runner_online(client, runner_id, timeout_s=_DAEMON_RUNNER_ONLINE_TIMEOUT_S)
         record_startup_event("runner_connected")
         # Must run AFTER wait_for_runner_online — unregistered runners
         # 400 on replace_runner_id. The daemon bind paths don't route
         # through replace_runner_id, so without this re-bind a stopped
         # session stays stopped.
+        set_startup_phase("session_binding")
         await _bind_session_runner(client, session_id, runner_id)
         record_startup_event("session_runner_bound")
         _update_startup_progress(startup_progress, "Starting Codex terminal...")
+        set_startup_phase("terminal_start")
         await _ensure_codex_terminal_on_runner(client, session_id)
         terminal = await _wait_for_codex_terminal_ready(
             client,
@@ -1162,6 +1171,8 @@ async def _wait_for_codex_terminal_ready(
     """
     Wait until the runner exposes the Codex terminal resource.
 
+    Retry transient transport errors until the existing readiness deadline.
+
     :param client: HTTP client pointed at the Omnigent server.
     :param session_id: Session id, e.g. ``"conv_abc123"``.
     :param timeout_s: Max seconds to wait, e.g. ``60.0``.
@@ -1171,14 +1182,20 @@ async def _wait_for_codex_terminal_ready(
     """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_s
+    last_error: httpx.TransportError | None = None
+    set_startup_phase("terminal_ready")
     while loop.time() < deadline:
-        terminal = await _find_running_codex_terminal(client, session_id)
-        if terminal is not None:
-            return terminal
+        try:
+            terminal = await _find_running_codex_terminal(client, session_id)
+        except httpx.TransportError as exc:
+            last_error = exc
+        else:
+            if terminal is not None:
+                return terminal
         await asyncio.sleep(0.2)
     raise click.ClickException(
         f"The runner did not create the Codex terminal for {session_id!r} within {timeout_s:.0f}s."
-    )
+    ) from last_error
 
 
 async def _prepare_codex_terminal(
