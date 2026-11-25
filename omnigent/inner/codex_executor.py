@@ -915,6 +915,37 @@ def _ignore_codex_skill_junctions(directory: str, names: list[str]) -> list[str]
     return junctions
 
 
+def _prune_stale_codex_skill_links(target_dir: Path, selected: dict[str, Path]) -> None:
+    """
+    Remove skill links a reused home no longer selects or that point elsewhere.
+
+    Persistent native homes are repopulated on every launch, so a skill removed
+    from its source, or shadowed by a higher-priority source, must not survive.
+    Real directories (Codex's own ``.system``, copied skills) are left alone.
+
+    :param target_dir: The ``$CODEX_HOME/skills`` directory being populated.
+    :param selected: Skill name to source directory from
+        :func:`select_codex_skill_dirs`.
+    """
+    try:
+        entries = list(target_dir.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if not (entry.is_symlink() or entry.is_junction()):
+            continue
+        source = selected.get(entry.name)
+        if source is not None and os.path.realpath(entry) == os.path.realpath(source):
+            continue
+        try:
+            if entry.is_junction():
+                entry.rmdir()
+            else:
+                entry.unlink()
+        except OSError as exc:
+            logger.warning("could not remove stale codex skill link %s (%s)", entry, exc)
+
+
 def _populate_codex_skills(
     target_dir: Path,
     skills_filter: str | list[str],
@@ -956,11 +987,12 @@ def _populate_codex_skills(
         the link's target, which no sandbox grant covers. Nested directory
         junctions are skipped rather than traversed.
     """
+    selected = select_codex_skill_dirs(skills_filter, sources)
+    _prune_stale_codex_skill_links(target_dir, selected)
     if skills_filter == "none":
         return
 
     target_dir.mkdir(parents=True, exist_ok=True)
-    selected = select_codex_skill_dirs(skills_filter, sources)
 
     for name, skill_dir in selected.items():
         link_path = target_dir / name
