@@ -915,6 +915,33 @@ def _ignore_codex_skill_junctions(directory: str, names: list[str]) -> list[str]
     return junctions
 
 
+def _prune_stale_codex_skill_links(target_dir: Path, selected: dict[str, Path]) -> None:
+    """
+    Prune links before :func:`_populate_codex_skills` repopulates a home.
+
+    :param target_dir: The ``$CODEX_HOME/skills`` directory being populated.
+    :param selected: Skill name to source directory from
+        :func:`select_codex_skill_dirs`.
+    """
+    try:
+        entries = list(target_dir.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if not (entry.is_symlink() or entry.is_junction()):
+            continue
+        source = selected.get(entry.name)
+        if source is not None and os.path.realpath(entry) == os.path.realpath(source):
+            continue
+        try:
+            if entry.is_junction():
+                entry.rmdir()
+            else:
+                entry.unlink()
+        except OSError as exc:
+            logger.warning("could not remove stale codex skill link %s (%s)", entry, exc)
+
+
 def _populate_codex_skills(
     target_dir: Path,
     skills_filter: str | list[str],
@@ -926,20 +953,22 @@ def _populate_codex_skills(
     Populate *target_dir* with symlinks to (or copies of) skill directories.
 
     Codex auto-discovers skills under ``$CODEX_HOME/skills/<name>/``.
-    Our executor already overrides ``CODEX_HOME`` to a per-conversation
-    temp directory (so the user's real ``~/.codex/`` is never touched),
-    which means by default Codex sees zero skills. This helper populates
-    the temp ``skills/`` subdir based on the agent spec's ``skills:``
-    field, sourcing skill directories from ``sources`` (typically the
-    user's ``~/.codex/skills/`` plus any ``<bundle>/skills/``). Skill
-    selection is delegated to :func:`select_codex_skill_dirs`.
+    The wrapped executor uses a per-conversation temporary home; the native
+    launch uses a persistent per-bridge home. This helper populates either
+    home's ``skills/`` subdirectory based on the agent spec's ``skills:``
+    field. Skill selection is delegated to :func:`select_codex_skill_dirs`;
+    :func:`codex_skill_sources` owns source discovery and precedence.
 
-    :param target_dir: ``<temp_codex_home>/skills/`` — the directory
+    Before population, remove existing symlinks and junctions that are no
+    longer selected or point to a different source. Preserve real directories,
+    including copied skills and Codex's own ``.system`` directory.
+
+    :param target_dir: ``<codex_home>/skills/`` — the directory
         Codex will scan. Created if it doesn't exist (unless
-        ``skills_filter == "none"``, in which case the directory is
-        intentionally left absent so Codex sees nothing).
-    :param skills_filter: ``"all"`` exposes every skill found in
-        *sources*; ``"none"`` exposes none; ``list[str]`` exposes only
+        ``skills_filter == "none"``). An existing directory remains when
+        the filter is ``"none"``; its skill links are pruned.
+    :param skills_filter: ``"all"`` selects every skill found in
+        *sources*; ``"none"`` selects none; ``list[str]`` selects only
         the named skills. Names not present in any source are silently
         skipped — matches the SDK semantics where a missing host skill
         produces no error, just no exposure.
@@ -956,11 +985,12 @@ def _populate_codex_skills(
         the link's target, which no sandbox grant covers. Nested directory
         junctions are skipped rather than traversed.
     """
+    selected = select_codex_skill_dirs(skills_filter, sources)
+    _prune_stale_codex_skill_links(target_dir, selected)
     if skills_filter == "none":
         return
 
     target_dir.mkdir(parents=True, exist_ok=True)
-    selected = select_codex_skill_dirs(skills_filter, sources)
 
     for name, skill_dir in selected.items():
         link_path = target_dir / name

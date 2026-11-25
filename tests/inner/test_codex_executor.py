@@ -6,6 +6,7 @@ import contextlib
 import errno
 import json
 import os
+import shutil
 import stat
 import sys
 import tempfile
@@ -4318,6 +4319,32 @@ def test_populate_codex_skills_from_bundle_sources_from_codex_home(tmp_path: Pat
     linked = codex_home / "skills" / "host-skill"
     assert linked.is_symlink() or linked.is_dir()
     assert (linked / "SKILL.md").is_file()
+
+
+def test_populate_codex_skills_from_bundle_resyncs_existing_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A relaunch links skills added to ``~/.agents/skills`` and drops removed ones."""
+    from omnigent.inner.codex_executor import populate_codex_skills_from_bundle
+
+    home = tmp_path / "home"
+    shared = home / ".agents" / "skills"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    _make_skill_dir(shared, "kept")
+    removed = _make_skill_dir(shared, "removed")
+    codex_home = tmp_path / "codex_home"
+    (codex_home / "skills" / ".system").mkdir(parents=True)
+
+    populate_codex_skills_from_bundle(codex_home, None, "all")
+    shutil.rmtree(removed)
+    _make_skill_dir(shared, "added")
+    populate_codex_skills_from_bundle(codex_home, None, "all")
+
+    assert sorted(p.name for p in (codex_home / "skills").iterdir()) == [
+        ".system",
+        "added",
+        "kept",
+    ]
 
 
 def test_populate_codex_skills_from_bundle_none_leaves_no_dir(tmp_path: Path) -> None:
