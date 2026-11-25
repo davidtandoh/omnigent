@@ -3024,7 +3024,7 @@ async def test_session_snapshot_cools_down_failed_model_options(
 
         assert (await snapshot()).model_options == []
         await finish_fetch()
-        initial_calls = 6 if failure in {"503", "empty"} else 1
+        initial_calls = 1 if failure == "malformed" else 6
         assert calls == initial_calls
         for _ in range(10):
             assert (await snapshot()).model_options == []
@@ -3066,6 +3066,53 @@ async def test_session_snapshot_cools_down_failed_model_options(
         routes._invalidate_runner_backed_snapshot_state(
             session_id, cancel_inflight=True, drop_model_options=True
         )
+
+
+@pytest.mark.asyncio
+async def test_model_options_timeout_recovers_within_readiness_ladder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from omnigent.server.routes._sessions import common, helpers, orchestration
+
+    session_id = "conv_catalog_timeout_recovers"
+    monkeypatch.setattr(_sessions_mod, "_MODEL_OPTIONS_RETRY_DELAYS_S", (0.0,))
+    monkeypatch.setattr(helpers, "time", SimpleNamespace(monotonic=lambda: 100.0))
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ReadTimeout("runner busy", request=request)
+        return httpx.Response(200, json={"models": [{"id": "ready-model"}]})
+
+    conv = Conversation(
+        id=session_id,
+        created_at=1,
+        updated_at=1,
+        root_conversation_id=session_id,
+        agent_id="ag_test",
+        labels={
+            _sessions_mod._CLAUDE_NATIVE_WRAPPER_LABEL_KEY: (
+                _sessions_mod._CODEX_NATIVE_WRAPPER_LABEL_VALUE
+            )
+        },
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://runner.invalid"
+    ) as client:
+        await orchestration._fetch_model_options(client, session_id, conv)
+        await common._model_options_inflight[session_id]
+        await asyncio.sleep(0)
+    assert calls == 2
+    assert [option["id"] for option in common._model_options_cache[session_id]] == [
+        "ready-model"
+    ]
+    assert common._model_options_recovery[session_id].failures == 0
+    assert common._model_options_recovery[session_id].next_eligible == 0.0
+    helpers._invalidate_runner_backed_snapshot_state(
+        session_id, cancel_inflight=True, drop_model_options=True
+    )
 
 
 @pytest.mark.asyncio

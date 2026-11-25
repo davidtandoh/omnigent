@@ -12851,6 +12851,9 @@ async def _load_model_options(
                     session_id,
                     extra={"session_id": session_id},
                 )
+                if attempt < len(delays):
+                    await asyncio.sleep(delays[attempt])
+                    continue
                 return
             # Invalidation or a rebind may have replaced this task while it awaited I/O.
             if _model_options_recovery.get(session_id) is not recovery:
