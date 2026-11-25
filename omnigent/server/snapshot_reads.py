@@ -11,7 +11,8 @@ from omnigent.db.workspace_cache import WorkspaceScopedCache
 from omnigent.llms.context_window import resolve_effective_context_window
 from omnigent.util.dedicated_executor import DedicatedExecutor
 
-_Key = tuple[int | None, str | None, str | None, str | None]
+_Binding = tuple[str | None, str | None, str | None]
+_Key = tuple[str, _Binding, int | None, str | None, str | None, str | None]
 _WINDOWS: WorkspaceScopedCache[_Key, int | None] = WorkspaceScopedCache(
     lambda: cachetools.TTLCache(maxsize=1024, ttl=60)
 )
@@ -25,23 +26,48 @@ _CATALOG = DedicatedExecutor(
 )
 
 
+def invalidate_snapshot_context_window(session_id: str) -> None:
+    """Detach old lookups so late results cannot repopulate this session's cache."""
+    for key in _WINDOWS:
+        if key[0] == session_id:
+            _WINDOWS.pop(key, None)
+    for key in _INFLIGHT:
+        if key[0] == session_id:
+            _INFLIGHT.pop(key, None)
+
+
 async def snapshot_context_window(
+    session_id: str,
     spec_context_window: int | None,
     model: str | None,
     *,
+    binding: _Binding,
     model_override: str | None = None,
+    use_cache: bool = True,
 ) -> int | None:
     """Coalesce catalog lookups and cache display windows for sixty seconds.
 
+    Mutation responses invalidate previous reads and resolve without caching.
     Explicit windows and model-less sessions need no catalog. Compaction keeps
     using the resolver directly; this cache belongs only to snapshot display.
     """
+    if not use_cache:
+        invalidate_snapshot_context_window(session_id)
     effective_model = model_override if model_override is not None else model
     if (spec_context_window is not None and model_override is None) or not effective_model:
         return resolve_effective_context_window(
             spec_context_window, model, model_override=model_override
         )
+    if not use_cache:
+        return await _CATALOG.run(
+            resolve_effective_context_window,
+            spec_context_window,
+            model,
+            model_override=model_override,
+        )
     key = (
+        session_id,
+        binding,
         spec_context_window,
         model,
         model_override,
@@ -61,7 +87,8 @@ async def snapshot_context_window(
                 model,
                 model_override=model_override,
             )
-            _WINDOWS[key] = window
+            if _INFLIGHT.get(key) is asyncio.current_task():
+                _WINDOWS[key] = window
             return window
 
         task = asyncio.create_task(load())

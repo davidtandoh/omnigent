@@ -320,7 +320,7 @@ from omnigent.server.schemas import (
     ToolOutputDeltaEvent,
 )
 from omnigent.server.session_metadata_logging import harness_attributes
-from omnigent.server.snapshot_reads import run_snapshot_read
+from omnigent.server.snapshot_reads import invalidate_snapshot_context_window, run_snapshot_read
 from omnigent.server.startup_inputs import ManagedStartupInputs, StartupInputContext
 from omnigent.spec.types import (
     AgentSpec,
@@ -5789,6 +5789,7 @@ def _invalidate_runner_backed_snapshot_state(
     # can change which models the session can be switched onto, so it must not
     # keep routing off the previous runner's list.
     invalidate_runner_catalog(session_id)
+    invalidate_snapshot_context_window(session_id)
     if drop_model_options:
         _model_options_cache.pop(session_id, None)
         _model_options_stale.discard(session_id)

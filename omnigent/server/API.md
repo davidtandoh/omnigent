@@ -795,8 +795,10 @@ Contract" below.
 Snapshot authorization and projection reads use a separate worker pool, so
 polling cannot fill the default worker queue used by runner registration and
 recovery. Context-window display metadata uses its own pool. Concurrent snapshots
-share one lookup per workspace and resolver input, cached for 60 seconds. Cold
-snapshots still await that lookup.
+share one lookup per workspace, session, binding, and resolver input, cached for
+60 seconds. Mutation responses invalidate that session's cache and resolve fresh
+metadata without populating the read cache. Runner refresh and disconnect also
+invalidate it. Cold snapshots still await that lookup.
 Declared windows, model overrides, and compaction resolution retain their existing
 precedence. Transcript, authorization, binding, and usage reads remain fresh.
 

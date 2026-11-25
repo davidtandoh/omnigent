@@ -15060,9 +15060,12 @@ async def _get_session_snapshot(
                         llm_model = None if harness_owns_model else resolved_spec.executor.model
 
                         context_window = await snapshot_context_window(
+                            session_id,
                             None if harness_owns_model else resolved_spec.executor.context_window,
                             llm_model,
+                            binding=(conv.agent_id, conv.runner_id, conv.host_id),
                             model_override=conv.model_override,
+                            use_cache=request is None or request.method == "GET",
                         )
         except Exception:  # noqa: BLE001
             pass
