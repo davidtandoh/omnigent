@@ -3105,9 +3105,7 @@ async def test_model_options_timeout_recovers_within_readiness_ladder(
         await common._model_options_inflight[session_id]
         await asyncio.sleep(0)
     assert calls == 2
-    assert [option["id"] for option in common._model_options_cache[session_id]] == [
-        "ready-model"
-    ]
+    assert [option["id"] for option in common._model_options_cache[session_id]] == ["ready-model"]
     assert common._model_options_recovery[session_id].failures == 0
     assert common._model_options_recovery[session_id].next_eligible == 0.0
     helpers._invalidate_runner_backed_snapshot_state(
