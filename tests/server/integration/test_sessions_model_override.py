@@ -1040,3 +1040,43 @@ async def test_bundled_child_create_survives_a_failed_notify_read(
     child = await client.get(f"/v1/sessions/{created['session_id']}")
     assert child.status_code == 200, child.text
     assert child.json()["parent_session_id"] == parent_id
+
+
+async def test_context_window_refreshes_after_override_and_reuses_unchanged_reads(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.llms import context_window as context_window_mod
+
+    override = "claude-opus-4-7"
+    windows = {override: 200_000}
+    lookups: list[str] = []
+
+    def lookup(model: str) -> int:
+        lookups.append(model)
+        return windows.get(model, 100_000)
+
+    monkeypatch.setattr(context_window_mod, "get_model_context_window", lookup)
+    agent = await create_test_agent(client, name="override-refresh-agent")
+    session = await _create_session(client, agent["id"])
+    path = f"/v1/sessions/{session['id']}"
+
+    changed = await client.patch(path, json={"model_override": override})
+    assert changed.status_code == 200
+    assert changed.json()["context_window"] == 200_000
+    assert (await client.get(path)).json()["context_window"] == 200_000
+
+    windows[override] = 400_000
+    cleared = await client.patch(path, json={"model_override": "default"})
+    assert cleared.status_code == 200
+    assert cleared.json()["context_window"] == 100_000
+    changed = await client.patch(path, json={"model_override": override})
+    assert changed.status_code == 200
+    assert changed.json()["context_window"] == 400_000
+    fresh = await client.get(path)
+    assert fresh.status_code == 200
+    assert fresh.json()["context_window"] == 400_000
+    lookup_count = len(lookups)
+    again = await client.get(path)
+    assert again.status_code == 200
+    assert again.json()["context_window"] == 400_000
+    assert len(lookups) == lookup_count

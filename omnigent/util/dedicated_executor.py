@@ -14,7 +14,7 @@ import functools
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from typing import ParamSpec, TypeVar
+from typing import Literal, ParamSpec, TypeVar
 
 from omnigent.util.thread_pool_watchdog import watch_thread_pool
 
@@ -27,9 +27,17 @@ class DedicatedExecutor:
 
     :param max_workers: Worker limit, e.g. ``4``.
     :param thread_name_prefix: Worker thread name prefix, e.g. ``"runner-slow-io"``.
+    :param process_role: Process role used in worker-pool watchdog reports.
     """
 
-    def __init__(self, *, max_workers: int, thread_name_prefix: str) -> None:
+    def __init__(
+        self,
+        *,
+        max_workers: int,
+        thread_name_prefix: str,
+        process_role: Literal["server", "runner"] = "runner",
+    ) -> None:
+        self._process_role = process_role
         self._max_workers = max_workers
         self._thread_name_prefix = thread_name_prefix
         self._executor: ThreadPoolExecutor | None = None
@@ -42,7 +50,11 @@ class DedicatedExecutor:
                     max_workers=self._max_workers,
                     thread_name_prefix=self._thread_name_prefix,
                 )
-                watch_thread_pool(self._executor, thread_name_prefix=self._thread_name_prefix)
+                watch_thread_pool(
+                    self._executor,
+                    thread_name_prefix=self._thread_name_prefix,
+                    process_role=self._process_role,
+                )
             return self._executor
 
     async def run(self, func: Callable[_P, _T], /, *args: _P.args, **kwargs: _P.kwargs) -> _T:

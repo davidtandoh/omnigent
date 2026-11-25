@@ -75,7 +75,6 @@ from omnigent.host.frames import (
 from omnigent.host.frames import (
     workspace_missing_message as _workspace_missing_message,
 )
-from omnigent.llms.context_window import resolve_effective_context_window
 from omnigent.mcp_selection import mcp_selection_revision, selected_mcp_spec
 from omnigent.models.model_metadata import concrete_reported_model
 from omnigent.native.failure_telemetry import (
@@ -428,6 +427,7 @@ from omnigent.server.session_mcp_selection import (
     session_mcp_services,
     worker_sandbox,
 )
+from omnigent.server.snapshot_reads import run_snapshot_read, snapshot_context_window
 from omnigent.server.startup_inputs import (
     STARTUP_LABEL,
     StartupInputContext,
@@ -14645,7 +14645,7 @@ async def _load_acp_model_options(
         loader_kwargs["agent"] = agent
     if agent_cache is not None:
         loader_kwargs["agent_cache"] = agent_cache
-    spec = await asyncio.to_thread(
+    spec = await run_snapshot_read(
         _load_agent_spec_for_session, conv, agent_store, **loader_kwargs
     )
     if spec is None:
@@ -14666,7 +14666,7 @@ async def _load_acp_model_options(
             for model_id in curated
         ]
 
-    options = await asyncio.to_thread(resolve_options)
+    options = await run_snapshot_read(resolve_options)
     _model_options_cache[session_id] = options
     _model_options_stale.discard(session_id)
     _publish_model_options(session_id)
@@ -14890,7 +14890,7 @@ async def _get_session_snapshot(
     """
     conv = conversation
     if conv is None:
-        conv = await asyncio.to_thread(conv_store.get_conversation, session_id)
+        conv = await run_snapshot_read(conv_store.get_conversation, session_id)
     if conv is None:
         raise _session_not_found()
     # Return the most recent committed items while preserving the
@@ -14900,7 +14900,7 @@ async def _get_session_snapshot(
     # snapshot directly.
     items: list[ConversationItem] = []
     if include_items:
-        items_page = await asyncio.to_thread(
+        items_page = await run_snapshot_read(
             conv_store.list_items,
             conversation_id=session_id,
             limit=100,
@@ -14923,7 +14923,7 @@ async def _get_session_snapshot(
             # Pass the authorized row: the router's own point read would be a
             # second read of the conversation this snapshot already holds, and on
             # a split-DB deployment that is one round trip per backend.
-            routed = await asyncio.to_thread(
+            routed = await run_snapshot_read(
                 runner_router.client_for_session_resources, session_id, conversation=conv
             )
             runner_client = routed.client
@@ -15011,7 +15011,7 @@ async def _get_session_snapshot(
     if agent_store is not None and agent_cache is not None and conv.agent_id is not None:
         try:
             if agent is None or agent.id != conv.agent_id:
-                agent = await asyncio.to_thread(agent_store.get, conv.agent_id)
+                agent = await run_snapshot_read(agent_store.get, conv.agent_id)
             if agent is not None:
                 agent_name = agent.name
                 if agent.bundle_location is not None:
@@ -15019,7 +15019,7 @@ async def _get_session_snapshot(
                     # the bundle from the artifact store and parses the spec —
                     # blocking IO that would otherwise stall the single-worker
                     # event loop on every page-load snapshot.
-                    loaded = await asyncio.to_thread(
+                    loaded = await run_snapshot_read(
                         agent_cache.load,
                         agent.id,
                         agent.bundle_location,
@@ -15059,12 +15059,13 @@ async def _get_session_snapshot(
                             agent_name = resolved_spec.name
                         llm_model = None if harness_owns_model else resolved_spec.executor.model
 
-                        # Offload: may fetch a provider catalog (blocking IO).
-                        context_window = await asyncio.to_thread(
-                            resolve_effective_context_window,
+                        context_window = await snapshot_context_window(
+                            session_id,
                             None if harness_owns_model else resolved_spec.executor.context_window,
                             llm_model,
+                            binding=(conv.agent_id, conv.runner_id, conv.host_id),
                             model_override=conv.model_override,
+                            use_cache=request is None or request.method == "GET",
                         )
         except Exception:  # noqa: BLE001
             pass
@@ -15084,7 +15085,7 @@ async def _get_session_snapshot(
     inference_error = None
     # Resolved once, off the event loop: the model picker and the response
     # both need it, and resolving reads the agent row and its bundle.
-    harness = await asyncio.to_thread(
+    harness = await run_snapshot_read(
         _resolve_harness, conv, agent_store=agent_store, agent_cache=agent_cache, agent=agent
     )
     if inference_configured and conv.inference_snapshot is not None:
@@ -15123,7 +15124,7 @@ async def _get_session_snapshot(
     runner_online: bool | None = None
     host_online: bool | None = None
     if liveness_lookup is not None:
-        liveness = await asyncio.to_thread(liveness_lookup, [session_id])
+        liveness = await run_snapshot_read(liveness_lookup, [session_id])
         result = liveness.get(session_id)
         if result is not None:
             runner_online = result.runner_online
@@ -15131,7 +15132,7 @@ async def _get_session_snapshot(
     # Display costs include descendants. Empty usage marks a skipped aggregate;
     # None would fall back to the parent's own spend and under-report it.
     subtree_usage = (
-        await asyncio.to_thread(
+        await run_snapshot_read(
             load_session_usage,
             conv.id,
             conv_store,
@@ -15148,7 +15149,7 @@ async def _get_session_snapshot(
     # host-bound sessions.
     host_resumable = False
     if host_store is not None and sandbox_config is not None and conv.host_id is not None:
-        host_for_resume = await asyncio.to_thread(host_store.get_host, conv.host_id)
+        host_for_resume = await run_snapshot_read(host_store.get_host, conv.host_id)
         if host_for_resume is not None:
             host_resumable = host_resume_supported(host_for_resume, sandbox_config)
     # A claude-native turn waiting on its background agent keeps the collapsed
@@ -15166,7 +15167,7 @@ async def _get_session_snapshot(
         status,
         permission_level,
         account=(
-            await asyncio.to_thread(
+            await run_snapshot_read(
                 session_account_for_viewer, viewer_id, conv, permission_store, conv_store
             )
             if account is _ACCOUNT_UNREAD
@@ -15184,7 +15185,7 @@ async def _get_session_snapshot(
         runner_online=runner_online,
         host_online=host_online,
         host_resumable=host_resumable,
-        pending_elicitation_events=await asyncio.to_thread(
+        pending_elicitation_events=await run_snapshot_read(
             _pending_elicitation_snapshot_for_session,
             conv_store,
             conv,
@@ -15199,7 +15200,7 @@ async def _get_session_snapshot(
     if request is not None:
         from omnigent.server.session_families import project_families
 
-        _, families = await asyncio.to_thread(
+        _, families = await run_snapshot_read(
             project_families,
             conv_store,
             getattr(request.app.state, "permission_store", None),
@@ -15223,7 +15224,7 @@ async def _get_session_snapshot(
         and is_side_chat_child(conv.labels)
         and conv.parent_conversation_id is not None
     ):
-        parent = await asyncio.to_thread(conv_store.get_conversation, conv.parent_conversation_id)
+        parent = await run_snapshot_read(conv_store.get_conversation, conv.parent_conversation_id)
         supported = _codex_side_chat_resume_supported(
             parent,
             getattr(request.app.state, "runner_router", None) if request else None,

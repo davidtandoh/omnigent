@@ -860,3 +860,63 @@ async def test_root_recovery_failure_is_quiet_only_after_tunnel_replacement(
             assert transport_warnings
         else:
             assert errors
+
+
+@pytest.mark.parametrize("blocked_read", ["catalog", "items"])
+async def test_snapshot_polling_does_not_delay_runner_recovery(
+    app: FastAPI, agent: Agent, monkeypatch: pytest.MonkeyPatch, blocked_read: str
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    from omnigent.llms import context_window
+
+    store = app.state.runner_router._conversation_store
+    polled = store.create_conversation(agent_id=agent.id, model_override="catalog-poll-test")
+    _create_session(app, agent.id)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_catalog(model: str) -> int:
+        entered.set()
+        assert release.wait(budget(10)), "catalog was not released"
+        return 128_000
+
+    if blocked_read == "catalog":
+        monkeypatch.setattr(context_window, "get_model_context_window", blocked_catalog)
+    else:
+        list_items = store.list_items
+
+        def blocked_items(*args: Any, **kwargs: Any) -> Any:
+            entered.set()
+            assert release.wait(budget(10)), "snapshot items were not released"
+            return list_items(*args, **kwargs)
+
+        monkeypatch.setattr(store, "list_items", blocked_items)
+    loop = asyncio.get_running_loop()
+    previous_executor = loop._default_executor
+    executor = ThreadPoolExecutor(max_workers=1)
+    loop.set_default_executor(executor)
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://server")
+    snapshot = asyncio.create_task(client.get(f"/v1/sessions/{polled.id}"))
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(201, json={})
+
+    try:
+        async with asyncio.timeout(budget(2)):
+            while not entered.is_set():
+                await asyncio.sleep(0)
+        async with _recover(app, monkeypatch, respond) as (_, finished):
+            await asyncio.wait_for(finished.wait(), budget(1))
+            assert not snapshot.done(), (
+                "recovery must finish while the snapshot read is still blocked"
+            )
+    finally:
+        release.set()
+        try:
+            result = await snapshot
+            result.raise_for_status()
+        finally:
+            await client.aclose()
+            loop._default_executor = previous_executor
+            executor.shutdown(wait=True)

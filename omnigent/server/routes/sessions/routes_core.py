@@ -287,6 +287,7 @@ from omnigent.server.session_orchestration import (
     require_named_source_private,
     require_orchestration_source,
 )
+from omnigent.server.snapshot_reads import run_snapshot_read
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.comment_store import CommentStore
@@ -2485,7 +2486,7 @@ def register_core_routes(
                 )
                 return access, conv, agent, _side_chat_allowed_sync(user_id, conv), account
 
-        access, conv, agent, side_chat_ok, account = await asyncio.to_thread(_read_inputs)
+        access, conv, agent, side_chat_ok, account = await run_snapshot_read(_read_inputs)
         snapshot = await _get_session_snapshot(
             conversation_store,
             session_id,
