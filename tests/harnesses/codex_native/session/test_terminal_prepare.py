@@ -487,15 +487,25 @@ def test_run_with_local_server_threads_raw_instructions_to_prepare_terminal_resu
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("ensure_status", "read_timeouts", "startup_seconds"),
-    [(200, 0, 0.0), (503, 0, 0.0), (200, 1, 0.0), (200, 0, 55.0), (200, 0, 59.9), (503, 0, 95.0)],
+    ("ensure_status", "read_timeouts", "startup_attempt_seconds"),
+    [
+        (200, 0, (0.0,)),
+        (503, 0, (0.0,)),
+        (200, 1, (0.0,)),
+        (200, 0, (55.0,)),
+        (200, 0, (59.9,)),
+        pytest.param(200, 0, (60.0, 40.0), id="silent-start-replacement-ready"),
+        pytest.param(503, 0, (60.0, 60.0), id="silent-start-replacement-failed"),
+        pytest.param(200, 0, (59.9, 60.0, 59.9), id="fallback-replacement-ready"),
+        pytest.param(503, 0, (59.9, 60.0, 60.0), id="fallback-replacement-failed"),
+    ],
 )
 async def test_prepare_codex_terminal_via_daemon_creates_runner_and_ensures_terminal(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     ensure_status: int,
     read_timeouts: int,
-    startup_seconds: float,
+    startup_attempt_seconds: tuple[float, ...],
 ) -> None:
     """
     Daemon preparation owns session create, runner launch, and terminal ensure.
@@ -549,7 +559,7 @@ async def test_prepare_codex_terminal_via_daemon_creates_runner_and_ensures_term
         if request.method == "POST" and path.endswith("/resources/terminals"):
             # MockTransport does not enforce HTTPX deadlines. Model elapsed runner
             # readiness plus setup/transport against the actual request budget.
-            response_seconds = min(startup_seconds, 60.0) + 8.0
+            response_seconds = sum(startup_attempt_seconds) + 8.0
             if response_seconds > request.extensions["timeout"]["read"]:
                 raise httpx.ReadTimeout("terminal ensure exceeded client budget", request=request)
             if ensure_status >= 400:

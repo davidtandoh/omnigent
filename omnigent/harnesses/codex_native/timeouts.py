@@ -4,11 +4,18 @@
 # Match the native terminal's startup allowance; an early exit fails at once.
 APP_SERVER_READY_TIMEOUT_SECONDS = 60.0
 
-# Allow runner setup, terminal creation, and the server round trip in addition
-# to one full app-server readiness window. This does not add an ensure retry.
+APP_SERVER_INITIAL_READY_WINDOWS = 1
+APP_SERVER_EARLY_EXIT_FALLBACK_READY_WINDOWS = 1
+APP_SERVER_SILENT_START_RESPAWN_READY_WINDOWS = 1
 TERMINAL_ENSURE_SETUP_TRANSPORT_MARGIN_SECONDS = 30.0
 TERMINAL_ENSURE_TIMEOUT_SECONDS = (
-    APP_SERVER_READY_TIMEOUT_SECONDS + TERMINAL_ENSURE_SETUP_TRANSPORT_MARGIN_SECONDS
+    APP_SERVER_READY_TIMEOUT_SECONDS
+    * (
+        APP_SERVER_INITIAL_READY_WINDOWS
+        + APP_SERVER_EARLY_EXIT_FALLBACK_READY_WINDOWS
+        + APP_SERVER_SILENT_START_RESPAWN_READY_WINDOWS
+    )
+    + TERMINAL_ENSURE_SETUP_TRANSPORT_MARGIN_SECONDS
 )
 
 # Thread discovery starts after terminal creation, including cold-resume repair.
