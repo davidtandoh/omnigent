@@ -486,12 +486,16 @@ def test_run_with_local_server_threads_raw_instructions_to_prepare_terminal_resu
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("ensure_status", "read_timeouts"), [(200, 0), (503, 0), (200, 1)])
+@pytest.mark.parametrize(
+    ("ensure_status", "read_timeouts", "startup_seconds"),
+    [(200, 0, 0.0), (503, 0, 0.0), (200, 1, 0.0), (200, 0, 55.0), (200, 0, 59.9), (503, 0, 95.0)],
+)
 async def test_prepare_codex_terminal_via_daemon_creates_runner_and_ensures_terminal(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     ensure_status: int,
     read_timeouts: int,
+    startup_seconds: float,
 ) -> None:
     """
     Daemon preparation owns session create, runner launch, and terminal ensure.
@@ -543,6 +547,21 @@ async def test_prepare_codex_terminal_via_daemon_creates_runner_and_ensures_term
         if request.method == "GET" and path == "/v1/runners/runner_new/status":
             return httpx.Response(200, json={"online": True})
         if request.method == "POST" and path.endswith("/resources/terminals"):
+            # MockTransport does not enforce HTTPX deadlines. Model elapsed runner
+            # readiness plus setup/transport against the actual request budget.
+            response_seconds = min(startup_seconds, 60.0) + 8.0
+            if response_seconds > request.extensions["timeout"]["read"]:
+                raise httpx.ReadTimeout("terminal ensure exceeded client budget", request=request)
+            if ensure_status >= 400:
+                return httpx.Response(
+                    ensure_status,
+                    json={
+                        "error": {
+                            "code": "internal_error",
+                            "message": "Codex app-server readiness expired",
+                        }
+                    },
+                )
             return httpx.Response(ensure_status, json={"id": "terminal_codex_main"})
         if request.method == "GET" and path.endswith("/resources/terminals/terminal_codex_main"):
             terminal_reads += 1
@@ -579,7 +598,7 @@ async def test_prepare_codex_terminal_via_daemon_creates_runner_and_ensures_term
     expected_error = (
         pytest.raises(click.ClickException) if ensure_status != 200 else contextlib.nullcontext()
     )
-    with expected_error:
+    with expected_error as failure:
         with startup.native_startup_attempt(harness="codex-native"):
             prepared = await codex_native._prepare_codex_terminal_via_daemon(
                 base_url="https://example.com",
@@ -592,7 +611,17 @@ async def test_prepare_codex_terminal_via_daemon_creates_runner_and_ensures_term
                 workspace="/repo",
                 startup_progress=RunnerStartupProgress(update=progress_updates.append),
             )
+    assert sum(method == "POST" and path == "/v1/sessions" for method, path, _ in calls) == 1
+    assert (
+        sum(
+            method == "POST" and path.endswith("/resources/terminals") for method, path, _ in calls
+        )
+        == 1
+    )
     if ensure_status != 200:
+        assert failure is not None
+        assert "Codex app-server readiness expired" in str(failure.value)
+        assert "503" in str(failure.value)
         events = [r.attributes["event"] for r in caplog.records if r.name == "omnigent.startup"]
         assert events[-1] == "launch_failed"
         assert "terminal_available" not in events

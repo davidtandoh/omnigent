@@ -78,6 +78,7 @@ from omnigent.harnesses.codex_native.forwarder import (
     supervise_forwarder,
 )
 from omnigent.harnesses.codex_native.state import read_launch_state, write_launch_state
+from omnigent.harnesses.codex_native.timeouts import TERMINAL_ENSURE_TIMEOUT_SECONDS
 from omnigent.host.daemon_launch import (
     error_text,
     launch_or_reuse_daemon_runner,
@@ -1154,7 +1155,7 @@ async def _ensure_codex_terminal_on_runner(
     resp = await client.post(
         f"/v1/sessions/{url_component(session_id)}/resources/terminals",
         json={"terminal": "codex", "session_key": "main", "ensure_native_terminal": True},
-        timeout=60.0,
+        timeout=TERMINAL_ENSURE_TIMEOUT_SECONDS,
     )
     if resp.status_code >= 400:
         raise click.ClickException(
