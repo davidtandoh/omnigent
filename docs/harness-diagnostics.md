@@ -323,8 +323,13 @@ When the readiness budget expires while the spawned process is still alive and
 has never accepted a probe, `start()` instead emits
 `event_name=codex_app_server_silent_start_respawn` at WARNING level, terminates
 that process, and spawns one replacement on the same transport with a fresh
-readiness budget, so recovery can take two full budgets plus teardown rather
-than ending after the first. The row carries the same snapshot attributes for
+readiness budget. An early-exit configuration fallback can precede this
+recovery, so startup can consume three readiness windows plus teardown.
+The CLI's terminal ensure request allows these bounded recovery windows plus
+a setup and transport margin, as defined in the
+[Codex timeout contract](../omnigent/harnesses/codex_native/timeouts.py).
+The CLI sends one terminal ensure request; it does not retry the POST.
+The row carries the same snapshot attributes for
 the silent process plus `recent_stderr_bytes`, the size of its retained stderr
 tail, and `last_error_type`, the class of the last failed readiness probe (for
 example `ConnectionRefusedError`); the stderr text itself appears only in the
