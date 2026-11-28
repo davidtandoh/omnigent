@@ -224,6 +224,7 @@ from omnigent.server.routes._sessions.common import (  # noqa: F401
     _MAX_TERMINAL_LAUNCH_ARG_LEN,
     _MAX_TERMINAL_LAUNCH_ARGS,
     _MODEL_OPTIONS_ENDPOINT_BY_WRAPPER,
+    _MODEL_OPTIONS_RECOVERY_DELAYS_S,
     _MODEL_TOKEN_KEYS,
     _NATIVE_POLICY_NOT_ENFORCED_CODE,
     _NATIVE_TERMINAL_ENSURE_FAILED_CODE,
@@ -246,7 +247,9 @@ from omnigent.server.routes._sessions.common import (  # noqa: F401
     _managed_launch_tasks,
     _model_options_cache,
     _model_options_inflight,
+    _model_options_recovery,
     _model_options_stale,
+    _ModelOptionsRecovery,
     _native_ask_gate_locks,
     _pending_policy_ask_writes,
     _pushed_model_options_cache,
@@ -5796,6 +5799,7 @@ def _invalidate_runner_backed_snapshot_state(
     else:
         _model_options_stale.add(session_id)
     if cancel_inflight:
+        _model_options_recovery.pop(session_id, None)
         codex_inflight = _model_options_inflight.pop(session_id, None)
         if codex_inflight is not None:
             codex_inflight.cancel()
@@ -12774,73 +12778,127 @@ def _model_options_from_wire(raw_models: Any) -> list[dict[str, Any]]:
     return options
 
 
+def _start_model_options_load(
+    runner_client: httpx.AsyncClient,
+    session_id: str,
+    endpoint: str,
+    *,
+    prefetch: bool = False,
+) -> asyncio.Task[None] | None:
+    """Share one eligible catalog load across snapshot, routing and prefetch."""
+    recovery = _model_options_recovery.get(session_id)
+    if recovery is not None and (
+        recovery.runner_client is not runner_client or recovery.endpoint != endpoint
+    ):
+        _invalidate_runner_backed_snapshot_state(
+            session_id, cancel_inflight=True, drop_model_options=False
+        )
+        recovery = None
+    if recovery is None:
+        recovery = _ModelOptionsRecovery(runner_client, endpoint)
+        _model_options_recovery[session_id] = recovery
+    if session_id in _model_options_cache and session_id not in _model_options_stale:
+        return None
+    inflight = _model_options_inflight.get(session_id)
+    if inflight is not None:
+        return inflight
+    if time.monotonic() < recovery.next_eligible:
+        return None
+    # Unified route first; the harness-named aliases are removed in 0.11.0.
+    load = _load_model_options(
+        runner_client,
+        session_id,
+        f"/v1/sessions/{session_id}/model-options",
+        fallback_path=f"/v1/sessions/{session_id}/{endpoint}",
+        recovery=recovery,
+    )
+    task = asyncio.create_task(_run_catalog_prefetch(load, session_id) if prefetch else load)
+    _model_options_inflight[session_id] = task
+
+    def clear_inflight(completed: asyncio.Task[None]) -> None:
+        if completed.cancelled():
+            load.close()
+        if _model_options_inflight.get(session_id) is completed:
+            _model_options_inflight.pop(session_id, None)
+            if completed.cancelled():
+                _model_options_recovery.pop(session_id, None)
+
+    task.add_done_callback(clear_inflight)
+    return task
+
+
 async def _load_model_options(
     runner_client: httpx.AsyncClient,
     session_id: str,
     path: str,
     fallback_path: str | None = None,
+    *,
+    recovery: _ModelOptionsRecovery,
 ) -> None:
-    """
-    Background single-flight fetch of a session's native model catalog.
-
-    :param runner_client: HTTP client pointed at the bound runner.
-    :param session_id: Session/conversation identifier, e.g. ``"conv_abc"``.
-    :param path: Runner route to query — the unified
-        ``"/v1/sessions/conv_abc/model-options"``.
-    :param fallback_path: Legacy harness-named route to fall back to when
-        *path* 404s (an older runner without the unified route), e.g.
-        ``"/v1/sessions/conv_abc/cursor-model-options"``. ``None`` disables
-        the fallback.
-    """
-    # Read the retry schedule off the facade so tests patching
-    # ``sessions._MODEL_OPTIONS_RETRY_DELAYS_S`` reach this impl.
+    """Load a catalog, retaining failed-batch eligibility for this binding."""
     import omnigent.server.routes.sessions as _facade
 
-    delays = _facade._MODEL_OPTIONS_RETRY_DELAYS_S
-    for attempt in range(len(delays) + 1):
-        try:
-            resp = await runner_client.get(path, timeout=5.0)
-        except (httpx.HTTPError, ConnectionError):
-            _logger.debug(
-                "Runner model-options query failed for %s",
-                session_id,
-                extra={"session_id": session_id},
-            )
+    delays = _facade._MODEL_OPTIONS_RETRY_DELAYS_S if not recovery.failures else ()
+    succeeded = False
+    try:
+        for attempt in range(len(delays) + 1):
+            try:
+                resp = await runner_client.get(path, timeout=5.0)
+                if resp.status_code == 404 and fallback_path and path != fallback_path:
+                    path = fallback_path
+                    resp = await runner_client.get(path, timeout=5.0)
+            except (httpx.HTTPError, ConnectionError):
+                _logger.debug(
+                    "Runner model-options query failed for %s",
+                    session_id,
+                    extra={"session_id": session_id},
+                )
+                if attempt < len(delays):
+                    await asyncio.sleep(delays[attempt])
+                    continue
+                return
+            # Invalidation or a rebind may have replaced this task while it awaited I/O.
+            if _model_options_recovery.get(session_id) is not recovery:
+                return
+            if resp.status_code != 200:
+                if resp.status_code == 503 and attempt < len(delays):
+                    await asyncio.sleep(delays[attempt])
+                    continue
+                return
+            try:
+                payload = resp.json()
+                if not isinstance(payload, dict):
+                    raise ValueError("Expected a model-options object")
+                options = _model_options_from_wire(payload.get("models", []))
+            except (ValueError, KeyError, TypeError, ValidationError):
+                _logger.debug(
+                    "Runner model-options payload malformed for %s",
+                    session_id,
+                    extra={"session_id": session_id},
+                )
+                return
+            if not options:
+                if attempt < len(delays):
+                    await asyncio.sleep(delays[attempt])
+                    continue
+                return
+            _model_options_cache[session_id] = options
+            _model_options_stale.discard(session_id)
+            recovery.failures = 0
+            recovery.next_eligible = 0.0
+            succeeded = True
+            _publish_model_options(session_id)
             return
-        if resp.status_code != 200:
-            # An older runner has no unified route; drop to the harness-named
-            # one without consuming a retry.
-            if resp.status_code == 404 and fallback_path and path != fallback_path:
-                path = fallback_path
-                continue
-            # 503 means the native backend (Codex app-server bridge / cursor
-            # login) is still booting. Keep the background single-flight alive
-            # so the web picker fills without a second manual refresh.
-            if resp.status_code == 503 and attempt < len(delays):
-                await asyncio.sleep(delays[attempt])
-                continue
-            return
-        try:
-            options = _model_options_from_wire(resp.json().get("models", []))
-        except (ValueError, KeyError, TypeError, ValidationError):
-            _logger.debug(
-                "Runner model-options payload malformed for %s",
-                session_id,
-                extra={"session_id": session_id},
-            )
-            return
-        if not options:
-            # Older runners returned 200 + [] for the same not-ready window.
-            # Do not cache that empty catalog; retry, then leave the cache
-            # cold so a later snapshot can try again.
-            if attempt < len(delays):
-                await asyncio.sleep(delays[attempt])
-                continue
-            return
-        _model_options_cache[session_id] = options
-        _model_options_stale.discard(session_id)
-        _publish_model_options(session_id)
-        return
+    except asyncio.CancelledError:
+        if _model_options_recovery.get(session_id) is recovery:
+            _model_options_recovery.pop(session_id, None)
+        raise
+    finally:
+        if not succeeded and _model_options_recovery.get(session_id) is recovery:
+            recovery.failures = min(recovery.failures + 1, len(_MODEL_OPTIONS_RECOVERY_DELAYS_S))
+            delay = _MODEL_OPTIONS_RECOVERY_DELAYS_S[recovery.failures - 1]
+            jitter = delay * (secrets.randbelow(1000) + 1) / 10000
+            recovery.next_eligible = time.monotonic() + delay + jitter
 
 
 #: How many sessions may warm their catalogs at once. A tunnel flap reconnects
@@ -12948,22 +13006,8 @@ def prefetch_session_routing_catalogs(
     endpoint = _MODEL_OPTIONS_ENDPOINT_BY_WRAPPER.get(
         conv.labels.get(_CLAUDE_NATIVE_WRAPPER_LABEL_KEY) or ""
     )
-    if endpoint is not None and session_id not in _model_options_inflight:
-        options_task = asyncio.create_task(
-            _run_catalog_prefetch(
-                _load_model_options(
-                    runner_client,
-                    session_id,
-                    f"/v1/sessions/{session_id}/model-options",
-                    fallback_path=f"/v1/sessions/{session_id}/{endpoint}",
-                ),
-                session_id,
-            )
-        )
-        _model_options_inflight[session_id] = options_task
-        options_task.add_done_callback(
-            lambda _task, sid=session_id: _model_options_inflight.pop(sid, None)
-        )
+    if endpoint is not None:
+        _start_model_options_load(runner_client, session_id, endpoint, prefetch=True)
     _catalog_prefetch_tasks.add(
         task := asyncio.create_task(
             _run_catalog_prefetch(prefetch_runner_catalog(session_id, runner_client), session_id)

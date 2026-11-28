@@ -2115,6 +2115,80 @@ async def test_failing_prefetch_retrieves_its_own_exception(
         await runner_client.aclose()
 
 
+@pytest.mark.parametrize("first_entry", ["snapshot", "prefetch", "routing"])
+async def test_catalog_cooldown_is_shared_by_all_readers(
+    monkeypatch: pytest.MonkeyPatch, first_entry: str
+) -> None:
+    from omnigent.server.routes import sessions as routes
+    from omnigent.server.routes._sessions import common, helpers, orchestration
+
+    session_id = "conv_cooldown_" + first_entry
+    conv = _native_conv(session_id, routing=True)
+    stale = [{"id": "opus", "model": "databricks-claude-opus-5"}]
+    common._model_options_cache[session_id] = stale
+    common._model_options_stale.add(session_id)
+    now = 100.0
+    monkeypatch.setattr(helpers, "time", SimpleNamespace(monotonic=lambda: now))
+    monkeypatch.setattr(helpers.secrets, "randbelow", lambda limit: 0)
+    monkeypatch.setattr(routes, "_MODEL_OPTIONS_RETRY_DELAYS_S", (0.0,) * 5)
+    monkeypatch.setattr("omnigent.server.smart_routing.prefetch_runner_catalog", AsyncMock())
+    calls = 0
+    probing = asyncio.Event()
+    release = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls > 6:
+            probing.set()
+            await release.wait()
+        return httpx.Response(503)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://runner.invalid"
+    ) as client:
+
+        async def trigger(entry: str) -> None:
+            if entry == "snapshot":
+                assert await orchestration._fetch_model_options(client, session_id, conv) == stale
+            elif entry == "prefetch":
+                helpers.prefetch_session_routing_catalogs(session_id, conv, client)
+            else:
+                assert await orchestration._native_turn_catalog(session_id, conv, client) == [
+                    "databricks-claude-opus-5"
+                ]
+
+        await trigger(first_entry)
+        initial = common._model_options_inflight.get(session_id)
+        if initial is not None:
+            await initial
+        await asyncio.sleep(0)
+        assert calls == 6
+        for entry in ("snapshot", "prefetch", "routing"):
+            await trigger(entry)
+        await asyncio.sleep(0)
+        assert calls == 6
+        # Minimum jitter is positive; reads either side share one recovery probe.
+        now += 60.005
+        await trigger("snapshot")
+        assert calls == 6
+        now = 160.007
+        readers = asyncio.gather(
+            *(trigger(entry) for entry in ("prefetch", "snapshot", "routing") * 3)
+        )
+        await asyncio.wait_for(probing.wait(), timeout=1.0)
+        assert calls == 7
+        release.set()
+        await readers
+        await asyncio.sleep(0)
+        assert calls == 7
+        assert common._model_options_cache[session_id] == stale
+        assert session_id in common._model_options_stale
+        helpers._invalidate_runner_backed_snapshot_state(
+            session_id, cancel_inflight=True, drop_model_options=True
+        )
+
+
 async def test_turn_catalog_keeps_a_stale_catalog_when_the_refetch_fails() -> None:
     """A stale vocabulary still bounds the turn when the runner cannot answer."""
     from omnigent.server.routes._sessions.orchestration import (

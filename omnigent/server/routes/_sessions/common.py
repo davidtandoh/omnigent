@@ -767,6 +767,23 @@ _model_options_stale: WorkspaceScopedSet[str] = WorkspaceScopedSet()
 _MODEL_OPTIONS_RETRY_DELAYS_S = (0.25, 0.5, 1.0, 2.0, 2.0)
 
 
+@dataclass
+class _ModelOptionsRecovery:
+    """Catalog binding and failed-batch eligibility, using monotonic time."""
+
+    runner_client: httpx.AsyncClient
+    endpoint: str
+    failures: int = 0
+    next_eligible: float = 0.0
+
+
+_model_options_recovery: WorkspaceScopedCache[str, _ModelOptionsRecovery] = WorkspaceScopedCache()
+
+
+# Recovery uses one probe per window, with 0.01–10% positive jitter (330s maximum).
+_MODEL_OPTIONS_RECOVERY_DELAYS_S = (60.0, 120.0, 240.0, 300.0)
+
+
 # Strong references to fire-and-forget catalog prefetches, so a task cannot be
 # garbage-collected mid-flight. Entries remove themselves when they finish.
 # custom-lint: disable-next=workspace-scoped-cache -- set of Task objects

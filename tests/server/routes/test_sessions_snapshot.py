@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 from sqlalchemy.exc import StatementError
 
@@ -2961,6 +2962,298 @@ async def test_session_snapshot_retries_503_model_options(
     )
     assert [m.id for m in snapshot.model_options] == ["gpt-5.4"]
     assert snapshot.model_options[0].defaultReasoningEffort == "medium"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["503", "transport", "empty", "malformed"])
+async def test_session_snapshot_cools_down_failed_model_options(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    from omnigent.server.routes import sessions as routes
+    from omnigent.server.routes._sessions import helpers
+
+    session_id = "conv_catalog_cooldown_" + failure
+    now = 100.0
+    monkeypatch.setattr(helpers, "time", SimpleNamespace(monotonic=lambda: now))
+    monkeypatch.setattr(helpers.secrets, "randbelow", lambda limit: limit - 1)
+    monkeypatch.setattr(routes, "_MODEL_OPTIONS_RETRY_DELAYS_S", (0.0,) * 5)
+    calls = 0
+    recovered = False
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if recovered:
+            return httpx.Response(200, json={"models": [{"id": "ready-model"}]})
+        if failure == "transport":
+            raise httpx.ConnectError("unavailable", request=request)
+        if failure == "malformed":
+            return httpx.Response(200, content=b"invalid json")
+        if failure == "empty":
+            return httpx.Response(200, json={"models": []})
+        return httpx.Response(503)
+
+    conv = Conversation(
+        id=session_id,
+        created_at=1,
+        updated_at=1,
+        root_conversation_id=session_id,
+        agent_id="ag_test",
+        labels={routes._CLAUDE_NATIVE_WRAPPER_LABEL_KEY: routes._CODEX_NATIVE_WRAPPER_LABEL_VALUE},
+    )
+    store = _ConversationStore([], conversations={session_id: conv})
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://runner.invalid"
+    ) as client:
+        monkeypatch.setattr("omnigent.runtime.get_runner_client", lambda: client)
+        monkeypatch.setattr("omnigent.runtime.get_runner_router", lambda: None)
+
+        async def snapshot(*, refresh: bool = False) -> SessionResponse:
+            return await _get_session_snapshot(
+                store,
+                session_id,
+                include_live_status=False,
+                refresh_state=refresh,
+            )  # type: ignore[arg-type]
+
+        async def finish_fetch() -> None:
+            task = routes._model_options_inflight.get(session_id)
+            if task is not None:
+                await task
+            await asyncio.sleep(0)
+
+        assert (await snapshot()).model_options == []
+        await finish_fetch()
+        initial_calls = 1 if failure == "malformed" else 6
+        assert calls == initial_calls
+        for _ in range(10):
+            assert (await snapshot()).model_options == []
+            await finish_fetch()
+        assert calls == initial_calls
+        # A page refresh must not reset failed-batch eligibility.
+        await snapshot(refresh=True)
+        await finish_fetch()
+        assert calls == initial_calls
+
+        for delay in (66.0, 132.0, 264.0, 330.0, 330.0):
+            now += delay - 0.001
+            await snapshot()
+            await finish_fetch()
+            assert calls == initial_calls
+            now += 0.001
+            await asyncio.gather(*(snapshot() for _ in range(10)))
+            await finish_fetch()
+            initial_calls += 1
+            assert calls == initial_calls
+
+        recovered = True
+        now += 330.0
+        await snapshot()
+        await finish_fetch()
+        assert [option.id for option in (await snapshot()).model_options] == ["ready-model"]
+        assert calls == initial_calls + 1
+        from omnigent.server.routes._sessions.common import _model_options_recovery
+
+        assert _model_options_recovery[session_id].failures == 0
+        assert _model_options_recovery[session_id].next_eligible == 0.0
+        # A different harness must refresh even a successful cached catalog.
+        conv.labels[routes._CLAUDE_NATIVE_WRAPPER_LABEL_KEY] = (
+            routes._CURSOR_NATIVE_WRAPPER_LABEL_VALUE
+        )
+        await snapshot()
+        await finish_fetch()
+        assert calls == initial_calls + 2
+        routes._invalidate_runner_backed_snapshot_state(
+            session_id, cancel_inflight=True, drop_model_options=True
+        )
+
+
+@pytest.mark.asyncio
+async def test_model_options_timeout_recovers_within_readiness_ladder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from omnigent.server.routes._sessions import common, helpers, orchestration
+
+    session_id = "conv_catalog_timeout_recovers"
+    monkeypatch.setattr(_sessions_mod, "_MODEL_OPTIONS_RETRY_DELAYS_S", (0.0,))
+    monkeypatch.setattr(helpers, "time", SimpleNamespace(monotonic=lambda: 100.0))
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ReadTimeout("runner busy", request=request)
+        return httpx.Response(200, json={"models": [{"id": "ready-model"}]})
+
+    conv = Conversation(
+        id=session_id,
+        created_at=1,
+        updated_at=1,
+        root_conversation_id=session_id,
+        agent_id="ag_test",
+        labels={
+            _sessions_mod._CLAUDE_NATIVE_WRAPPER_LABEL_KEY: (
+                _sessions_mod._CODEX_NATIVE_WRAPPER_LABEL_VALUE
+            )
+        },
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://runner.invalid"
+    ) as client:
+        await orchestration._fetch_model_options(client, session_id, conv)
+        await common._model_options_inflight[session_id]
+        await asyncio.sleep(0)
+    assert calls == 2
+    assert [option["id"] for option in common._model_options_cache[session_id]] == ["ready-model"]
+    assert common._model_options_recovery[session_id].failures == 0
+    assert common._model_options_recovery[session_id].next_eligible == 0.0
+    helpers._invalidate_runner_backed_snapshot_state(
+        session_id, cancel_inflight=True, drop_model_options=True
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefetch", [False, True])
+async def test_catalog_rebind_and_invalidation_discard_late_results(
+    monkeypatch: pytest.MonkeyPatch,
+    recwarn: pytest.WarningsRecorder,
+    prefetch: bool,
+) -> None:
+    from omnigent.server.routes._sessions import common, helpers, orchestration
+
+    session_id = "conv_catalog_rebind"
+    monkeypatch.setattr(helpers, "time", SimpleNamespace(monotonic=lambda: 100.0))
+    conv = Conversation(
+        id=session_id,
+        created_at=1,
+        updated_at=1,
+        root_conversation_id=session_id,
+        agent_id="ag_test",
+        labels={
+            _sessions_mod._CLAUDE_NATIVE_WRAPPER_LABEL_KEY: (
+                _sessions_mod._CODEX_NATIVE_WRAPPER_LABEL_VALUE
+            )
+        },
+    )
+    entered = asyncio.Event()
+    late = asyncio.Event()
+
+    async def old_handler(request: httpx.Request) -> httpx.Response:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await late.wait()
+        return httpx.Response(200, json={"models": [{"id": "obsolete"}]})
+
+    async with (
+        httpx.AsyncClient(
+            transport=httpx.MockTransport(old_handler), base_url="http://runner.invalid"
+        ) as old,
+        httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(503)),
+            base_url="http://runner.invalid",
+        ) as new,
+    ):
+        monkeypatch.setattr(_sessions_mod, "_MODEL_OPTIONS_RETRY_DELAYS_S", ())
+        await orchestration._fetch_model_options(old, session_id, conv)
+        await entered.wait()
+        obsolete = common._model_options_inflight[session_id]
+        await orchestration._fetch_model_options(new, session_id, conv)
+        replacement = common._model_options_inflight[session_id]
+        assert replacement is not obsolete
+        late.set()
+        await obsolete
+        await replacement
+        await asyncio.sleep(0)
+        assert session_id not in common._model_options_cache
+        assert common._model_options_recovery[session_id].runner_client is new
+        assert common._model_options_recovery[session_id].failures == 1
+        conv.labels[_sessions_mod._CLAUDE_NATIVE_WRAPPER_LABEL_KEY] = (
+            _sessions_mod._CURSOR_NATIVE_WRAPPER_LABEL_VALUE
+        )
+        await orchestration._fetch_model_options(new, session_id, conv)
+        await common._model_options_inflight[session_id]
+        await asyncio.sleep(0)
+        assert common._model_options_recovery[session_id].endpoint == "cursor-model-options"
+        assert common._model_options_recovery[session_id].failures == 1
+        # Ordinary invalidation keeps eligibility; lifecycle invalidation clears it.
+        helpers._invalidate_runner_backed_snapshot_state(
+            session_id, cancel_inflight=False, drop_model_options=True
+        )
+        assert common._model_options_recovery[session_id].failures == 1
+        helpers._invalidate_runner_backed_snapshot_state(
+            session_id, cancel_inflight=True, drop_model_options=True
+        )
+        assert session_id not in common._model_options_recovery
+        cancelled = helpers._start_model_options_load(
+            new, session_id, "cursor-model-options", prefetch=prefetch
+        )
+        assert cancelled is not None
+        if prefetch:
+            helpers._invalidate_runner_backed_snapshot_state(
+                session_id, cancel_inflight=True, drop_model_options=True
+            )
+        else:
+            cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+        await asyncio.sleep(0)
+        assert session_id not in common._model_options_recovery
+        assert session_id not in common._model_options_inflight
+        assert not [warning for warning in recwarn if "was never awaited" in str(warning.message)]
+
+
+@pytest.mark.asyncio
+async def test_catalog_failure_eligibility_is_workspace_and_session_scoped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from omnigent.db.db_models import workspace_scope
+    from omnigent.server.routes._sessions import common, helpers, orchestration
+
+    monkeypatch.setattr(_sessions_mod, "_MODEL_OPTIONS_RETRY_DELAYS_S", ())
+    monkeypatch.setattr(helpers, "time", SimpleNamespace(monotonic=lambda: 100.0))
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(503)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://runner.invalid"
+    ) as client:
+        for workspace, session_id, expected_calls in (
+            (1, "conv_shared", 1),
+            (2, "conv_shared", 2),
+            (1, "conv_other", 3),
+            (1, "conv_shared", 3),
+        ):
+            with workspace_scope(workspace):
+                conv = Conversation(
+                    id=session_id,
+                    created_at=1,
+                    updated_at=1,
+                    root_conversation_id=session_id,
+                    agent_id="ag_test",
+                    labels={
+                        _sessions_mod._CLAUDE_NATIVE_WRAPPER_LABEL_KEY: (
+                            _sessions_mod._CODEX_NATIVE_WRAPPER_LABEL_VALUE
+                        )
+                    },
+                )
+                await orchestration._fetch_model_options(client, session_id, conv)
+                task = common._model_options_inflight.get(session_id)
+                if task is not None:
+                    await task
+                await asyncio.sleep(0)
+                assert calls == expected_calls
+        for workspace, session_id in ((1, "conv_shared"), (2, "conv_shared"), (1, "conv_other")):
+            with workspace_scope(workspace):
+                helpers._invalidate_runner_backed_snapshot_state(
+                    session_id, cancel_inflight=True, drop_model_options=True
+                )
 
 
 @pytest.mark.asyncio

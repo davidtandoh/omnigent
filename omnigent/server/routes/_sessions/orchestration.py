@@ -315,7 +315,6 @@ from omnigent.server.routes._sessions.helpers import (
     _latest_message_preview,
     _launch_runner_on_host,
     _load_agent_spec_for_session,
-    _load_model_options,
     _load_model_options_from_host,
     _mcp_error_response,
     _mcp_input_required_response,
@@ -381,6 +380,7 @@ from omnigent.server.routes._sessions.helpers import (
     _signal_terminal_resolved_harness_elicitation,
     _spec_harness,
     _stable_id_reuse_is_exact_retry,
+    _start_model_options_load,
     _stop_session_via_runner,
     _usage_by_model_for_display,
     _validate_session_workspace,
@@ -7632,21 +7632,10 @@ async def _refresh_stale_native_model_options(
     # a first message, and nothing named it in the logs. Time it, so the ladder
     # above can be sized against a measurement rather than a guess.
     started = time.monotonic()
-    inflight = _model_options_inflight.get(session_id)
+    endpoint = _MODEL_OPTIONS_ENDPOINT_BY_WRAPPER[_CLAUDE_NATIVE_WRAPPER_LABEL_VALUE]
+    inflight = _start_model_options_load(runner_client, session_id, endpoint)
     if inflight is None:
-        endpoint = _MODEL_OPTIONS_ENDPOINT_BY_WRAPPER[_CLAUDE_NATIVE_WRAPPER_LABEL_VALUE]
-        inflight = asyncio.create_task(
-            _load_model_options(
-                runner_client,
-                session_id,
-                f"/v1/sessions/{session_id}/model-options",
-                fallback_path=f"/v1/sessions/{session_id}/{endpoint}",
-            )
-        )
-        _model_options_inflight[session_id] = inflight
-        inflight.add_done_callback(
-            lambda _t, sid=session_id: _model_options_inflight.pop(sid, None)
-        )
+        return
     await _await_briefly(inflight)
     _logger.info(
         "smart_routing: session=%s stale catalog refresh waited %.3fs (still_stale=%s)",
@@ -14473,25 +14462,7 @@ async def _fetch_model_options(
 
             task.add_done_callback(_clear_host_options_inflight)
         return []
-    if cached is not None and session_id not in _model_options_stale:
-        return cached
-    if session_id not in _model_options_inflight:
-        # Unified route first; the harness-named route is the fallback for
-        # an older runner (deprecated aliases, removed in 0.11.0).
-        task = asyncio.create_task(
-            _load_model_options(
-                runner_client,
-                session_id,
-                f"/v1/sessions/{session_id}/model-options",
-                fallback_path=f"/v1/sessions/{session_id}/{endpoint}",
-            )
-        )
-        _model_options_inflight[session_id] = task
-
-        def _clear_runner_options_inflight(_task: asyncio.Task[None]) -> None:
-            _model_options_inflight.pop(session_id, None)
-
-        task.add_done_callback(_clear_runner_options_inflight)
+    _start_model_options_load(runner_client, session_id, endpoint)
     # A stale catalog serves while the re-fetch runs; success publishes
     # ``session.model_options`` so open clients re-read the snapshot.
     return cached or []
